@@ -1,0 +1,12 @@
+{
+  "id": "./",
+  "name": "Feed the Music Loop",
+  "short_name": "Music Loop",
+  "description": "Your voice. A whole world. Record loops and turn them into a song.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111719",
+  "theme_color": "#111719",
+  "icons": [{ "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

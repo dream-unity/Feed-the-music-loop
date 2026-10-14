@@ -1,0 +1,63 @@
+name: Audio and browser checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Test audio, storage and project logic
+        run: node --test tests/*.test.mjs
+      - name: Check and package static website
+        run: |
+          npm run check
+          npm run build
+      - name: Install pinned browser test tooling
+        run: npm install --no-save --ignore-scripts --package-lock=false @playwright/test@1.58.2
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Exercise the studio in a real browser
+        run: npx --no-install playwright test --config tests/playwright.config.mjs
+      - name: Create isolated HTTPS test certificate
+        run: openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes -keyout "$RUNNER_TEMP/fml-test.key" -out "$RUNNER_TEMP/fml-test.crt" -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+      - name: Verify packaged app and saved audio offline
+        run: npx --no-install playwright test --config tests/playwright.offline.config.mjs
+        env:
+          FML_TEST_KEY_PATH: ${{ runner.temp }}/fml-test.key
+          FML_TEST_CERT_PATH: ${{ runner.temp }}/fml-test.crt
+      - name: Upload browser report and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: browser-verification
+          path: |
+            playwright-report/
+            offline-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload studio screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: studio-screenshots
+          path: test-results/**/review-*.png
+          if-no-files-found: ignore
+          retention-days: 14

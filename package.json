@@ -1,0 +1,13 @@
+{
+  "name": "feed-the-music-loop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-first vocal looper and recording studio for GitHub Pages",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs",
+    "build": "node scripts/package.mjs"
+  },
+  "engines": { "node": ">=22" }
+}

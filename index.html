@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111719">
+    <meta name="description" content="Turn your voice into a song. Layer vocal loops, sing over your groove, shape your sound and keep every take. A private, local-first recording studio in your browser.">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; manifest-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'">
+    <title>Feed the Music Loop — Your voice. A whole world.</title>
+    <link rel="icon" type="image/svg+xml" href="./icon.svg">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to studio</a>
+    <div id="app">
+      <div class="boot-screen" role="status"><span class="boot-mark" aria-hidden="true">∞</span><h1>Feed the Music Loop</h1><p>Opening your studio…</p><p class="boot-help">If the studio stays here, <a href="./">reload the page</a> with an internet connection. Use a current browser with microphone access.</p></div>
+    </div>
+    <noscript><div class="noscript"><h1>Your voice needs JavaScript.</h1><p>This studio uses your browser’s audio engine to record and play loops. Enable JavaScript, then reload this page.</p></div></noscript>
+    <script type="module" src="./src/main.mjs"></script>
+  </body>
+</html>

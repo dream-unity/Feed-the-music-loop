@@ -1,0 +1,264 @@
+import { MAX_FALLBACK_FILE_BYTES, crc32, storageError } from './core.mjs';
+
+const DB_NAME = 'feed-the-music-loop-v1';
+const DIRECTORY_NAME = 'feed-the-music-loop-v1';
+const request = (req) => new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+function completion(tx) {
+  const promise = new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onabort = () => reject(tx.error || storageError('TRANSACTION_ABORTED', 'Audio storage transaction was interrupted.'));
+    tx.onerror = () => {}; // Abort delivers the final transaction result.
+  });
+  // A request may reject before the caller reaches `await promise`.
+  promise.catch(() => {});
+  return promise;
+}
+function transaction(db, names, mode = 'readonly') {
+  if (mode === 'readwrite') {
+    try { return db.transaction(names, mode, { durability: 'strict' }); } catch {}
+  }
+  return db.transaction(names, mode);
+}
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore('projects', { keyPath: 'id' });
+      const assets = db.createObjectStore('assets', { keyPath: 'id' });
+      assets.createIndex('projectId', 'projectId', { unique: false });
+      const pages = db.createObjectStore('pages', { keyPath: ['assetId', 'index'] });
+      pages.createIndex('assetId', 'assetId', { unique: false });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(storageError('STORAGE_BLOCKED', 'Close older Feed the Music Loop tabs and try again.'));
+  });
+}
+
+export class BrowserBackend {
+  constructor() { this.backend = 'indexeddb'; this.db = null; this.directory = null; this.handles = new Map(); this.projectLocks = new Map(); this.disposed = false; }
+  async init() {
+    this.db = await openDatabase();
+    this.db.onversionchange = () => this.db.close();
+    // Probe the actual worker-only sync handle, rather than assuming API support.
+    try {
+      const root = await navigator.storage.getDirectory();
+      this.directory = await root.getDirectoryHandle(DIRECTORY_NAME, { create: true });
+      const probe = await this.directory.getFileHandle(`probe-${crypto.randomUUID()}`, { create: true });
+      const handle = await probe.createSyncAccessHandle();
+      handle.flush(); handle.close();
+      await this.directory.removeEntry(probe.name);
+      this.backend = 'opfs';
+    } catch { this.backend = 'indexeddb'; }
+    return { backend: this.backend, ...(await this.estimate()), persistenceSupported: Boolean(navigator.storage?.persist), locking: Boolean(navigator.locks) };
+  }
+  async estimate() {
+    const estimate = await navigator.storage?.estimate?.() || {};
+    return { usage: estimate.usage ?? null, quota: estimate.quota ?? null, persistent: await navigator.storage?.persisted?.() || false };
+  }
+  async lockProject(projectId) {
+    if (!navigator.locks) return; // The UI exposes this capability limitation.
+    if (this.projectLocks.has(projectId)) return this.projectLocks.get(projectId).ready;
+    let readyResolve, readyReject, release;
+    const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+    const held = new Promise((resolve) => { release = resolve; });
+    const entry = { ready, release };
+    this.projectLocks.set(projectId, entry);
+    navigator.locks.request(`feed-the-music-loop:project:${projectId}`, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
+      if (!lock) {
+        this.projectLocks.delete(projectId);
+        readyReject(storageError('PROJECT_BUSY', 'This project is already open for editing in another tab. Close that tab before recording here.'));
+        return;
+      }
+      readyResolve();
+      await held;
+    }).catch((error) => { this.projectLocks.delete(projectId); readyReject(error); });
+    return ready;
+  }
+  async get(store, key) {
+    const tx = transaction(this.db, store), done = completion(tx);
+    const value = await request(tx.objectStore(store).get(key));
+    await done; return value;
+  }
+  async all(store, index, key) {
+    const tx = transaction(this.db, store), done = completion(tx);
+    const source = index ? tx.objectStore(store).index(index) : tx.objectStore(store);
+    const values = await request(source.getAll(key));
+    await done; return values;
+  }
+  async put(store, value) {
+    const tx = transaction(this.db, store, 'readwrite'), done = completion(tx);
+    await request(tx.objectStore(store).put(value)); await done;
+  }
+  async getAsset(id) { return this.get('assets', id); }
+  async getPage(id, index) { return this.get('pages', [id, index]); }
+  async listPages(id) {
+    // getAll would materialize every fallback PCM page at once. A cursor keeps
+    // recovery bounded to one binary page plus its small metadata register.
+    const tx = transaction(this.db, 'pages'), done = completion(tx), pages = [];
+    await new Promise((resolve, reject) => {
+      const req = tx.objectStore('pages').index('assetId').openCursor(IDBKeyRange.only(id));
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) { resolve(); return; }
+        const { buffer, ...metadata } = cursor.value;
+        pages.push(metadata); cursor.continue();
+      };
+    });
+    await done; return pages.sort((a, b) => a.index - b.index);
+  }
+  async listAssets(projectId) { return this.all('assets', 'projectId', projectId); }
+  async listProjects() {
+    const timestamp = (value) => typeof value === 'number' && Number.isFinite(value) ? value : Date.parse(value) || 0;
+    return (await this.all('projects')).filter((p) => !p.deletedAt).sort((a, b) => timestamp(b.updatedAt) - timestamp(a.updatedAt));
+  }
+  async loadProject(id) { return this.get('projects', id); }
+  async saveProject(project) {
+    await this.lockProject(project.id);
+    await this.put('projects', structuredClone(project));
+    return { id: project.id, updatedAt: project.updatedAt, saved: true };
+  }
+  async deleteProject(id) {
+    await this.lockProject(id);
+    const project = await this.loadProject(id);
+    if (project) await this.put('projects', { ...project, deletedAt: Date.now() });
+    return { id, deleted: true, audioRetained: true };
+  }
+  async createAsset(asset) {
+    await this.lockProject(asset.projectId);
+    if (asset.backend === 'opfs') {
+      const handle = await this.openHandle(asset);
+      handle.truncate(0); handle.flush();
+    }
+    const tx = transaction(this.db, 'assets', 'readwrite'), done = completion(tx);
+    try { await request(tx.objectStore('assets').add(asset)); await done; }
+    catch (error) { this.closeHandle(asset.id); throw error; }
+  }
+  async openHandle(asset) {
+    if (this.handles.has(asset.id)) return this.handles.get(asset.id);
+    if (!this.directory) throw storageError('OPFS_UNAVAILABLE', 'The browser cannot currently open this recording’s file storage. Try reopening it in the browser where it was recorded.');
+    if (this.handles.size >= 24) this.closeHandle(this.handles.keys().next().value);
+    const file = await this.directory.getFileHandle(`${asset.id}.pcm`, { create: asset.status === 'recording' });
+    const handle = await file.createSyncAccessHandle();
+    this.handles.set(asset.id, handle); return handle;
+  }
+  closeHandle(id) {
+    const handle = this.handles.get(id);
+    if (handle) { try { handle.close(); } finally { this.handles.delete(id); } }
+  }
+  async writeData(asset, page, buffer) {
+    if (asset.backend !== 'opfs') return;
+    const handle = await this.openHandle(asset);
+    const bytes = new Uint8Array(buffer, 0, page.byteLength);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const written = handle.write(bytes.subarray(offset), { at: page.offset + offset });
+      if (!written) throw storageError('SHORT_WRITE', 'The browser could not write the full audio page.');
+      offset += written;
+    }
+  }
+  async flush(asset) {
+    if (asset.backend === 'opfs') {
+      const handle = this.handles.get(asset.id);
+      if (handle) handle.flush();
+    }
+  }
+  async commitPage(asset, page, buffer) {
+    const record = asset.backend === 'indexeddb' ? { ...page, buffer: buffer.slice(0, page.byteLength) } : page;
+    const tx = transaction(this.db, ['assets', 'pages'], 'readwrite'), done = completion(tx);
+    tx.objectStore('pages').put(record);
+    tx.objectStore('assets').put(asset);
+    await done;
+  }
+  async finishAsset(asset) {
+    await this.put('assets', asset);
+    this.closeHandle(asset.id);
+  }
+  async recoverAsset(asset) { await this.put('assets', asset); this.closeHandle(asset.id); }
+  async readData(asset, page) {
+    if (asset.backend === 'indexeddb') {
+      const stored = page.buffer ? page : await this.getPage(asset.id, page.index);
+      if (!(stored?.buffer instanceof ArrayBuffer)) throw storageError('MISSING_PAGE', 'A stored audio page is missing.');
+      return stored.buffer.slice(0);
+    }
+    let handle;
+    try { handle = await this.openHandle(asset); }
+    catch (error) {
+      // Another tab may hold an exclusive sync handle while playing this
+      // immutable file. A bounded File snapshot lets read-only playback work
+      // without acquiring or modifying that tab's writer lock.
+      if (asset.status === 'recording' || !['NoModificationAllowedError', 'InvalidStateError'].includes(error.name)) throw error;
+      const fileHandle = await this.directory.getFileHandle(`${asset.id}.pcm`);
+      const file = await fileHandle.getFile();
+      return file.slice(page.offset, page.offset + page.byteLength).arrayBuffer();
+    }
+    const buffer = new ArrayBuffer(page.byteLength);
+    const bytes = new Uint8Array(buffer);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const read = handle.read(bytes.subarray(offset), { at: page.offset + offset });
+      if (!read) return buffer.slice(0, offset);
+      offset += read;
+    }
+    return buffer;
+  }
+  async getAssetFile(asset) {
+    if (asset.status === 'recording') throw storageError('RECORDING_ACTIVE', 'Finish this recording before exporting it.');
+    if (asset.backend === 'opfs') {
+      this.closeHandle(asset.id);
+      const file = await this.directory.getFileHandle(`${asset.id}.pcm`);
+      const blob = await file.getFile();
+      if (blob.size < asset.byteLength) throw storageError('SHORT_FILE', 'The stored audio file is incomplete. Recover this project before exporting.');
+      return blob.slice(0, asset.byteLength, 'application/octet-stream');
+    }
+    if (asset.byteLength > MAX_FALLBACK_FILE_BYTES) throw storageError('FALLBACK_EXPORT_LIMIT', 'This browser uses fallback storage. A single audio export is limited to 128 MiB here; use a shorter recording or an OPFS-capable browser for longer sessions.');
+    const parts = [];
+    for (let index = 0; index < asset.pageCount; index++) {
+      const page = await this.getPage(asset.id, index);
+      if (!page?.buffer) throw storageError('MISSING_PAGE', 'A stored audio page is missing. Recover this project before exporting.');
+      if (page.buffer.byteLength !== page.byteLength || crc32(new Uint8Array(page.buffer)) !== page.crc32) throw storageError('CORRUPT_PAGE', 'A stored audio page failed its integrity check. The recording has been retained for recovery.');
+      parts.push(page.buffer);
+    }
+    return new Blob(parts, { type: 'application/octet-stream' });
+  }
+  async inspectAssetSize(asset) {
+    if (asset.backend !== 'opfs') return { available: true, byteLength: asset.byteLength, metadataOnly: true };
+    if (!this.directory) throw storageError('OPFS_UNAVAILABLE', 'The browser cannot currently open this recording’s file storage.');
+    try {
+      const fileHandle = await this.directory.getFileHandle(`${asset.id}.pcm`);
+      const file = await fileHandle.getFile();
+      return { available: true, byteLength: file.size };
+    } catch (error) {
+      if (error.name === 'NotFoundError') return { available: false, byteLength: 0 };
+      throw error;
+    }
+  }
+  async deleteAsset(id) {
+    const asset = await this.getAsset(id);
+    if (!asset) return { id, deleted: true };
+    await this.lockProject(asset.projectId);
+    // This API is intentionally explicit; deleting a project never calls it.
+    this.closeHandle(id);
+    const tx = transaction(this.db, ['assets', 'pages'], 'readwrite'), done = completion(tx);
+    tx.objectStore('assets').delete(id);
+    tx.objectStore('pages').delete(IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]));
+    await done;
+    if (asset.backend === 'opfs' && this.directory) {
+      try { await this.directory.removeEntry(`${id}.pcm`); } catch (error) { if (error.name !== 'NotFoundError') throw error; }
+    }
+    return { id, deleted: true };
+  }
+  async releaseProject(projectId) {
+    const entry = this.projectLocks.get(projectId);
+    if (entry) { await entry.ready; entry.release(); this.projectLocks.delete(projectId); }
+    return { projectId, released: true };
+  }
+  async dispose() {
+    this.disposed = true;
+    for (const id of [...this.handles.keys()]) this.closeHandle(id);
+    for (const entry of this.projectLocks.values()) entry.release();
+    this.projectLocks.clear(); this.db?.close();
+  }
+}
