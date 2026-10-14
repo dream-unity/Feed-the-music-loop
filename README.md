@@ -10,11 +10,13 @@ A vocal looper and song studio that runs entirely in your browser. Record a beat
 2. Choose **Add loop**. Allow microphone access, perform your first beat, then finish the loop. Its length becomes your song's base cycle.
 3. Add another loop. Choose a cycle length to keep layers aligned, or an independent length for evolving patterns. Your existing layers keep playing.
 4. Choose **Sing over loops** and sing for as long as you need. Finish when you are done. The studio keeps the separate vocal and a stereo recording of the complete performance.
-5. Open **Mix** to adjust level, pan, low/mid/high EQ, low cut, compression, room reverb and echo. Try the Beat, Bass, Harmony, Lead and Texture starting points, then fine-tune them.
+5. Open **Mix** to adjust level, pan, low/mid/high EQ, low cut, compression, room reverb and echo. Try the Beatbox, Bass, Harmony, Lead and Atmosphere starting points, then fine-tune them.
 6. Save sections such as an intro and chorus, and launch them at cycle boundaries while performing. Use the Song view to audition takes, export the original performance, or render an edited mix.
 7. Download a **project backup** regularly. It contains your project and original audio and can be restored on another supported browser or device.
 
 The built-in demo creates a few synthetic layers locally, so you can try the studio without granting microphone access.
+
+The [recording guide](docs/recording-guide.md) walks through timing, clean input, sections, mixing and choosing the right export. [Verification notes](docs/verification.md) describe the automated checks and a short test for your own microphone and headphones.
 
 ## What is included
 
@@ -115,6 +117,8 @@ Core modules:
 | `src/project.mjs` | Validated project model, sections and history |
 | `src/controller.mjs` | Recording, project and UI integration |
 | `src/ui/` | Responsive studio interface |
+
+The [audio architecture notes](docs/audio-architecture.md) explain the engine clock, capture lifecycle and invariants to preserve when changing the studio.
 
 The archive layout and validation rules are documented in [`src/export/FORMAT.md`](src/export/FORMAT.md).
 
