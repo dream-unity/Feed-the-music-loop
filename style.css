@@ -1035,7 +1035,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .studio-version { display: block; margin-top: 6px; font-size: 10px; color: var(--muted); font-style: normal; }
 
 /* A distinct capture action alongside Add loop and Sing over loops. */
-.dock-actions > .loop-record-button { background: #ccbcfa; color: #252330; border-color: #ccbcfa; }
+.dock-actions > .loop-record-button { background: #ccbcfa; color: #252330; border-color: #ccbcfa; white-space: normal; }
 @media (max-width: 640px) {
   .dock-actions { flex-wrap: wrap; }
   .dock-actions > .loop-record-button { flex: 1 0 100%; font-size: 12px; }

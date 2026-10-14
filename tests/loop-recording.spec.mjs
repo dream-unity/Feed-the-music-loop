@@ -112,6 +112,7 @@ test('loop-only recording includes every unmuted loop despite Solo, excludes mut
   await page.waitForTimeout(1000);
   await page.getByTestId('finish').click();
   await captureState(page, 'idle');
+  await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
   await playing(page, true);
   const recent = page.locator('[data-ref="recent-recording"]');
   await expect(recent).toContainText('Loop recording 1');
@@ -134,7 +135,6 @@ test('loop-only recording includes every unmuted loop despite Solo, excludes mut
   await playing(page, false);
   await screenshot(page, testInfo, 'loop-only-finished-desktop');
   await page.getByTestId('stop').click();
-  await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
   expect(await page.evaluate(() => window.__loopRecordingMicRequests)).toBe(0);
   await page.reload();
   await expect(recent).toContainText('Loop recording 1');
@@ -167,6 +167,15 @@ test('live loop capture follows mute changes, allows Cancel and Stop, and keeps 
   await expect(tracks(page)).toHaveCount(3);
   const record = page.getByTestId('record-all-loops');
   await expect(record).toBeEnabled();
+  for (const width of [680, 768]) {
+    await page.setViewportSize({ width, height: 800 });
+    for (const name of ['play', 'stop', 'add-loop', 'sing', 'record-all-loops']) {
+      const control = await page.getByTestId(name).boundingBox();
+      expect(control.x).toBeGreaterThanOrEqual(0);
+      expect(control.x + control.width).toBeLessThanOrEqual(width);
+      expect(control.y + control.height).toBeLessThanOrEqual(800);
+    }
+  }
   await page.setViewportSize({ width: 360, height: 800 });
   const bounds = await record.boundingBox();
   expect(bounds.x).toBeGreaterThanOrEqual(0);
