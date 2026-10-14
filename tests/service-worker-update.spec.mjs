@@ -113,7 +113,7 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
   try {
     await page.goto(APP);
     await expect(page.getByTestId('add-loop')).toBeEnabled();
-    expect(await page.evaluate(async () => (await navigator.serviceWorker.ready).active?.state)).toBe('activated');
+    await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.ready).active?.state)).toBe('activated');
     await page.reload();
     await expect(page.getByTestId('add-loop')).toBeEnabled();
     await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller?.state)).toBe('activated');
