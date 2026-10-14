@@ -73,7 +73,7 @@ async function playSavedLoop(page) {
 async function originalRecording(page) {
   await page.locator('[data-action="view"][data-view="mix"]').click();
   const event = page.waitForEvent('download');
-  await page.locator('[data-action="export-track"]:visible').click();
+  await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
   const download = await event;
   expect(await download.failure()).toBeNull();
   const bytes = await readFile(await download.path());
