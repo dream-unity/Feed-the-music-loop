@@ -174,6 +174,7 @@ test('live microphone history follows input and finished recordings stay beneath
   await page.waitForTimeout(200);
   await expect(peak).toHaveAttribute('d', frozenPath);
   await playing(page, true);
+  await expect(page.locator('[data-ref="dock-label"]')).toHaveText('Your world is playing.');
   await expect(page.locator('#performance-player')).toBeHidden();
   await screenshot(page, testInfo, 'finished-performance-build');
   await recent.getByRole('button', { name: 'Listen to Performance 1', exact: true }).click();

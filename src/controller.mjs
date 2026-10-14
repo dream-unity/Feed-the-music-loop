@@ -491,7 +491,8 @@ export class StudioController {
       if (this.pending === p) this.pending = null; this.state.capture = null; this.state.busy = false;
       const interrupted = needsRecovery || p.interrupted || p.arrangementIncomplete || raw.status !== 'complete' || (master && (master.status !== 'complete' || master.frames !== raw.frames)) || p.hadUnderrun;
       this.state.status = needsRecovery ? 'Audio retained · recovery required' : cancelled ? 'Recording cancelled · backing continues' : interrupted ? 'Interrupted recording retained' : 'Saved on this device';
-      this.ui.notify(needsRecovery ? 'Your checkpointed audio is retained. Use Recover in the Song view, or reopen this project, before previewing or exporting it.' : cancelled ? 'Recording cancelled.' : interrupted ? 'The saved portion was retained. Review the interrupted recording before exporting.' : p.kind === 'vocal' ? 'Vocal take and stereo performance saved. Your loops keep playing.' : 'Loop saved. Keep building your song.', cancelled || interrupted ? 'info' : 'success');
+      // The persistent saved card confirms success without covering its Listen button.
+      if (!completedRecording || cancelled || interrupted || needsRecovery) this.ui.notify(needsRecovery ? 'Your checkpointed audio is retained. Use Recover in the Song view, or reopen this project, before previewing or exporting it.' : cancelled ? 'Recording cancelled.' : interrupted ? 'The saved portion was retained. Review the interrupted recording before exporting.' : p.kind === 'vocal' ? 'Vocal take and stereo performance saved. Your loops keep playing.' : 'Loop saved. Keep building your song.', cancelled || interrupted ? 'info' : 'success');
     } catch (error) {
       if (this.state.storageFailed || this.state.project !== project || this.pending !== p) return;
       if (p.end.status === 'cancelled' && originalIntent && !project.pendingCapture) project.pendingCapture = originalIntent;

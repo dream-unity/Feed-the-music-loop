@@ -431,7 +431,7 @@ export class StudioUI extends EventTarget {
     this.refs['preview-kind'].textContent=preparing?'PREPARING AUDIO':'LISTEN BACK';
     this.refs['preview-loading'].hidden=!preparing;audio.hidden=!!preparing;
     this.refs['preview-name'].textContent=preparing?.name||preview?.name||'Your performance';
-    if(!preview?.url){if(audio.hasAttribute('src')){audio.pause();audio.removeAttribute('src');audio.load();}return;}
+    if(!preview?.url){this.previewPlaying=false;if(audio.hasAttribute('src')){audio.pause();audio.removeAttribute('src');audio.load();}return;}
     if(audio.getAttribute('src')!==preview.url){audio.src=preview.url;audio.load();panel.scrollIntoView({block:'nearest'});}
   }
 
