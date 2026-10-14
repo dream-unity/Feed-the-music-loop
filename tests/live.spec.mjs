@@ -124,7 +124,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Connect microphone');
     await page.locator('[data-action="view"][data-view="mix"]').click();
     const downloading = page.waitForEvent('download');
-    await page.locator('[data-action="export-track"]:visible').click();
+    await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
     const file = await downloading;
     expect(await file.failure()).toBeNull();
     expect(file.suggestedFilename()).toMatch(/\.wav$/i);
