@@ -129,20 +129,55 @@ test('record loops, a continuous vocal, another take, and recover after reload',
 
   await page.getByTestId('sing').click();
   await state(page, 'recording');
-  await page.waitForTimeout(1600);
+  const waitForRecordedSeconds = seconds => expect.poll(async () => {
+    const [minutes, remainder] = (await page.locator('[data-ref="capture-time"]').textContent()).split(':').map(Number);
+    return minutes * 60 + remainder;
+  }, { timeout: 20_000 }).toBeGreaterThanOrEqual(seconds);
+  // More than 35 PCM pages per stream exhausts the initial 24-buffer pool;
+  // the real worklet/worker transfer-and-recycle path must keep recording.
+  await waitForRecordedSeconds(2);
+  await view(page, 'build');
+  const firstMute = tracks(page).first().locator('[data-action="mute"]');
+  await firstMute.click();
+  await expect(firstMute).toHaveAttribute('aria-pressed', 'true');
+  await waitForRecordedSeconds(4);
+  await firstMute.click();
+  await expect(firstMute).toHaveAttribute('aria-pressed', 'false');
+  const layerVolume = tracks(page).first().getByRole('slider');
+  const volumeBefore = Number(await layerVolume.inputValue());
+  await layerVolume.focus();
+  await layerVolume.press('ArrowLeft');
+  await layerVolume.press('ArrowLeft');
+  await layerVolume.press('ArrowLeft');
+  expect(Number(await layerVolume.inputValue())).toBeLessThan(volumeBefore);
+  await waitForRecordedSeconds(12);
+  await playing(page, true);
+  await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
   await page.getByTestId('finish').click();
   await state(page, 'idle');
   await playing(page, true);
   await view(page, 'song');
   await expect(takes(page)).toHaveCount(1);
   await expect(page.locator('.performance-card')).toHaveCount(1);
+  const longTakeId = await takes(page).first().getAttribute('data-take-id');
+  const longPerformanceId = await action(page, 'export-master').getAttribute('data-performance-id');
 
   const master = await download(page, () => action(page, 'export-master').click());
   expect(master.filename).toMatch(/\.wav$/i);
   const masterAudio = inspectWav(master.bytes);
   expect(masterAudio.channels).toBe(2);
-  expect(masterAudio.frames / masterAudio.sampleRate).toBeGreaterThan(1);
+  expect(masterAudio.frames / masterAudio.sampleRate).toBeGreaterThanOrEqual(12);
+  expect(Math.floor(masterAudio.frames / 16_384)).toBeGreaterThanOrEqual(35);
   expect(masterAudio.peak).toBeGreaterThan(0.005);
+  await takes(page).first().locator('[data-action="select-track"]').click();
+  const longRaw = await download(page, () => action(page, 'export-track').click());
+  const rawAudio = inspectWav(longRaw.bytes);
+  expect(rawAudio.channels).toBe(1);
+  expect(rawAudio.frames).toBe(masterAudio.frames);
+  expect(rawAudio.sampleRate).toBe(masterAudio.sampleRate);
+  expect(rawAudio.peak).toBeGreaterThan(0.005);
+  await testInfo.attach('recycled-pcm-streams', { body: JSON.stringify({ raw: rawAudio, master: masterAudio, fullPagesPerStream: Math.floor(masterAudio.frames / 16_384) }, null, 2), contentType: 'application/json' });
+  await view(page, 'song');
 
   await page.getByTestId('sing').click();
   await state(page, 'recording');
@@ -182,8 +217,27 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await view(page, 'song');
   await expect(takes(page)).toHaveCount(2);
   await expect(page.locator('.performance-card')).toHaveCount(2);
-  const reopenedMaster = await download(page, () => action(page, 'export-master').click());
+  const reopenedMaster = await download(page, () => page.locator(`[data-action="export-master"][data-performance-id="${longPerformanceId}"]`).click());
   expect(inspectWav(reopenedMaster.bytes).peak).toBeGreaterThan(0.005);
+  expect(reopenedMaster.bytes).toEqual(master.bytes);
+  await page.locator(`.take-card[data-take-id="${longTakeId}"] [data-action="select-track"]`).click();
+  const reopenedRaw = await download(page, () => action(page, 'export-track').click());
+  expect(reopenedRaw.bytes).toEqual(longRaw.bytes);
+  await view(page, 'song');
+  // Byte-correct WAV export alone does not prove native media playback. Use
+  // the actual saved-performance preview and its HTMLAudioElement clock.
+  await page.locator(`[data-action="preview-performance"][data-performance-id="${longPerformanceId}"]`).click();
+  const player = page.locator('#performance-player');
+  await expect(player).toBeVisible();
+  await expect.poll(() => player.evaluate(audio => audio.currentTime)).toBeGreaterThan(0.3);
+  const preview = await player.evaluate(audio => ({ currentTime: audio.currentTime, duration: audio.duration, readyState: audio.readyState, error: audio.error?.message || null }));
+  expect(preview.error).toBeNull();
+  expect(preview.readyState).toBeGreaterThanOrEqual(2);
+  const reopenedAudio = inspectWav(reopenedMaster.bytes);
+  expect(preview.duration).toBeCloseTo(reopenedAudio.frames / reopenedAudio.sampleRate, 2);
+  await testInfo.attach('native-performance-preview', { body: JSON.stringify(preview, null, 2), contentType: 'application/json' });
+  await page.getByTestId('stop').click();
+  expect(await player.evaluate(audio => audio.paused)).toBe(true);
 });
 
 test('demo, mix controls, sections, portable backup and invalid-import preservation', async ({ page }, testInfo) => {
@@ -296,6 +350,70 @@ test('a saved edited mix can be deleted without its source loops or backup audio
   await playing(page, true);
   await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
   await reviewScreenshot(page, testInfo, 'source-loops-after-saved-mix-deletion');
+});
+
+test('cancel discards persisted loop and vocal capture pages while preserving the original recording', async ({ page }, testInfo) => {
+  await boot(page);
+  await recordFirstLoop(page);
+  await action(page, 'projects').click();
+  const dialog = page.getByRole('dialog');
+  const projectId = await dialog.locator('.project-row.is-current').getAttribute('data-id');
+  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await view(page, 'mix');
+  const originalWav = await download(page, () => action(page, 'export-track').click());
+  await view(page, 'build');
+  await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('0');
+
+  const initialAssets = await page.evaluate(async id => {
+    const { StorageClient } = await import('./src/storage/client.mjs');
+    const reader = new StorageClient();
+    await reader.init();
+    window.__testStorageInspector = reader;
+    return (await reader.listAssets(id)).map(asset => ({ id: asset.id, frames: asset.frames, status: asset.status }));
+  }, projectId);
+  expect(initialAssets).toHaveLength(1);
+  const originalId = initialAssets[0].id;
+  const inspect = () => page.evaluate(async id => (await window.__testStorageInspector.listAssets(id)).map(asset => ({
+    id: asset.id, frames: asset.frames, checkpointFrames: asset.checkpointFrames, status: asset.status,
+  })), projectId);
+  const persistedCaptures = [];
+  try {
+    for (const [button, count] of [['add-loop', 1], ['sing', 2]]) {
+      await page.getByTestId(button).click();
+      await state(page, 'recording');
+      // Prove cancellation happens after real PCM reaches durable storage.
+      // A UI-only cancellation before the first page would miss leaked audio.
+      await expect.poll(async () => {
+        const captures = (await inspect()).filter(asset => asset.id !== originalId);
+        return captures.length === count && captures.every(asset => asset.checkpointFrames >= 16_384);
+      }).toBe(true);
+      persistedCaptures.push((await inspect()).filter(asset => asset.id !== originalId));
+      await page.getByTestId('cancel').click();
+      await state(page, 'idle');
+      await expect(page.getByTestId('add-loop')).toBeEnabled();
+      await expect.poll(async () => (await inspect()).map(asset => asset.id)).toEqual([originalId]);
+      await expect(tracks(page)).toHaveCount(1);
+      await expect(takes(page)).toHaveCount(0);
+      await expect(page.locator('.performance-card')).toHaveCount(0);
+      await expect(page.locator('.recovery-card')).toHaveCount(0);
+    }
+    await testInfo.attach('cancelled-persisted-captures', { body: JSON.stringify({ initialAssets, persistedCaptures, remainingAssets: await inspect() }, null, 2), contentType: 'application/json' });
+  } finally {
+    await page.evaluate(async () => { await window.__testStorageInspector?.dispose(); delete window.__testStorageInspector; });
+  }
+  await page.getByTestId('stop').click();
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect(tracks(page)).toHaveCount(1);
+  await expect(takes(page)).toHaveCount(0);
+  await expect(page.locator('.performance-card')).toHaveCount(0);
+  await expect(page.locator('.recovery-card')).toHaveCount(0);
+  await page.getByTestId('play').click();
+  await playing(page, true);
+  await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
+  await view(page, 'mix');
+  const reopenedWav = await download(page, () => action(page, 'export-track').click());
+  expect(reopenedWav.bytes).toEqual(originalWav.bytes);
 });
 
 test('stop while microphone permission is pending cancels the late stream', async ({ page }) => {

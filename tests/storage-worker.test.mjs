@@ -20,6 +20,8 @@ async function fixture() {
     async getPage(id, index) { return structuredClone(this.pages.get(`${id}:${index}`)); }
     async readData(asset, page) { return this.pages.get(`${asset.id}:${page.index}`).buffer.slice(0); }
     async finishAsset(asset) { if (this.failSeal) throw Object.assign(new Error('Disk full'), { name: 'QuotaExceededError' }); this.assets.set(asset.id, structuredClone(asset)); }
+    async getAssetRange(asset, range) { this.rangeRequest = { id: asset.id, ...range }; return new Blob([new Uint8Array([1, 2, 3, 4])]); }
+    async deleteAsset(id) { if (this.failDelete) throw new Error('Deletion failed'); this.assets.delete(id); for (const key of this.pages.keys()) if (key.startsWith(`${id}:`)) this.pages.delete(key); return { id, deleted: true }; }
     closeHandle() {}
     async releaseProject() { this.released = true; }
   }
@@ -95,4 +97,45 @@ test('queued old-project reads cannot reopen a file after releaseProject', async
   assert.equal(readsAfterRelease, 0);
   assert.ok(port.messages.some(message => message.type === 'page-missing' && message.retryable === false));
   await assert.rejects(rpc('readPage', ['asset-1', 0]), { code: 'PROJECT_RELEASED' });
+});
+
+test('worker routes immutable bounded range requests without transferring the Blob buffer', async () => {
+  const { rpc, backend } = await fixture();
+  const blob = await rpc('getAssetRange', ['asset-1', { startFrame: 13, frames: 25 }]);
+  assert.deepEqual(backend.rangeRequest, { id: 'asset-1', startFrame: 13, frames: 25 });
+  assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [1, 2, 3, 4]);
+});
+
+test('intentional deletion turns queued and late worklet reads into terminal misses', async () => {
+  const { send, port, rpc, backend, messages } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array(17).buffer, 17, 1]); await rpc('finishAsset', ['asset-1', { frames: 17 }]);
+  let unblock; const gate = new Promise(resolve => { unblock = resolve; }); const read = backend.readData.bind(backend); let calls = 0;
+  backend.readData = async (...args) => { if (++calls === 1) await gate; return read(...args); };
+  for (let i = 0; i < 6; i++) send({ type: 'read', assetId: 'asset-1', index: 0 });
+  const deleting = rpc('deleteAsset', ['asset-1']); unblock(); await deleting;
+  await until(() => port.messages.filter(message => ['page', 'page-missing'].includes(message.type)).length === 6);
+  assert.ok(port.messages.some(message => message.type === 'page-missing' && message.retryable === false));
+  send({ type: 'read', assetId: 'asset-1', index: 0 });
+  await until(() => port.messages.filter(message => ['page', 'page-missing'].includes(message.type)).length === 7);
+  assert.equal(port.messages.at(-1).type, 'page-missing'); assert.equal(port.messages.some(message => message.type === 'storage-error'), false);
+  assert.equal(messages.some(message => message.type === 'event' && message.event === 'error'), false);
+  await assert.rejects(rpc('readPage', ['asset-1', 0]), { code: 'ASSET_DELETED' });
+});
+
+test('failed deletion does not fence surviving audio and unexpected missing audio remains an error', async () => {
+  const { send, port, rpc, backend } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array(17).buffer, 17, 1]); await rpc('finishAsset', ['asset-1', { frames: 17 }]);
+  backend.failDelete = true; await assert.rejects(rpc('deleteAsset', ['asset-1']), /Deletion failed/);
+  send({ type: 'read', assetId: 'asset-1', index: 0 }); await until(() => port.messages.some(message => message.type === 'page'));
+  assert.equal((await rpc('readPage', ['asset-1', 0])).frames, 17);
+  send({ type: 'read', assetId: 'unexpected-missing', index: 0 }); await until(() => port.messages.some(message => message.type === 'storage-error'));
+  assert.equal(port.messages.find(message => message.type === 'storage-error').code, 'ASSET_NOT_FOUND');
+});
+
+test('successful intentional ID reuse clears the recent deletion fence', async () => {
+  const { rpc } = await fixture();
+  await rpc('finishAsset', ['asset-1', { frames: 0, status: 'cancelled' }]); await rpc('deleteAsset', ['asset-1']);
+  await rpc('beginAsset', [{ id: 'asset-1', projectId: 'project-1', sampleRate: 48000, channels: 1, kind: 'loop' }]);
+  await rpc('putPage', ['asset-1', 0, new Float32Array([0.25]).buffer, 1, 1]);
+  assert.equal(new Float32Array((await rpc('readPage', ['asset-1', 0])).buffer)[0], .25);
 });

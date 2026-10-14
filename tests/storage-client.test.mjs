@@ -47,3 +47,11 @@ test('checkpoint notifications remain distinct from sealing', () => {
   worker.onmessage({ data: { type: 'event', event: 'progress', detail: { assetId: 'a', checkpointFrames: 101, saved: true, sealed: true } } });
   assert.equal(observed[0].saved, false); assert.equal(observed[1].sealed, true);
 });
+
+test('bounded audio range RPC preserves frame units and returns the immutable Blob', async () => {
+  const { worker, client } = fixture(), range = { startFrame: 16000, frames: 2048 };
+  const requested = client.getAssetRange('long-audio', range);
+  assert.deepEqual(worker.messages[0].message.args, ['long-audio', range]); assert.equal(worker.messages[0].message.method, 'getAssetRange');
+  const blob = new Blob([new Uint8Array([1, 2, 3])]); worker.respond(0, blob);
+  assert.equal(await requested, blob);
+});

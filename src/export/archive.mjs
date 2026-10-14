@@ -1,4 +1,4 @@
-import { validateProject } from '../project.mjs';
+import { validateProject, MAX_AUTOMATION_EVENTS } from '../project.mjs';
 import { SHA256, hashBlob, bytesToHex } from './sha256.mjs';
 import { ExportError, safeFilename, validateAudioMetadata } from './wav.mjs';
 
@@ -7,6 +7,7 @@ export const ARCHIVE_HEADER_BYTES = 64;
 export const ARCHIVE_VERSION = 1;
 export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 export const MAX_ARCHIVE_ASSETS = 10000;
+export const MAX_MANIFEST_NODES = 4000000;
 const PAGE_FRAMES = 16384;
 const ID = /^[A-Za-z0-9_-]{1,120}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -28,13 +29,13 @@ export function validateJsonTree(value) {
   let count = 0;
   while (stack.length) {
     const { value: item, depth } = stack.pop();
-    if (++count > 250000 || depth > 32) fail('Project metadata is too complex.');
+    if (++count > MAX_MANIFEST_NODES || depth > 32) fail('Project metadata is too complex.');
     if (item === null || typeof item === 'boolean') continue;
     if (typeof item === 'number') { if (!Number.isFinite(item)) fail('Project metadata contains an invalid number.'); continue; }
     if (typeof item === 'string') { if (item.length > 262144) fail('Project metadata contains an oversized text field.'); continue; }
     if (typeof item !== 'object') fail('Project metadata has an unsupported value.');
     if (Array.isArray(item)) {
-      if (item.length > 100000) fail('Project metadata contains an oversized list.');
+      if (item.length > MAX_AUTOMATION_EVENTS) fail('Project metadata contains an oversized list.');
       for (const child of item) stack.push({ value: child, depth: depth + 1 });
     } else {
       const keys = Object.keys(item);

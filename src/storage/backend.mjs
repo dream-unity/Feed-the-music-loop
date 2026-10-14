@@ -1,4 +1,4 @@
-import { MAX_FALLBACK_FILE_BYTES, crc32, storageError } from './core.mjs';
+import { PAGE_FRAMES, MAX_FALLBACK_FILE_BYTES, MAX_ASSET_RANGE_BYTES, crc32, storageError } from './core.mjs';
 
 const DB_NAME = 'feed-the-music-loop-v1';
 const DIRECTORY_NAME = 'feed-the-music-loop-v1';
@@ -222,6 +222,45 @@ export class BrowserBackend {
       parts.push(page.buffer);
     }
     return new Blob(parts, { type: 'application/octet-stream' });
+  }
+  async getAssetRange(asset, range = {}) {
+    if (asset.status === 'recording') throw storageError('RECORDING_ACTIVE', 'Finish this recording before exporting it.');
+    const { startFrame, frames } = range || {};
+    const stride = asset.channels * 4, endFrame = startFrame + frames;
+    if (![1, 2].includes(asset.channels) || !Number.isSafeInteger(asset.frames) || asset.frames < 0 || !Number.isSafeInteger(asset.frames * stride)
+      || !Number.isSafeInteger(startFrame) || startFrame < 0 || !Number.isSafeInteger(frames) || frames < 0
+      || !Number.isSafeInteger(endFrame) || endFrame > asset.frames || !Number.isSafeInteger(endFrame * stride)) {
+      throw storageError('INVALID_ASSET_RANGE', 'Choose a valid frame range within this saved recording.');
+    }
+    const byteLength = frames * stride;
+    if (byteLength > MAX_ASSET_RANGE_BYTES) throw storageError('ASSET_RANGE_LIMIT', 'An audio range may contain at most 64 MiB. Request smaller numbered parts.');
+    if (!byteLength) return new Blob([], { type: 'application/octet-stream' });
+    const startByte = startFrame * stride, endByte = endFrame * stride;
+    let file;
+    if (asset.backend === 'opfs') {
+      if (!this.directory) throw storageError('OPFS_UNAVAILABLE', 'Audio file storage is currently unavailable.');
+      this.closeHandle(asset.id);
+      file = await (await this.directory.getFileHandle(`${asset.id}.pcm`)).getFile();
+      if (file.size < asset.frames * stride) throw storageError('SHORT_FILE', 'The stored audio file is incomplete. Recover this project before exporting.');
+    }
+    const parts = [], firstPage = Math.floor(startFrame / PAGE_FRAMES), lastPage = Math.floor((endFrame - 1) / PAGE_FRAMES);
+    for (let index = firstPage; index <= lastPage; index++) {
+      const page = await this.getPage(asset.id, index), expectedFrames = Math.min(PAGE_FRAMES, asset.frames - index * PAGE_FRAMES);
+      if (!page) throw storageError('MISSING_PAGE', 'A stored audio page is missing. Recover this project before exporting.');
+      if (page.assetId !== asset.id || page.index !== index || page.channels !== asset.channels || page.frames !== expectedFrames
+        || page.offset !== index * PAGE_FRAMES * stride || page.byteLength !== expectedFrames * stride) {
+        throw storageError('CORRUPT_PAGE', 'A stored audio page has inconsistent dimensions. The recording has been retained for recovery.');
+      }
+      const buffer = file ? await file.slice(page.offset, page.offset + page.byteLength).arrayBuffer() : page.buffer;
+      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== page.byteLength || crc32(new Uint8Array(buffer)) !== page.crc32) {
+        throw storageError('CORRUPT_PAGE', 'A stored audio page failed its integrity check. The recording has been retained for recovery.');
+      }
+      if (!file) {
+        const from = Math.max(startByte, page.offset) - page.offset, to = Math.min(endByte, page.offset + page.byteLength) - page.offset;
+        parts.push(new Uint8Array(buffer, from, to - from));
+      }
+    }
+    return file ? file.slice(startByte, endByte, 'application/octet-stream') : new Blob(parts, { type: 'application/octet-stream' });
   }
   async inspectAssetSize(asset) {
     if (asset.backend !== 'opfs') return { available: true, byteLength: asset.byteLength, metadataOnly: true };

@@ -105,6 +105,53 @@ async function renderMix(page) {
   return { ...exported, audio };
 }
 
+async function playRenderedWav(page, exported) {
+  const url = await page.locator('.ready-download').evaluateAll((links, filename) => links.find(link => link.download === filename)?.href, exported.filename);
+  expect(url).toMatch(/^blob:/);
+  // Exercise the browser's native media decoder using the exact exported
+  // Float32 WAV. A real button click supplies the required user activation.
+  await page.evaluate(url => {
+    const fixture = document.createElement('div');
+    fixture.id = 'ci-native-wav-preview';
+    fixture.style.cssText = 'position:fixed;top:16px;left:16px;z-index:10000';
+    const audio = document.createElement('audio');
+    audio.preload = 'auto';
+    audio.src = url;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Test native WAV playback';
+    button.addEventListener('click', () => {
+      audio.play().then(() => { fixture.dataset.playState = 'playing'; }, error => { fixture.dataset.playError = `${error.name}: ${error.message}`; });
+    });
+    fixture.append(audio, button);
+    document.body.append(fixture);
+  }, url);
+  const fixture = page.locator('#ci-native-wav-preview');
+  try {
+    await fixture.getByRole('button').click();
+    await expect(fixture).toHaveAttribute('data-play-state', 'playing');
+    await expect.poll(() => fixture.locator('audio').evaluate(audio => audio.currentTime)).toBeGreaterThan(0.3);
+    const playback = await fixture.evaluate(element => {
+      const audio = element.querySelector('audio');
+      return { currentTime: audio.currentTime, duration: audio.duration, readyState: audio.readyState, paused: audio.paused, error: audio.error && { code: audio.error.code, message: audio.error.message }, playError: element.dataset.playError || null };
+    });
+    expect(playback.error).toBeNull();
+    expect(playback.playError).toBeNull();
+    expect(playback.readyState).toBeGreaterThanOrEqual(2);
+    expect(playback.duration).toBeCloseTo(exported.audio.frames / exported.audio.sampleRate, 2);
+    expect(playback.paused).toBe(false);
+    return playback;
+  } finally {
+    await fixture.evaluate(element => {
+      const audio = element.querySelector('audio');
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      element.remove();
+    });
+  }
+}
+
 async function screenshot(page, testInfo, name) {
   const notifications = page.locator('.toast:not(.toast-error) [aria-label="Dismiss notification"]');
   while (await notifications.count()) await notifications.first().click();
@@ -170,6 +217,7 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     const original = await download(page, () => action(page, 'export-track').click());
     expect(inspectWav(original.bytes).channels).toBe(1);
     const baseline = await renderMix(page);
+    const nativeWavPlayback = await playRenderedWav(page, baseline);
 
     const warmth = page.getByRole('slider', { name: 'Warmth · low EQ', exact: true });
     const pan = page.getByRole('slider', { name: 'Pan', exact: true });
@@ -229,7 +277,7 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     expect(remoteRequests).toEqual([]);
     expect(uploadRequests).toEqual([]);
     await testInfo.attach('audio-and-backup-results', {
-      body: JSON.stringify({ baseline: baseline.audio, edited: edited.audio, loops: restored.musicalContent.loops.length, backupBytes: backup.bytes.length }, null, 2),
+      body: JSON.stringify({ baseline: baseline.audio, nativeWavPlayback, edited: edited.audio, loops: restored.musicalContent.loops.length, backupBytes: backup.bytes.length }, null, 2),
       contentType: 'application/json',
     });
   } finally {

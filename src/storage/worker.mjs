@@ -6,6 +6,23 @@ const journal = new AssetJournal(backend);
 const queue = new FairQueue();
 const ports = new Set();
 const releasedProjects = new Set();
+const deletedAssets = new Set();
+const pendingReads = new Map();
+function trackRead(id) {
+  const ticket = { deleted: false };
+  if (!pendingReads.has(id)) pendingReads.set(id, new Set());
+  pendingReads.get(id).add(ticket);
+  return ticket;
+}
+function finishRead(id, ticket) {
+  const tickets = pendingReads.get(id); tickets?.delete(ticket);
+  if (!tickets?.size) pendingReads.delete(id);
+}
+function markDeleted(id) {
+  for (const ticket of pendingReads.get(id) || []) ticket.deleted = true;
+  deletedAssets.delete(id); deletedAssets.add(id);
+  if (deletedAssets.size > 2048) deletedAssets.delete(deletedAssets.values().next().value);
+}
 let initializing;
 let disposed = false;
 const initialize = () => initializing ||= backend.init();
@@ -14,7 +31,8 @@ const serializeError = (error) => error?.name === 'QuotaExceededError'
   : { name: error?.name || 'Error', code: error?.code || error?.name || 'STORAGE_ERROR', message: error?.message || String(error) };
 const notify = (event, detail) => self.postMessage({ type: 'event', event, detail });
 const progress = (asset, extra = {}) => notify('progress', { assetId: asset.id, projectId: asset.projectId, frames: asset.frames, checkpointFrames: asset.checkpointFrames, pageCount: asset.pageCount, status: asset.status, saved: asset.status !== 'recording', ...queue.stats, ...extra });
-async function assertReadable(id) {
+async function assertReadable(id, ticket) {
+  if (ticket?.deleted || deletedAssets.has(id)) throw storageError('ASSET_DELETED', 'This audio was intentionally deleted.');
   const asset = await journal.get(id);
   if (releasedProjects.has(asset.projectId)) throw storageError('PROJECT_RELEASED', 'This project was closed. Reopen it before reading its audio.');
 }
@@ -43,7 +61,7 @@ const methods = {
       for (const [assetId, asset] of journal.assets) if (asset.projectId === id && asset.status !== 'recording') { journal.assets.delete(assetId); journal.failures.delete(assetId); }
     }
   },
-  beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); return asset; },
+  beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); deletedAssets.delete(asset.id); return asset; },
   finishAsset: ([id, options]) => seal(id, options),
   getAsset: async ([id]) => ({ ...await journal.get(id) }),
   listAssets: ([projectId]) => backend.listAssets(projectId),
@@ -53,7 +71,8 @@ const methods = {
     progress(result.asset); return { ...result.page, checkpointFrames: result.asset.checkpointFrames };
   },
   getAssetFile: async ([id]) => backend.getAssetFile(await journal.get(id)),
-  deleteAsset: async ([id]) => { validId(id); const result = await backend.deleteAsset(id); journal.assets.delete(id); journal.failures.delete(id); return result; },
+  getAssetRange: async ([id, range]) => backend.getAssetRange(await journal.get(id), range),
+  deleteAsset: async ([id]) => { validId(id); const result = await backend.deleteAsset(id); markDeleted(id); journal.assets.delete(id); journal.failures.delete(id); return result; },
   estimate: () => backend.estimate(),
   requestPersistence: async () => ({ persistent: await navigator.storage?.persist?.() || false, ...(await backend.estimate()) }),
   recover: async ([projectId, options = {}]) => {
@@ -100,6 +119,7 @@ function attachPort(port) {
     if (disposed) return;
     const type = data?.type;
     if (!['write', 'read', 'end'].includes(type)) return;
+    const readTicket = type === 'read' ? trackRead(data.assetId) : null;
     const run = async () => {
       await initialize();
       if (type === 'write') {
@@ -107,7 +127,7 @@ function attachPort(port) {
         port.postMessage({ type: 'written', assetId: data.assetId, index: data.index, frames: data.frames, checkpointFrames: result.asset.checkpointFrames });
         progress(result.asset);
       } else if (type === 'read') {
-        await assertReadable(data.assetId);
+        await assertReadable(data.assetId, readTicket);
         const result = await journal.read(data.assetId, data.index);
         if (result.missing) port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: result.retryable });
         else port.postMessage({ type: 'page', assetId: data.assetId, ...result }, [result.buffer]);
@@ -118,7 +138,7 @@ function attachPort(port) {
     };
     queue.add(run, { read: type === 'read', bytes: type === 'write' ? data.buffer?.byteLength || 0 : 0 })
       .catch(async (error) => {
-        if (type === 'read' && error.code === 'PROJECT_RELEASED') { port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: false }); return; }
+        if (type === 'read' && ['PROJECT_RELEASED', 'ASSET_DELETED'].includes(error.code)) { port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: false }); return; }
         if (type !== 'read') journal.fail(data.assetId, error);
         const detail = { assetId: data.assetId, index: data.index, ...serializeError(error), operation: type };
         port.postMessage({ type: 'storage-error', ...detail });
@@ -133,6 +153,7 @@ function attachPort(port) {
           notify('progress', { assetId: data.assetId, projectId: asset?.projectId, frames: checkpointFrames, checkpointFrames, status: 'interrupted', saved: false, sealed: true, finalized: false, error: detail.message });
         }
       }).finally(() => {
+        if (readTicket) finishRead(data.assetId, readTicket);
         if (type === 'write' && data.buffer instanceof ArrayBuffer && data.buffer.byteLength) port.postMessage({ type: 'recycle', buffer: data.buffer }, [data.buffer]);
       });
   };
@@ -145,12 +166,15 @@ self.onmessage = ({ data }) => {
   if (!Object.hasOwn(methods, method)) { self.postMessage({ type: 'rpc-result', id, error: serializeError(storageError('UNKNOWN_METHOD', 'Unknown storage operation.')) }); return; }
   const read = ['getAsset', 'listAssets', 'readPage', 'estimate', 'loadProject', 'listProjects', 'projectUsage'].includes(method);
   const bytes = method === 'putPage' ? args[2]?.byteLength || 0 : 0;
+  const readTicket = method === 'readPage' ? trackRead(args[0]) : null;
   queue.add(async () => {
     if (disposed && method !== 'dispose') throw storageError('STORAGE_CLOSED', 'Audio storage is closed.');
     await initialize();
+    if (readTicket) await assertReadable(args[0], readTicket);
     return methods[method](args);
   }, { read, bytes }).then((result) => {
     const transfer = result?.buffer instanceof ArrayBuffer ? [result.buffer] : [];
     self.postMessage({ type: 'rpc-result', id, result }, transfer);
-  }).catch((error) => self.postMessage({ type: 'rpc-result', id, error: serializeError(error) }));
+  }).catch((error) => self.postMessage({ type: 'rpc-result', id, error: serializeError(error) }))
+    .finally(() => { if (readTicket) finishRead(args[0], readTicket); });
 };

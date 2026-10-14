@@ -1,6 +1,7 @@
 /** Storage invariants shared by the worker and fault-injection tests. */
 export const PAGE_FRAMES = 16384;
 export const MAX_FALLBACK_FILE_BYTES = 128 * 1024 * 1024;
+export const MAX_ASSET_RANGE_BYTES = 64 * 1024 * 1024;
 const crcTable = new Uint32Array(256);
 for (let n = 0; n < 256; n++) {
   let c = n;

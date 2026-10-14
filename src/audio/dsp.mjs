@@ -1,6 +1,9 @@
 /** Small, allocation-free DSP primitives shared by the worklet and Node tests. */
 export const clamp = (x, lo, hi, fallback = lo) => Number.isFinite(Number(x)) ? Math.min(hi, Math.max(lo, Number(x))) : fallback;
 export const DEFAULT_MIX = Object.freeze({volume:0.8,pan:0,low:0,mid:0,high:0,highpass:40,compression:0.25,reverb:0.08,delay:0});
+// Far below the existing 1e-20 output floor. Flush inaudible recursive state
+// before it reaches subnormal doubles, which can make silent tails expensive.
+const STATE_FLOOR = 1e-30;
 export function cleanMix(m = {}) {
   return {volume:clamp(m.volume,0,2,0.8),pan:clamp(m.pan,-1,1,0),low:clamp(m.low,-18,18,0),mid:clamp(m.mid,-18,18,0),high:clamp(m.high,-18,18,0),highpass:clamp(m.highpass,0,2000,40),compression:clamp(m.compression,0,1,0.25),reverb:clamp(m.reverb,0,1,0.08),delay:clamp(m.delay,0,.75,0)};
 }
@@ -21,7 +24,8 @@ export class Biquad {
   process(x) {
     if(this.remaining) { const n=this.remaining--;this.b0+=(this.target[0]-this.b0)/n;this.b1+=(this.target[1]-this.b1)/n;this.b2+=(this.target[2]-this.b2)/n;this.a1+=(this.target[3]-this.a1)/n;this.a2+=(this.target[4]-this.a2)/n; }
     const y=this.b0*x+this.z1;this.z1=this.b1*x-this.a1*y+this.z2;this.z2=this.b2*x-this.a2*y;
-    if(!Number.isFinite(y)) {this.z1=this.z2=0;return 0;} return Math.abs(y)<1e-20?0:y;
+    if(!Number.isFinite(y)) {this.z1=this.z2=0;return 0;}
+    if(Math.abs(y)<1e-20) {if(Math.abs(this.z1)<STATE_FLOOR)this.z1=0;if(Math.abs(this.z2)<STATE_FLOOR)this.z2=0;return 0;} return y;
   }
   reset() {this.z1=this.z2=0;}
 }
@@ -33,8 +37,11 @@ export class TrackDSP {
     x=Number.isFinite(x)?x:0;
     for(let i=0;i<4;i++)x=this.filters[i].process(x);
     const p=Math.abs(x), k=p>this.envelope?this.attack:this.release;this.envelope=k*this.envelope+(1-k)*p;
+    if(this.envelope<STATE_FLOOR)this.envelope=0;
     if(this.envelope>this.threshold) x*=Math.pow(this.envelope/this.threshold,1/this.ratio-1);
-    this.gainL+=((audible?this.targetL:0)-this.gainL)*this.smooth;this.gainR+=((audible?this.targetR:0)-this.gainR)*this.smooth;
+    const targetL=audible?this.targetL:0,targetR=audible?this.targetR:0;
+    this.gainL+=(targetL-this.gainL)*this.smooth;this.gainR+=(targetR-this.gainR)*this.smooth;
+    if(targetL===0&&Math.abs(this.gainL)<STATE_FLOOR)this.gainL=0;if(targetR===0&&Math.abs(this.gainR)<STATE_FLOOR)this.gainR=0;
     const y=x*this.makeup;this.left=y*this.gainL;this.right=y*this.gainR;return y;
   }
   reset() {for(const f of this.filters)f.reset();this.envelope=0;this.gainL=0;this.gainR=0;}

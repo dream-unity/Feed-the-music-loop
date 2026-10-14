@@ -52,6 +52,7 @@ export class StorageClient extends EventTarget {
   readPage(id, index) { return this.rpc('readPage', [id, index]); }
   putPage(id, index, buffer, frames, channels) { return this.rpc('putPage', [id, index, buffer, frames, channels], [buffer]); }
   getAssetFile(id) { return this.rpc('getAssetFile', [id]); }
+  getAssetRange(id, range) { return this.rpc('getAssetRange', [id, range]); }
   deleteAsset(id) { return this.rpc('deleteAsset', [id]); }
   estimate() { return this.rpc('estimate'); }
   async requestPersistence() {

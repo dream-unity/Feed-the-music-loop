@@ -1,11 +1,12 @@
 import { AudioEngine } from './audio/client.mjs';
-import { createProject, createTrack, validateProject, roleMix, normalizeMix, sectionFromProject, applySection, ProjectHistory, referencedAssets, cleanName, id, clone, touch, PAGE_FRAMES, MAX_TRACKS, COLORS, DEFAULT_METRONOME } from './project.mjs';
+import { createProject, createTrack, validateProject, roleMix, normalizeMix, sectionFromProject, applySection, ProjectHistory, CaptureMetadataBudget, MAX_AUTOMATION_EVENTS, referencedAssets, cleanName, id, clone, touch, PAGE_FRAMES, MAX_TRACKS, COLORS, DEFAULT_METRONOME } from './project.mjs';
 import { exportWav, exportWavParts, exportProject, importProject } from './export/index.mjs';
 
 const now = () => new Date().toISOString();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const isAbort = error => error?.name === 'AbortError';
 const jsonSafe = value => JSON.parse(JSON.stringify(value));
+const isDiscardedCapture = asset => asset?.status === 'cancelled' && typeof asset.captureId === 'string' && asset.captureId.length > 0 && ['loop', 'vocal', 'master'].includes(asset.kind);
 
 export class StudioController {
   constructor(storage, ui) {
@@ -15,7 +16,7 @@ export class StudioController {
     this.state = { project: null, projects: [], selectedTrackId: null, view: 'build', playing: false, capture: null, status: 'Opening studio…', micEnabled: false, monitor: false,
       inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
-      recovered: [], readonly: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
+      recovered: [], discarded: [], readonly: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
       micDevices: [], preferredDeviceId: '', micChanging: false };
     this.ui.addEventListener('action', e => { this.handle(e.detail).catch(error => this.handleError(error)); });
     this.storage.addEventListener('progress', e => this.storageProgress(e.detail));
@@ -36,7 +37,7 @@ export class StudioController {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (this.state.playing || this.pending)) this.keepAwake(); });
     return this;
   }
-  assertWritable() { if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error('This project is open in another tab. Close that tab before editing here, or export a backup.'); }
+  assertWritable() { if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error('This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
   assertIdle() { if (this.pending || this.state.capture) throw new Error('Finish or cancel the recording before changing projects or exporting.'); }
   async openProject(projectId = null, supplied = null) {
     this.assertIdle();
@@ -64,6 +65,7 @@ export class StudioController {
     this.state.transportFrame = 0; this.state.activeSectionId = null; this.state.queuedSectionId = null; this.history.clear();
     const assets = await this.storage.listAssets(next.id); const used = new Set(referencedAssets({ ...next, pendingCapture: null }));
     this.state.recovered = assets.filter(a => a.frames > 0 && a.status !== 'cancelled' && !used.has(a.id));
+    this.state.discarded = assets.filter(isDiscardedCapture);
     this.state.status = this.state.readonly ? 'Read only · another tab is editing' : this.state.recovered.length ? `${this.state.recovered.length} recording${this.state.recovered.length === 1 ? '' : 's'} available to recover` : 'Saved on this device';
     this.state.busy = false; this.state.error = null;
     this.state.projects = await this.storage.listProjects();
@@ -192,16 +194,49 @@ export class StudioController {
   }
   recordEvent(event) {
     if (!Number.isSafeInteger(event.frame) || event.frame < 0) return;
-    if (this.pending?.started && !this.pending.ended) {
-      if (this.pending.events.length < 200000) this.pending.events.push(event);
-      else { this.engine?.finish(); this.ui.notify('This performance reached the arrangement-event limit and is being saved.', 'info'); }
+    const p = this.pending;
+    // Loop assets contain only clean microphone samples. Their mix edits remain
+    // in the project, but only a vocal performance needs an arrangement log.
+    if (p?.kind === 'loop') return;
+    if (p?.started && !p.ended) {
+      if (!p.metadataBudget) {
+        this.updateCaptureIntent();
+        try { p.metadataBudget = new CaptureMetadataBudget(this.state.project); }
+        catch { this.finishAtMetadataLimit(event.frame); return; }
+      }
+      if (p.metadataBudget.append(event, p.events.length)) {
+        p.events.push(event);
+        if (!p.metadataBudget.hasRoom() || p.events.length >= MAX_AUTOMATION_EVENTS) this.finishAtMetadataLimit();
+      } else this.finishAtMetadataLimit(event.frame);
     }
+  }
+  finishAtMetadataLimit(missingFrame = null) {
+    const p = this.pending; if (!p || p.ended) return;
+    const missing = Number.isSafeInteger(missingFrame) && missingFrame >= 0;
+    const changed = missing && (!p.arrangementIncomplete || missingFrame < p.arrangementThroughFrame);
+    if (missing) {
+      p.arrangementIncomplete = true; p.interrupted = true;
+      p.arrangementThroughFrame = Math.min(p.arrangementThroughFrame ?? missingFrame, missingFrame);
+      // Persist the boundary without recursively reconciling an oversized project.
+      const intent = this.state.project.pendingCapture;
+      if (intent?.id === p.id) { intent.arrangementIncomplete = true; intent.arrangementThroughFrame = p.arrangementThroughFrame; }
+    }
+    if (p.budgetReached) { if (changed) this.scheduleSave(0); return; }
+    p.budgetReached = true; this.state.busy = true; this.engine?.finish();
+    this.scheduleSave(0);
+    this.state.status = 'Finishing performance · arrangement limit reached';
+    this.ui.notify('This performance reached its arrangement memory limit and is being saved. Its full original recordings are retained; start a new project to continue a larger arrangement.', 'info'); this.render();
   }
   updateCaptureIntent(force = false) {
     const p = this.pending; if (!p || (p.finalizing && !force)) return;
     this.state.project.pendingCapture = { id: p.id, kind: p.kind, assetId: p.assetId, masterAssetId: p.masterAssetId || null, performanceId: p.performanceId || null,
       takeId: p.takeId || null, track: p.track, startFrame: p.startFrame ?? 0, initialState: p.initialState, events: p.events,
+      ...(p.arrangementIncomplete ? { arrangementIncomplete: true, arrangementThroughFrame: p.arrangementThroughFrame } : {}),
       sealedThroughFrame: Math.max(p.startFrame || 0, this.state.transportFrame - Math.round(this.state.project.input.compensationMs * this.state.sampleRate / 1000)), createdAt: p.createdAt };
+    if (p.metadataBudget && !p.ended) {
+      try { if (!p.metadataBudget.reconcile(this.state.project)) this.finishAtMetadataLimit(); }
+      catch { this.finishAtMetadataLimit(this.state.transportFrame); }
+    }
   }
   async startCapture(kind, cycles = 1) {
     this.assertWritable(); if (this.pending || this.state.capture) throw new Error('A recording is already active.');
@@ -225,10 +260,13 @@ export class StudioController {
       const lengthFrames = kind === 'loop' && project.baseFrames && cycles ? Math.round(project.baseFrames * cycles) : 0;
       if (!Number.isSafeInteger(lengthFrames) || lengthFrames < 0) throw new Error('Choose a valid recording length.');
       let resolveDone; const done = new Promise(resolve => { resolveDone = resolve; });
-      pending = { id: captureId, kind, assetId, masterAssetId, track, lengthFrames, events: [], startFrame: 0, createdAt: now(),
+      pending = { id: captureId, projectId: project.id, kind, assetId, masterAssetId, track, lengthFrames, events: [], startFrame: 0, createdAt: now(),
         performanceId: kind === 'vocal' ? id('performance-') : null, takeId: kind === 'vocal' ? id('take-') : null,
         initialState: { tracks: clone(project.tracks), baseFrames: project.baseFrames, master: clone(project.master), input: clone(project.input), inputMix: clone(track.mix), frame: this.state.transportFrame, engineVersion: 1 }, done, resolveDone };
-      this.pending = pending; this.updateCaptureIntent(); await this.saveNow();
+      this.pending = pending; this.updateCaptureIntent();
+      pending.metadataBudget = new CaptureMetadataBudget(project);
+      if (!pending.metadataBudget.hasRoom()) throw new Error('This project has reached its arrangement memory limit. Export a backup and start a new project before recording again.');
+      await this.saveNow();
       await this.storage.beginAsset({ id: assetId, projectId: project.id, sampleRate: project.sampleRate, channels: 1, kind: kind === 'loop' ? 'loop' : 'vocal', name: label, captureId, track, performanceId: pending.performanceId, createdAt: Date.now() });
       if (masterAssetId) await this.storage.beginAsset({ id: masterAssetId, projectId: project.id, sampleRate: project.sampleRate, channels: 2, kind: 'master', name: `Performance ${project.performances.length + 1}`, captureId, leadAssetId: assetId, performanceId: pending.performanceId });
       if (token !== this.generation) { await this.cancelPrepared(pending); return; }
@@ -242,8 +280,29 @@ export class StudioController {
     }
   }
   async cancelPrepared(p) {
-    for (const assetId of [p.assetId, p.masterAssetId].filter(Boolean)) await this.storage.finishAsset(assetId, { status: 'cancelled' }).catch(() => {});
-    if (this.pending === p) { this.pending = null; delete this.state.project.pendingCapture; this.state.capture = null; this.state.busy = false; p.resolveDone?.(); await this.saveNow(); this.render(); }
+    if (p.finalizing) return p.done;
+    p.finalizing = true;
+    const project = this.state.project, intent = project.pendingCapture;
+    try {
+      for (const assetId of [p.assetId, p.masterAssetId].filter(Boolean)) await this.storage.finishAsset(assetId, { status: 'cancelled' }).catch(() => {});
+      if (this.pending !== p || (p.projectId && p.projectId !== project.id) || this.state.project !== project || this.state.storageFailed) return;
+      const assets = (await this.storage.listAssets(project.id)).filter(asset => [p.assetId, p.masterAssetId].includes(asset.id));
+      this.retainRecoverable(assets);
+      this.retainDiscarded(assets);
+      // A failed seal keeps the recovery intent. A cancelled asset is reclaimed
+      // only after a manifest without that intent has durably committed.
+      if (assets.some(asset => asset.status !== 'cancelled')) this.updateCaptureIntent(true);
+      else delete project.pendingCapture;
+      await this.saveNow();
+      await this.cleanupDiscardedCapture(p, project);
+    } catch (error) {
+      if (this.state.project === project && intent && !project.pendingCapture) project.pendingCapture = intent;
+      throw error;
+    } finally {
+      if (this.pending === p) { this.pending = null; this.state.capture = null; this.state.busy = false; }
+      for (const assetId of [p.assetId, p.masterAssetId].filter(Boolean)) this.sealed.delete(assetId);
+      p.resolveDone?.(); this.render();
+    }
   }
   storageProgress(data) {
     if (data.projectId !== this.state.project?.id) return;
@@ -258,10 +317,79 @@ export class StudioController {
     for (const asset of assets) if (asset?.frames > 0 && asset.status !== 'cancelled') retained.set(asset.id, { ...asset, needsRecovery: asset.status === 'recording' });
     this.state.recovered = [...retained.values()];
   }
+  retainDiscarded(assets) {
+    const discarded = new Map(this.state.discarded.map(asset => [asset.id, asset]));
+    for (const asset of assets) if (isDiscardedCapture(asset)) discarded.set(asset.id, asset);
+    this.state.discarded = [...discarded.values()];
+  }
+  discardedIsReferenced(assetId, project, durable = null) {
+    // Undo/Redo explicitly strips pendingCapture; its stale recording intent is
+    // not restorable audio. All actual tracks, takes and performance events are.
+    return [project, durable, ...this.history.past.map(snapshot => ({ ...snapshot, pendingCapture: null })),
+      ...this.history.future.map(snapshot => ({ ...snapshot, pendingCapture: null }))].filter(Boolean)
+      .some(snapshot => referencedAssets(snapshot).includes(assetId));
+  }
+  async cleanupDiscardedCapture(p, project, current = () => this.state.project === project && this.pending === p) {
+    const ids = [p.assetId, p.masterAssetId].filter(Boolean);
+    try {
+      const assets = (await this.storage.listAssets(project.id)).filter(asset => ids.includes(asset.id));
+      if (!current() || this.state.storageFailed || this.state.readonly) return;
+      this.retainDiscarded(assets); this.retainRecoverable(assets);
+      const durable = await this.storage.loadProject(project.id);
+      if (!durable || !current()) return;
+      for (const candidate of assets) {
+        if (!current() || this.state.storageFailed || this.state.readonly) return;
+        if (candidate.status !== 'cancelled' || candidate.captureId !== p.id || candidate.projectId !== project.id || !['loop', 'vocal', 'master'].includes(candidate.kind)) continue;
+        if (this.discardedIsReferenced(candidate.id, project, durable)) continue;
+        try {
+          const asset = await this.storage.getAsset(candidate.id);
+          if (!current() || this.state.storageFailed || this.state.readonly) return;
+          if (asset.id !== candidate.id || asset.status !== 'cancelled' || asset.captureId !== p.id || asset.projectId !== project.id || asset.kind !== candidate.kind || this.discardedIsReferenced(asset.id, project, durable)) continue;
+          await this.storage.deleteAsset(asset.id);
+          if (this.state.project === project) this.state.discarded = this.state.discarded.filter(item => item.id !== asset.id);
+        } catch { /* The discarded card provides an explicit, safe retry. */ }
+      }
+      if (current() && this.state.discarded.some(asset => ids.includes(asset.id))) this.ui.notify('Recording discarded. Storage cleanup is pending; use Delete discarded recording in the Song view to retry.', 'info');
+    } catch {
+      if (current()) this.ui.notify('Recording discarded. Reopen this project to retry storage cleanup in the Song view.', 'info');
+    }
+  }
+  async deleteDiscardedRecording(assetId) {
+    this.assertWritable(); this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.discardedDeletion) throw new Error('Finish the current operation before deleting a discarded recording.');
+    const project = this.state.project, token = this.generation, operation = {};
+    const current = () => this.state.project === project && this.generation === token && this.discardedDeletion === operation;
+    this.discardedDeletion = operation; this.state.busy = true; this.render();
+    let removedIntent = null;
+    try {
+      const assets = await this.storage.listAssets(project.id); if (!current()) return;
+      const asset = assets.find(item => item.id === assetId);
+      if (!asset || asset.projectId !== project.id || !isDiscardedCapture(asset)) throw new Error('Choose a discarded recording belonging to this project.');
+      this.retainDiscarded([asset]);
+      const intent = project.pendingCapture;
+      if (intent?.id === asset.captureId && [intent.assetId, intent.masterAssetId].includes(assetId)) {
+        const members = [intent.assetId, intent.masterAssetId].filter(Boolean).map(id => assets.find(item => item.id === id)).filter(Boolean);
+        if (members.some(item => item.status !== 'cancelled' || item.captureId !== intent.id)) throw new Error('This recording still contains recoverable audio. Recover it before removing its saved intent.');
+        removedIntent = intent; delete project.pendingCapture;
+      }
+      if (this.discardedIsReferenced(assetId, project)) throw new Error('This recording is still used by this project or its undo history and cannot be deleted.');
+      await this.saveNow();
+      removedIntent = null;
+      if (!current()) return;
+      await this.cleanupDiscardedCapture({ id: asset.captureId, assetId }, project, current);
+      if (current() && !this.state.discarded.some(item => item.id === assetId)) { this.state.status = 'Discarded recording deleted'; this.ui.notify('Discarded recording deleted.', 'success'); }
+    } finally {
+      if (removedIntent && this.state.project === project && !project.pendingCapture) project.pendingCapture = removedIntent;
+      if (this.discardedDeletion === operation) this.discardedDeletion = null;
+      if (this.state.project === project && token === this.generation) this.state.busy = false;
+      this.render();
+    }
+  }
   async tryFinalize() {
     const p = this.pending; if (!p?.ended || p.finalizing) return;
     const ids = [p.assetId, p.masterAssetId].filter(Boolean); if (!ids.every(assetId => this.sealed.has(assetId))) return;
     p.finalizing = true;
+    const project = this.state.project, originalIntent = project.pendingCapture;
     try {
       const assets = new Map(); let needsRecovery = false;
       for (const assetId of ids) {
@@ -290,9 +418,10 @@ export class StudioController {
           this.summarize(raw).then(peaks => { const t = this.state.project.tracks.find(t => t.id === track.id); if (t) { t.peaks = peaks; this.scheduleSave(); this.render(); } }).catch(() => {});
         } else if (p.kind === 'vocal' && master?.frames > 0) {
           const startFrame = p.end.startFrame ?? p.startFrame;
-          const complete = raw.status === 'complete' && master.status === 'complete' && raw.frames === master.frames && !p.hadUnderrun && !p.interrupted;
+          const complete = raw.status === 'complete' && master.status === 'complete' && raw.frames === master.frames && !p.hadUnderrun && !p.interrupted && !p.arrangementIncomplete;
+          const arrangementFrames = p.arrangementIncomplete ? Math.max(0, (Number.isSafeInteger(p.arrangementThroughFrame) ? p.arrangementThroughFrame : startFrame) - startFrame) : Infinity;
           const perf = { id: p.performanceId, name: `Performance ${this.state.project.performances.length + 1}`, leadAssetId: raw.id, masterAssetId: master.id,
-            frames: master.frames, startFrame, endFrame: startFrame + master.frames, tailFrames: 0, editableFrames: Math.min(raw.frames, master.frames),
+            frames: master.frames, startFrame, endFrame: startFrame + master.frames, tailFrames: 0, editableFrames: Math.min(raw.frames, master.frames, arrangementFrames), ...(p.arrangementIncomplete ? { arrangementIncomplete: true } : {}),
             events: p.events.filter(e => e.frame >= startFrame && e.frame < startFrame + master.frames), initialState: p.initialState, createdAt: p.createdAt, status: complete ? 'complete' : 'interrupted', compensationFrames: p.end.compensationFrames || 0 };
           this.state.project.performances.push(perf);
           const take = { id: p.takeId, name: p.track.name, assetId: raw.id, frames: raw.frames, startFrame, performanceId: perf.id, role: p.track.role || 'lead', mix: clone(p.track.mix), createdAt: p.createdAt };
@@ -300,17 +429,26 @@ export class StudioController {
         } else { this.retainRecoverable([raw, master]); retainedIntent = p.kind === 'vocal'; }
       } else if (!cancelled) {
         this.retainRecoverable([raw, master]); retainedIntent ||= p.kind === 'vocal' && Boolean(raw.frames || master?.frames);
+      } else {
+        this.retainDiscarded([raw, master]); this.retainRecoverable([raw, master]);
+        retainedIntent ||= [raw, master].some(asset => asset && asset.status !== 'cancelled');
       }
       if (retainedIntent) this.updateCaptureIntent(true); else delete this.state.project.pendingCapture;
       touch(this.state.project);
       for (const assetId of ids) this.sealed.delete(assetId);
       await this.saveNow();
+      if (cancelled) await this.cleanupDiscardedCapture(p, project);
+      if (this.pending !== p || this.state.project !== project || this.state.storageFailed) return;
       if (this.pending === p) this.pending = null; this.state.capture = null; this.state.busy = false;
-      const interrupted = needsRecovery || p.interrupted || raw.status !== 'complete' || (master && (master.status !== 'complete' || master.frames !== raw.frames)) || p.hadUnderrun;
+      const interrupted = needsRecovery || p.interrupted || p.arrangementIncomplete || raw.status !== 'complete' || (master && (master.status !== 'complete' || master.frames !== raw.frames)) || p.hadUnderrun;
       this.state.status = needsRecovery ? 'Audio retained · recovery required' : cancelled ? 'Recording cancelled · backing continues' : interrupted ? 'Interrupted recording retained' : 'Saved on this device';
       this.ui.notify(needsRecovery ? 'Your checkpointed audio is retained. Use Recover in the Song view, or reopen this project, before previewing or exporting it.' : cancelled ? 'Recording cancelled.' : interrupted ? 'The saved portion was retained. Review the interrupted recording before exporting.' : p.kind === 'vocal' ? 'Vocal take and stereo performance saved. Your loops keep playing.' : 'Loop saved. Keep building your song.', cancelled || interrupted ? 'info' : 'success');
-    } catch (error) { this.state.status = 'Audio retained · project save needs attention'; this.state.error = error.message; this.pending = null; this.state.capture = null; throw error; }
-    finally { p.resolveDone?.(); this.state.busy = false; this.render(); }
+    } catch (error) {
+      if (this.state.storageFailed || this.state.project !== project || this.pending !== p) return;
+      if (p.end.status === 'cancelled' && originalIntent && !project.pendingCapture) project.pendingCapture = originalIntent;
+      this.state.status = 'Audio retained · project save needs attention'; this.state.error = error.message; this.pending = null; this.state.capture = null; throw error;
+    }
+    finally { p.resolveDone?.(); if (this.state.project === project && !this.state.storageFailed && (!this.pending || this.pending === p)) this.state.busy = false; this.render(); }
   }
   async interrupt(message = 'Recording interrupted.', { notify = true } = {}) {
     const engine = this.engine;
@@ -416,7 +554,7 @@ export class StudioController {
   async saveNow() {
     if (!this.state.project || this.state.readonly) return;
     clearTimeout(this.saveTimer); this.saveTimer = null;
-    this.updateCaptureIntent(); const savedProject = this.state.project, snapshot = clone(savedProject); snapshot.updatedAt = now();
+    this.updateCaptureIntent(); const savedProject = this.state.project, snapshot = validateProject(savedProject); snapshot.updatedAt = now();
     const serial = ++this.saveSerial; if (!this.pending) this.state.status = 'Saving…';
     this.saveChain = this.saveChain.catch(() => {}).then(() => this.storage.saveProject(snapshot));
     await this.saveChain;
@@ -470,15 +608,33 @@ export class StudioController {
   }
   async withExport(fn) {
     this.assertIdle(); if (this.state.exporting) throw new Error('An export is already running.');
+    if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before exporting.');
     this.closePreview();
     this.state.exporting = true; this.state.exportProgress = 0; this.exportAbort = new AbortController(); this.render();
-    try { await this.flushSave(); this.exportAbort.signal.throwIfAborted(); return await fn(this.exportAbort.signal); }
+    try {
+      try { await this.flushSave(); }
+      catch (error) {
+        this.exportAbort.signal.throwIfAborted();
+        if (this.state.storageFailed || isAbort(error)) throw error;
+        // A metadata/quota failure must not trap already sealed recordings.
+        // WAV exports verify the asset; backups validate and clone the current
+        // in-memory project before reading it. Neither requires a successful
+        // device save, and neither can publish an active or incomplete asset.
+        this.state.status = 'Device save needs attention · export available';
+        this.state.error = `Your latest edits could not be saved on this device. Download a backup or your recordings now. ${error.message || error}`;
+        this.ui.notify(this.state.error, 'error'); this.render();
+      }
+      this.exportAbort.signal.throwIfAborted();
+      if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before exporting.');
+      this.assertIdle();
+      return await fn(this.exportAbort.signal);
+    }
     finally { this.state.exporting = false; this.state.exportProgress = null; this.exportAbort = null; this.render(); }
   }
   async offerAudioDownload(assetId, label, signal) {
     try { this.offerDownload({ ...await exportWav(this.storage, assetId, { signal }), assetId }, label); }
     catch (error) {
-      if (error.code !== 'WAV_SPLIT_REQUIRED') throw error;
+      if (!['WAV_SPLIT_REQUIRED', 'FALLBACK_EXPORT_LIMIT'].includes(error.code)) throw error;
       const group = id('download-group-'); let count = 0;
       for await (const part of exportWavParts(this.storage, assetId, { signal, maxDataBytes: 256 * 1024 * 1024 })) {
         this.offerDownload({ ...part, assetId }, `${label} · part ${part.part} of ${part.partCount}`, { group, autoDownload: false, notify: false }); count++;
@@ -623,9 +779,10 @@ export class StudioController {
         const master = all.find(a => a.projectId === project.id && a.kind === 'master' && a.channels === 2 && a.sampleRate === project.sampleRate && Number.isSafeInteger(a.frames) && a.frames > 0 && (a.leadAssetId === asset.id || (asset.captureId && a.captureId === asset.captureId)) && ['complete', 'interrupted', 'recovered'].includes(a.status));
         this.edit(p => {
           const performanceId = master ? id('performance-') : null, startFrame = pending?.startFrame || 0;
+          const arrangementFrames = pending?.arrangementIncomplete ? Math.max(0, (Number.isSafeInteger(pending.arrangementThroughFrame) ? pending.arrangementThroughFrame : startFrame) - startFrame) : Infinity;
           if (master) p.performances.push({ id: performanceId, name: 'Recovered performance', leadAssetId: asset.id, masterAssetId: master.id, frames: master.frames,
-            startFrame, endFrame: startFrame + master.frames, tailFrames: 0, editableFrames: Math.min(asset.frames, master.frames, Math.max(0, (pending?.sealedThroughFrame || startFrame) - startFrame)),
-            events: clone(pending?.events || []), initialState: clone(pending?.initialState || { tracks: p.tracks, master: p.master, input: p.input, baseFrames: p.baseFrames, frame: startFrame }), createdAt: now(), status: 'recovered' });
+            startFrame, endFrame: startFrame + master.frames, tailFrames: 0, editableFrames: Math.min(asset.frames, master.frames, Math.max(0, (pending?.sealedThroughFrame || startFrame) - startFrame), arrangementFrames), ...(pending?.arrangementIncomplete ? { arrangementIncomplete: true } : {}),
+            events: clone(pending?.events || []), initialState: clone(pending?.initialState || { tracks: p.tracks, master: p.master, input: p.input, baseFrames: p.baseFrames, frame: startFrame }), createdAt: now(), status: pending?.arrangementIncomplete ? 'interrupted' : 'recovered' });
           const take = { id: id('take-'), name: asset.name || 'Recovered vocal', assetId, frames: asset.frames, startFrame, performanceId, role: 'lead', mix: roleMix('lead'), createdAt: now() }; p.takes.push(take); p.selectedTakeId = take.id;
           if (pending) delete p.pendingCapture;
         });
@@ -811,6 +968,7 @@ export class StudioController {
       case 'manage-storage': return this.manageStorage();
       case 'delete-project': return this.deleteProject(action.id);
       case 'delete-saved-mix': return this.deleteSavedMix(action.id);
+      case 'delete-discarded': return this.deleteDiscardedRecording(action.id);
       case 'cancel-export': this.exportAbort?.abort(); return;
       case 'export-mix': return this.exportMix(action);
       case 'preview-mix': return this.previewMix(action);
@@ -849,5 +1007,5 @@ export class StudioController {
     engine.send('audition', { take: { ...take, mix: take.mix || roleMix('lead') }, startFrame: take.startFrame, tailFrames: this.state.sampleRate * 2 });
     this.state.status = 'Loading live mix audition…'; this.keepAwake(); this.render();
   }
-  handleError(error) { if (isAbort(error)) return; console.error(error); this.state.error = error.message || String(error); this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
+  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
 }

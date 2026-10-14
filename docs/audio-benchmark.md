@@ -46,3 +46,36 @@ Additional deterministic engine tests start the transport and audio clock near 2
 Separate seeded writer and page-cache tests verify capture totals beyond 2³² frames, writer page-index rollover across 2³², and distinct page tags beyond 2³² page indexes. Transport, clock, writer totals, page indexes and cache tags use JavaScript Numbers or Float64 storage, without bitwise 32-bit conversions. Uint32 cache lengths contain only a single page's frame count. All 49 engine tests pass after this addition.
 
 These tests establish arithmetic behavior, not a day-long browser endurance result. Recording still depends on available device storage, continuing microphone permission, and the browser keeping its audio context running. Playback buffers, history rings, pending-page maps and queued vocal-control changes have fixed bounds; a further accelerated run was not needed to resolve a remaining memory-growth risk identified by inspection.
+
+## Silent-tail DSP state
+
+A focused follow-up measured an actual slow path after sound had become inaudible. On Node v24.19.0 / V8 13.6.233.17-node.51, Intel Xeon Platinum 8573C, recursive high-pass state settled near ±3.3 × 10⁻³²² and the compressor envelope near 1.54 × 10⁻³²⁰. These subnormal doubles persisted instead of becoming zero. Smoothed gains had the same problem after muting. Float32 reverb buffers also retained tiny values, but their benchmark showed no processing slowdown, so SharedFX was left unchanged.
+
+The fix clears states below 10⁻³⁰, which is ten orders of magnitude below the existing 10⁻²⁰ filter-output floor. Filter state checks run only when the output is already below that floor; gain checks apply only when the target gain is exactly zero. Raw captured PCM does not pass through these state changes. Eight focused regressions cover natural decay, zero crossings, mute/volume/pan ramps, and a pre-change active EQ/compression reference trace.
+
+The comparison used a default TrackDSP at 48 kHz. Each variant received ten seconds of a deterministic two-tone signal, then 120 seconds of silence for the tail cases. Three further ten-second rounds warmed the measured path. Nine timed rounds of 480,000 samples alternated baseline/current execution order. The table reports medians; setup and decay time are excluded.
+
+| Workload | Before | After | Observation |
+| --- | ---: | ---: | --- |
+| Active signal | 29.30 ms | 27.40 ms | No measured regression |
+| Decayed silent tail | 99.71 ms | 15.18 ms | 6.57× faster |
+| Decayed muted tail | 158.34 ms | 20.89 ms | 7.58× faster |
+
+Final outputs agreed in all three comparisons. The active reference test agrees within 10⁻¹². These local Node results establish a measured reason for the small change; they do not predict browser AudioWorklet scheduling, every CPU’s handling of subnormals, or a supported layer count. Host contention and JIT variation affect timings, so there is no performance test threshold.
+
+Reproduce the workload with the current implementation alone:
+
+```sh
+node scripts/benchmark-dsp.mjs
+```
+
+To compare against the pre-flush DSP at commit `0e03767edc46330550778cc10844d8f1689b9b27`, extract that single module into a temporary `.mjs` file. The script imports it directly instead of containing a duplicate DSP implementation:
+
+```sh
+baseline_dsp="$(mktemp --suffix=.mjs)"
+git show 0e03767edc46330550778cc10844d8f1689b9b27:src/audio/dsp.mjs > "$baseline_dsp"
+node scripts/benchmark-dsp.mjs --baseline="$baseline_dsp"
+rm "$baseline_dsp"
+```
+
+The script prints runtime/CPU details, every round, medians, and final recursive states as JSON. It preserves the measured workload; it was added after the measurements above, without another benchmark run.

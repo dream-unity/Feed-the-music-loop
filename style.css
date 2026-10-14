@@ -357,10 +357,22 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .song-hero p { font-size: 11px; color: #b4a397; max-width: 460px; }
 .song-hero > .button { margin-left: 60px; }
 .performance-list, .take-list { display: flex; flex-direction: column; gap: 10px; }
+.discarded-panel { margin: 0 0 28px; padding: 20px; border: 1px solid #615b41; border-radius: 15px; background: #282b23; }
+.discarded-heading h2 { font-size: 18px; color: #ddd5b4; }
+.discarded-heading > p { font-size: 12px; color: #b7baa6; margin-top: 8px; }
+.discarded-list { display: flex; flex-direction: column; gap: 10px; margin-top: 17px; }
+.discarded-card { display: flex; align-items: center; gap: 17px; border: 1px solid #4d5142; border-radius: 10px; padding: 14px; background: #242820; }
+.discarded-card > div { flex: 1; min-width: 0; }
+.discarded-card h3 { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.discarded-card p, .discarded-card small { display: block; font-size: 12px; color: #bec4ae; margin-top: 5px; }
+.discarded-card > .button { flex-shrink: 0; min-height: 48px; color: var(--coral); font-size: 12px; }
+.discarded-card .icon { width: 16px; height: 16px; }
 .performance-card { display: flex; gap: 16px; align-items: center; padding: 17px; border-radius: 13px; border: 1px solid var(--line); background: var(--panel); min-width: 0; }
 .performance-art { width: 42px; height: 49px; flex: 0 0 auto; display: grid; place-items: center; background: #47382e; color: #dcaf87; border: 1px solid #674b38; border-radius: 9px; }
 .performance-art .icon { height: 24px; width: 24px; }
 .performance-copy { min-width: 0; flex: 1; }
+.performance-copy .arrangement-limit { font-size: 12px; color: #d9c49e; line-height: 1.6; margin-top: 8px; }
+.export-arrangement-note { font-size: 12px; color: #e1d2ae; background: #363428; border: 1px solid #635d43; border-radius: 9px; padding: 12px 14px; margin-top: 13px; }
 .performance-copy h3 { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .performance-copy p { color: var(--dim); font-size: 9px; margin-top: 5px; }
 .performance-card > .button { font-size: 10px; padding: 10px; }
@@ -864,6 +876,10 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .status-banner > [data-action="reload-studio"] { flex-basis: 100%; }
   .preview-loading { order: 3; flex-basis: 100%; max-width: none; }
   .recovery-card > .delete-saved-mix { flex: 0 0 48px; }
+  .discarded-panel { padding: 17px; }
+  .discarded-card { flex-wrap: wrap; gap: 12px; }
+  .discarded-card > div, .discarded-card > .button { flex-basis: 100%; }
+  .discarded-card > .button { justify-content: center; }
   .loop-grid, .side-column, .mixer-grid { grid-template-columns: minmax(0,1fr); }
   .input-card { grid-row: auto; }
   .input-card, .master-card, .session-card { padding: 21px; }

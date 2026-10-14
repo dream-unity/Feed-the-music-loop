@@ -2,6 +2,12 @@
 export const SCHEMA_VERSION = 1;
 export const PAGE_FRAMES = 16384;
 export const MAX_TRACKS = 512;
+export const MAX_PROJECT_NODES = 1000000;
+export const MAX_PROJECT_BYTES = 12 * 1024 * 1024;
+export const MAX_AUTOMATION_EVENTS = 200000;
+export const CAPTURE_RESERVE_NODES = 20000;
+export const CAPTURE_RESERVE_BYTES = 256 * 1024;
+const metadataEncoder = new TextEncoder();
 export const DEFAULT_METRONOME = Object.freeze({ enabled: false, bpm: 100, beatsPerCycle: 4, countInBeats: 0, volume: 0.25 });
 export const ROLES = ['beat', 'bass', 'harmony', 'lead', 'texture'];
 export const COLORS = { beat: '#fa987e', bass: '#dfbc6e', harmony: '#94cbb7', lead: '#d5a2d9', texture: '#85b7df' };
@@ -71,14 +77,42 @@ function array(value, label, max = 10000) { if (!Array.isArray(value) || value.l
 function bool(value, label, fallback = false) { if (value === undefined) return fallback; if (typeof value !== 'boolean') fail(`${label} must be true or false.`); return value; }
 function date(value, label) { if (typeof value !== 'string' || value.length > 40 || !Number.isFinite(Date.parse(value))) fail(`${label} must be a date.`); return value; }
 function checkTree(value, depth = 0, count = { n: 0 }) {
-  if (++count.n > 1000000 || depth > 30) fail('Metadata is too large or deeply nested.');
+  if (++count.n > MAX_PROJECT_NODES || depth > 30) fail('Metadata is too large or deeply nested.');
   if (value === null || typeof value === 'boolean') return;
   if (typeof value === 'number') { if (!Number.isFinite(value)) fail('Metadata contains a non-finite number.'); return; }
   if (typeof value === 'string') { if (value.length > 100000) fail('A metadata value is too long.'); return; }
   if (typeof value !== 'object') fail('Metadata contains an unsupported value.');
-  for (const [key, child] of Object.entries(value)) {
+  if (Array.isArray(value)) {
+    if (value.length > MAX_AUTOMATION_EVENTS) fail('Metadata contains an oversized list.');
+    for (const child of value) checkTree(child, depth + 1, count);
+    return;
+  }
+  const keys = Object.keys(value);
+  if (keys.length > 10000) fail('Metadata contains too many properties.');
+  for (const key of keys) {
     if (['__proto__', 'constructor', 'prototype'].includes(key)) fail('Metadata contains a reserved key.');
-    checkTree(child, depth + 1, count);
+    if (key.length > 256) fail('Metadata contains an oversized key.');
+    checkTree(value[key], depth + 1, count);
+  }
+}
+export function measureMetadata(value) {
+  const count = { n: 0 }; checkTree(value, 0, count);
+  const bytes = metadataEncoder.encode(JSON.stringify(value)).byteLength;
+  if (bytes > MAX_PROJECT_BYTES) fail('Metadata exceeds the 12 MiB project limit.');
+  return { nodes: count.n, bytes };
+}
+
+/** Conservative running cost of the project, including its live capture intent. */
+export class CaptureMetadataBudget {
+  constructor(project) { this.reconcile(project); }
+  reconcile(project) { Object.assign(this, measureMetadata(project)); return this.hasRoom(); }
+  hasRoom() { return this.nodes < MAX_PROJECT_NODES - CAPTURE_RESERVE_NODES && this.bytes < MAX_PROJECT_BYTES - CAPTURE_RESERVE_BYTES; }
+  append(event, eventCount) {
+    let cost;
+    try { cost = measureMetadata(event); } catch { return false; }
+    const nodes = this.nodes + cost.nodes, bytes = this.bytes + cost.bytes + 1;
+    if (eventCount >= MAX_AUTOMATION_EVENTS || nodes > MAX_PROJECT_NODES - CAPTURE_RESERVE_NODES || bytes > MAX_PROJECT_BYTES - CAPTURE_RESERVE_BYTES) return false;
+    this.nodes = nodes; this.bytes = bytes; return true;
   }
 }
 function checkMix(value, label, strict) {
@@ -93,7 +127,7 @@ function unique(items, label) { const seen = new Set(); for (const item of items
 
 /** Validate the complete metadata before a load/import can replace the active project. */
 export function validateProject(input, { strict = true } = {}) {
-  object(input, 'project'); checkTree(input);
+  object(input, 'project'); measureMetadata(input);
   if (input.schemaVersion !== SCHEMA_VERSION) fail(`Unsupported schema version ${input.schemaVersion}. This app supports version ${SCHEMA_VERSION}.`);
   const p = clone(input);
   validId(p.id, 'project'); string(p.name, 'name');
@@ -139,8 +173,14 @@ export function validateProject(input, { strict = true } = {}) {
     number(perf.endFrame, 'performance end', perf.startFrame, Number.MAX_SAFE_INTEGER, true);
     if (!['complete', 'interrupted', 'recovered'].includes(perf.status)) fail('Unknown performance status.');
     if (perf.tailFrames !== undefined) number(perf.tailFrames, 'performance tail', 0, Number.MAX_SAFE_INTEGER, true);
+    if (perf.arrangementIncomplete !== undefined) bool(perf.arrangementIncomplete, 'incomplete arrangement');
+    if (perf.arrangementThroughFrame !== undefined) number(perf.arrangementThroughFrame, 'arrangement boundary', 0, Number.MAX_SAFE_INTEGER, true);
+    if (perf.editableFrames !== undefined) number(perf.editableFrames, 'editable performance length', 0, perf.frames, true);
+    if (perf.arrangementIncomplete && (perf.status === 'complete' || perf.editableFrames === undefined)) fail('An incomplete arrangement needs an interrupted status and a verified editable interval.');
     checkEvents(perf.events ?? [], 'performance events');
   }
+  if (p.pendingCapture?.arrangementIncomplete !== undefined) bool(p.pendingCapture.arrangementIncomplete, 'incomplete capture arrangement');
+  if (p.pendingCapture?.arrangementThroughFrame !== undefined) number(p.pendingCapture.arrangementThroughFrame, 'capture arrangement boundary', 0, Number.MAX_SAFE_INTEGER, true);
   const perfIds = unique(performances, 'performances');
   for (const t of takes) if (t.performanceId && !perfIds.has(t.performanceId)) fail('A vocal take references a missing performance.');
   object(p.master, 'master'); p.master.volume = number(p.master.volume, 'master volume', 0, 2);
@@ -159,7 +199,7 @@ export function validateProject(input, { strict = true } = {}) {
   return p;
 }
 function checkEvents(events, label) {
-  array(events, label, 200000);
+  array(events, label, MAX_AUTOMATION_EVENTS);
   for (const event of events) { object(event, 'event'); number(event.frame, 'event frame', 0, Number.MAX_SAFE_INTEGER, true); string(event.type, 'event type', 64); }
 }
 export function referencedAssets(project) {
@@ -175,12 +215,38 @@ export function referencedAssets(project) {
 }
 
 export class ProjectHistory {
-  constructor(limit = 40) { this.limit = limit; this.past = []; this.future = []; this.lastKey = null; this.lastAt = 0; }
+  constructor(limit = 40, byteLimit = 16 * 1024 * 1024) {
+    this.limit = limit; this.byteLimit = byteLimit; this.past = []; this.future = [];
+    this.lastKey = null; this.lastAt = 0; this.costs = new WeakMap();
+  }
+  snapshot(project) {
+    // A live recovery checkpoint is not an editable project version. Exclude
+    // its growing event log before cloning; Undo already discards checkpoints.
+    const snapshot = { ...project }; delete snapshot.pendingCapture;
+    const copy = clone(snapshot);
+    this.costs.set(copy, metadataEncoder.encode(JSON.stringify(copy)).byteLength);
+    return copy;
+  }
+  trim(preferred = 'past') {
+    while (this.past.length > this.limit) this.past.shift();
+    while (this.future.length > this.limit) this.future.shift();
+    let bytes = [...this.past, ...this.future].reduce((total, item) => total + (this.costs.get(item) || 0), 0);
+    while (bytes > this.byteLimit && this.past.length + this.future.length > 1) {
+      const list = preferred === 'future' ? (this.past.length ? this.past : this.future) : (this.future.length ? this.future : this.past);
+      const removed = list.shift(); bytes -= this.costs.get(removed) || 0;
+    }
+  }
   push(project, key = null, now = performance.now()) {
     if (key && this.lastKey === key && now - this.lastAt < 600) { this.lastAt = now; return; }
-    this.past.push(clone(project)); if (this.past.length > this.limit) this.past.shift(); this.future.length = 0; this.lastKey = key; this.lastAt = now;
+    this.past.push(this.snapshot(project)); this.future.length = 0; this.trim(); this.lastKey = key; this.lastAt = now;
   }
-  undo(current) { if (!this.past.length) return null; this.future.push(clone(current)); this.lastKey = null; return this.past.pop(); }
-  redo(current) { if (!this.future.length) return null; this.past.push(clone(current)); this.lastKey = null; return this.future.pop(); }
+  undo(current) {
+    if (!this.past.length) return null;
+    const restored = this.past.pop(); this.future.push(this.snapshot(current)); this.trim('future'); this.lastKey = null; return restored;
+  }
+  redo(current) {
+    if (!this.future.length) return null;
+    const restored = this.future.pop(); this.past.push(this.snapshot(current)); this.trim(); this.lastKey = null; return restored;
+  }
   clear() { this.past.length = 0; this.future.length = 0; this.lastKey = null; }
 }

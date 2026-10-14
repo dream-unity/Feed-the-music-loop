@@ -18,6 +18,7 @@ export function validateAudioMetadata(asset) {
 
 export const WAV_HEADER_BYTES = 58;
 export const MAX_RIFF_DATA_BYTES = 0xffffffff - (WAV_HEADER_BYTES - 8);
+export const MAX_RANGE_DATA_BYTES = 64 * 1024 * 1024;
 
 // IEEE float WAVE includes the extended fmt size and required non-PCM fact
 // chunk. Data comes directly from immutable PCM File/Blob slices, without
@@ -38,13 +39,21 @@ export function wavHeader({ frames, channels, sampleRate }) {
   return header;
 }
 
-async function source(storage, assetId, signal) {
+async function source(storage, assetId, signal, allowRanges = false) {
   signal?.throwIfAborted();
   const asset = await storage.getAsset(assetId);
   signal?.throwIfAborted();
   const bytes = validateAudioMetadata(asset);
   if (!['complete', 'interrupted', 'recovered'].includes(asset.status)) throw new ExportError('RECORDING_NOT_READY', 'Finish and save this recording before exporting it.');
-  const file = await storage.getAssetFile(assetId);
+  let file;
+  try { file = await storage.getAssetFile(assetId); }
+  catch (error) {
+    // Fallback storage can hold a long recording without materialising it as
+    // one giant Blob. Numbered exports read only bounded ranges of its pages.
+    if (!allowRanges || error.code !== 'FALLBACK_EXPORT_LIMIT' || typeof storage.getAssetRange !== 'function') throw error;
+    signal?.throwIfAborted();
+    return { asset, file: null };
+  }
   signal?.throwIfAborted();
   if (!(file instanceof Blob) || file.size !== bytes) throw new ExportError('AUDIO_SIZE_MISMATCH', 'The saved audio length does not match its metadata.');
   return { asset, file };
@@ -59,15 +68,19 @@ export async function exportWav(storage, assetId, options = {}) {
 }
 
 export async function* exportWavParts(storage, assetId, { signal, maxDataBytes = MAX_RIFF_DATA_BYTES, name } = {}) {
-  const { asset, file } = await source(storage, assetId, signal);
+  const { asset, file } = await source(storage, assetId, signal, true);
   if (!Number.isSafeInteger(maxDataBytes) || maxDataBytes < asset.channels * 4 || maxDataBytes > MAX_RIFF_DATA_BYTES) throw new RangeError('Invalid WAV part size.');
+  if (!file) maxDataBytes = Math.min(maxDataBytes, MAX_RANGE_DATA_BYTES);
   const maxFrames = Math.floor(maxDataBytes / (asset.channels * 4));
   const count = Math.max(1, Math.ceil(asset.frames / maxFrames));
   for (let part = 0; part < count; part++) {
     signal?.throwIfAborted();
     const startFrame = part * maxFrames;
     const frames = Math.min(maxFrames, asset.frames - startFrame);
-    const pcm = file.slice(startFrame * asset.channels * 4, (startFrame + frames) * asset.channels * 4);
+    const pcm = file ? file.slice(startFrame * asset.channels * 4, (startFrame + frames) * asset.channels * 4)
+      : await storage.getAssetRange(assetId, { startFrame, frames });
+    signal?.throwIfAborted();
+    if (!(pcm instanceof Blob) || pcm.size !== frames * asset.channels * 4) throw new ExportError('AUDIO_SIZE_MISMATCH', 'A saved audio part does not match its expected length.');
     yield { blob: new Blob([wavHeader({ ...asset, frames }), pcm], { type: 'audio/wav' }), filename: safeFilename(`${name || asset.name || 'Recording'}-part-${String(part + 1).padStart(String(count).length, '0')}`, 'wav'), part: part + 1, partCount: count, startFrame, frames, channels: asset.channels, sampleRate: asset.sampleRate };
   }
 }

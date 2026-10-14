@@ -28,6 +28,7 @@ The built-in demo creates a few synthetic layers locally, so you can try the stu
 - Individual layer mute, solo, naming, color, timing adjustment and reversible role presets.
 - Per-layer and vocal processing, shared room/echo effects and a master safety soft ceiling.
 - Project undo/redo, saved sections, audio import, local projects and autosave.
+- Discarded takes release their audio storage after the project is safely saved; failed cleanup remains visible with a retry action.
 - Per-project storage usage, deletion of saved edited mixes, and explicit permanent project deletion to free device space.
 - Chunked audio storage, crash recovery, incomplete-take recovery and protection against two tabs editing the same project.
 - Lossless 32-bit float WAV exports and portable checksummed `.fml` project archives.
@@ -59,9 +60,13 @@ Browser storage is not a substitute for a backup. Clearing site data, removing a
 
 Saved edited mixes can also be deleted individually after confirmation. The app refuses to remove audio still referenced by the project or undo history; the original loops, vocal takes and captured performances remain available.
 
+If saving project metadata fails, downloads of already sealed recordings remain available. The save error stays visible; an exported file does not mean the device save succeeded. Discarding a take removes its audio only after the capture intent has been removed from the saved project. If that cleanup fails, the Song view offers a clearly labeled retry.
+
 Recording duration is limited by device storage, CPU and browser behavior, rather than an arbitrary short timer. The live engine reads bounded page windows rather than loading an entire recording into an `AudioBuffer`. More simultaneous layers still require more memory and processing. The project format guards against excessive metadata and permits up to 512 loop tracks; that is a format ceiling, not a claim that every device can play 512 effects-heavy tracks.
 
-Ordinary audio-file import is limited to 128 MiB and 20 minutes because browser decoding needs a full buffer. Direct microphone recording uses the streaming path. Standard RIFF WAV has a 4 GiB size limit; exceptionally long exports are split into numbered WAV parts. Every part remains available as a separate download link; save each one to retain the complete recording. The latest eight export groups remain linked until the page closes. The IndexedDB fallback cannot assemble a single export asset over 128 MiB and reports that limit rather than exhausting memory.
+Very large arrangements also have a metadata budget. If extensive mixer automation approaches that budget, the studio finishes the performance before the project becomes too large to reopen. Original recorded audio remains available; if an arrangement event could not be retained, the editable render is limited to its verified prefix and labeled accordingly. Undo keeps up to 40 steps within a 16 MiB metadata budget, so large projects can have fewer undo steps. Live capture checkpoints are never duplicated into undo history.
+
+Ordinary audio-file import is limited to 128 MiB and 20 minutes because browser decoding needs a full buffer. Direct microphone recording uses the streaming path. Standard RIFF WAV has a 4 GiB size limit; exceptionally long exports are split into numbered WAV parts. Every part remains available as a separate download link; save each one to retain the complete recording. The latest eight export groups remain linked until the page closes. The IndexedDB fallback exports recordings larger than 128 MiB as numbered WAV parts, reading at most 64 MiB per part. Full `.fml` backups and original-performance previews still require each fallback audio asset to fit within 128 MiB; save the numbered original WAVs if a long fallback recording exceeds that limit.
 
 Keep the app foregrounded for reliable recording on phones. Mobile operating systems can suspend audio when the screen locks or another app takes the microphone. A wake lock is requested where supported; it cannot override operating-system suspension. Interrupted takes are marked accordingly.
 
@@ -69,7 +74,7 @@ Keep the app foregrounded for reliable recording on phones. Mobile operating sys
 
 Use a recent Chromium-based desktop browser for the primary workflow. The application requires a secure context, microphone permission and `AudioWorklet`. The code includes feature detection and an IndexedDB storage fallback; platform behavior still differs. Safari/iOS, Bluetooth routing, background recording and physical-device latency need hands-on testing on your specific device.
 
-Automated browser checks use Chromium with a deterministic synthetic microphone. Firefox and WebKit checks run the generated demo through native playback, mixer export, reload and exact backup restoration. These verify application behavior and exported audio, not the quality or latency of a real microphone or an untested phone.
+Automated browser checks use Chromium with a deterministic synthetic microphone, including sustained recording beyond the initial transfer-buffer pool. Firefox and WebKit checks run the generated demo through worklet playback, mixer export, native Float32 WAV playback, reload and exact backup restoration. These verify application behavior and exported audio, not the quality or latency of a real microphone or an untested phone.
 
 ## Publish on GitHub Pages
 
@@ -78,7 +83,7 @@ Automated browser checks use Chromium with a deterministic synthetic microphone.
 3. The **Audio and browser checks** workflow runs on `main`. After it succeeds, **Publish studio to GitHub Pages** packages and deploys that exact commit.
 4. For an already verified commit, the publishing workflow can also be run manually from Actions.
 
-The build preserves the repository subpath, packages only public app assets, and generates an atomic, revisioned offline cache. Repository documentation, tests and development scripts are not included in the Pages artifact.
+The build preserves the repository subpath, packages only public app assets, and generates an atomic, revisioned offline cache. Each cached file must match its packaged SHA-256 integrity value, so incomplete or mixed-version updates leave the prior working studio available. Repository documentation, tests and development scripts are not included in the Pages artifact.
 
 Use the GitHub Actions source setting to make publication follow the browser checks. GitHub's alternative branch publishing can publish repository files immediately on a push, before those checks or the packaged offline build finish. The publishing workflow also checks the exact deployed service-worker fingerprint and exercises recording and WAV export against the live HTTPS site.
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
 import { createProject, createTrack, DEFAULT_MIX } from '../src/project.mjs';
 import { SHA256, hashBlob } from '../src/export/sha256.mjs';
-import { exportWav, exportWavParts, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
+import { exportWav, exportWavParts, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, MAX_RANGE_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
 import { exportProject, importProject, inspectProjectArchive, ARCHIVE_HEADER_BYTES, MAX_MANIFEST_BYTES, validateJsonTree } from '../src/export/archive.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -117,6 +117,60 @@ test('WAV refuses unsaved audio and misleading byte lengths; filenames cannot cr
   storage.assets.get('beat-audio').status = 'complete'; storage.assets.get('beat-audio').frames++;
   await assert.rejects(exportWav(storage, 'beat-audio'), { code: 'AUDIO_SIZE_MISMATCH' });
   assert.equal(safeFilename('../../song\\name:bad', 'wav'), '..-..-song-name-bad.wav');
+});
+
+test('fallback numbered WAVs read bounded exact ranges and reconstruct every stereo sample', async () => {
+  const { storage, master } = await fixture(), ranges = [];
+  const original = await storage.getAssetFile('master-audio');
+  storage.getAssetFile = async () => { throw Object.assign(new Error('Use bounded parts'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
+  storage.getAssetRange = async (id, range) => {
+    assert.equal(id, 'master-audio'); ranges.push(range);
+    return original.slice(range.startFrame * 8, (range.startFrame + range.frames) * 8);
+  };
+  const parts = [];
+  for await (const part of exportWavParts(storage, 'master-audio', { maxDataBytes: 16385 })) parts.push(part);
+  assert.equal(ranges.length, Math.ceil(master.byteLength / 16384));
+  assert.equal(ranges.at(-1).startFrame + ranges.at(-1).frames, master.length / 2);
+  assert.ok(ranges.every(range => range.frames * 8 <= 16384));
+  assert.deepEqual(new Uint8Array(await new Blob(parts.map(part => part.blob.slice(WAV_HEADER_BYTES))).arrayBuffer()), new Uint8Array(master.buffer));
+  for (const part of parts) {
+    const header = new DataView(await part.blob.slice(0, WAV_HEADER_BYTES).arrayBuffer());
+    assert.equal(header.getUint32(46, true), part.frames);
+    assert.equal(header.getUint32(54, true), part.frames * 8);
+    assert.equal(part.partCount, parts.length);
+  }
+});
+
+test('fallback WAV range requests never exceed 64 MiB even with the default RIFF-sized parts', async () => {
+  const storage = {
+    getAsset: async () => ({ frames: 100_000_000, channels: 2, sampleRate: 48000, status: 'complete' }),
+    getAssetFile: async () => { throw Object.assign(new Error('Large fallback asset'), { code: 'FALLBACK_EXPORT_LIMIT' }); },
+    getAssetRange: async (_id, range) => {
+      assert.deepEqual(range, { startFrame: 0, frames: MAX_RANGE_DATA_BYTES / 8 });
+      throw new Error('Boundary checked without allocating a long recording');
+    },
+  };
+  await assert.rejects(exportWavParts(storage, 'long-master').next(), /Boundary checked/);
+});
+
+test('fallback WAV cancellation cannot yield a late range or request another part', async () => {
+  const { storage } = await fixture(), abort = new AbortController();
+  let requests = 0;
+  storage.getAssetFile = async () => { throw Object.assign(new Error('Use parts'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
+  storage.getAssetRange = async () => { requests++; abort.abort(); return new Blob([new Float32Array(4096)]); };
+  await assert.rejects(exportWavParts(storage, 'master-audio', { signal: abort.signal, maxDataBytes: 16384 }).next(), { name: 'AbortError' });
+  assert.equal(requests, 1);
+});
+
+test('fallback WAV rejects short ranges and preserves unrelated storage failures', async () => {
+  const { storage } = await fixture();
+  storage.getAssetFile = async () => { throw Object.assign(new Error('Use parts'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
+  storage.getAssetRange = async () => new Blob([new Float32Array(1)]);
+  await assert.rejects(exportWavParts(storage, 'master-audio', { maxDataBytes: 16384 }).next(), { code: 'AUDIO_SIZE_MISMATCH' });
+  storage.getAssetFile = async () => { throw Object.assign(new Error('Checksum failed'), { code: 'CORRUPT_AUDIO' }); };
+  let rangeCalls = 0; storage.getAssetRange = async () => { rangeCalls++; };
+  await assert.rejects(exportWavParts(storage, 'master-audio').next(), { code: 'CORRUPT_AUDIO' });
+  assert.equal(rangeCalls, 0);
 });
 
 test('archive round trip preserves audio, sections, all takes, master, history and recovery assets with independent ids', async () => {

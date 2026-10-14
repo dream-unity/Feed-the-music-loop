@@ -54,9 +54,9 @@ function finishedCapture(f, { kind = 'vocal', rawStatus = 'complete', masterStat
     track, startFrame: 1000, createdAt: new Date().toISOString(), events: [], initialState: { tracks: [], baseFrames: 0, master: { volume: .8 }, input: clone(project.input), frame: 1000 },
     ended: true, end: { captureId: 'capture-1', kind, status: 'complete', startFrame: 1000, frames: rawFrames, track }, done: done.promise, resolveDone: done.resolve };
   project.pendingCapture = { id: 'capture-1', assetId: 'raw-1' };
-  const raw = { id: 'raw-1', projectId: project.id, channels: 1, sampleRate: 48000, kind, frames: rawFrames, checkpointFrames: rawFrames, status: rawStatus };
+  const raw = { id: 'raw-1', projectId: project.id, captureId: 'capture-1', channels: 1, sampleRate: 48000, kind, frames: rawFrames, checkpointFrames: rawFrames, status: rawStatus };
   storage.assets.set(raw.id, raw); controller.sealed.set(raw.id, { ...raw, finalized });
-  if (kind === 'vocal') { const master = { id: 'master-1', projectId: project.id, channels: 2, sampleRate: 48000, kind: 'master', frames: masterFrames, checkpointFrames: masterFrames, status: masterStatus }; storage.assets.set(master.id, master); controller.sealed.set(master.id, { ...master, finalized }); }
+  if (kind === 'vocal') { const master = { id: 'master-1', projectId: project.id, captureId: 'capture-1', channels: 2, sampleRate: 48000, kind: 'master', frames: masterFrames, checkpointFrames: masterFrames, status: masterStatus }; storage.assets.set(master.id, master); controller.sealed.set(master.id, { ...master, finalized }); }
   controller.state.capture = { kind, status: 'finishing' };
   return done;
 }
@@ -143,7 +143,7 @@ test('suspension during asset preparation lets its owner cancel without sealing 
   assert.equal(f.storage.finishCalls.length, 0); assert.ok(f.controller.pending);
   creation.resolve(); await starting; await recovery;
   assert.equal(f.engine.commands.some(command => command.type === 'arm'), false);
-  assert.equal(f.storage.assets.size, 2); assert.ok([...f.storage.assets.values()].every(asset => asset.status === 'cancelled'));
+  assert.equal(f.storage.assets.size, 0, 'cancelled preparation releases its stored audio');
   assert.equal(f.controller.pending, null); assert.equal(f.controller.state.project.pendingCapture, undefined);
   assert.equal(f.controller.state.capture, null); assert.equal(f.controller.engine, null);
 });
@@ -316,6 +316,27 @@ test('a performance commits only after both raw vocal and master seal', async ()
   assert.equal(f.controller.pending, null);
 });
 
+test('an incomplete arrangement preserves full recorded audio while limiting edits to its acknowledged prefix', async () => {
+  const f = fixture(); finishedCapture(f);
+  f.controller.pending.arrangementIncomplete = true; f.controller.pending.arrangementThroughFrame = 1043;
+  await f.controller.tryFinalize();
+  const project = f.controller.state.project, performance = project.performances[0];
+  assert.equal(performance.status, 'interrupted'); assert.equal(performance.arrangementIncomplete, true);
+  assert.equal(performance.frames, 100); assert.equal(performance.editableFrames, 43);
+  assert.equal(project.takes[0].frames, 100); assert.equal(f.storage.assets.get('master-1').frames, 100);
+  const { prepareRenderPlan } = await import('../src/export/render.mjs');
+  const plan = await prepareRenderPlan(f.storage, project, { performanceId: performance.id, tailSeconds: 0 });
+  assert.equal(plan.bodyFrames, 43);
+  await assert.rejects(prepareRenderPlan(f.storage, project, { performanceId: performance.id, durationSeconds: 100 / 48000 }), { code: 'INCOMPLETE_PERFORMANCE' });
+});
+
+test('an incomplete arrangement without a valid boundary never claims an editable exact prefix', async () => {
+  const f = fixture(); finishedCapture(f); f.controller.pending.arrangementIncomplete = true;
+  await f.controller.tryFinalize();
+  assert.equal(f.controller.state.project.performances[0].editableFrames, 0);
+  assert.equal(f.controller.state.project.performances[0].frames, 100);
+});
+
 for (const fault of [{ masterStatus: 'interrupted' }, { masterFrames: 91 }, { masterStatus: 'recording', finalized: false }]) {
   test(`partial performance never reports complete success (${JSON.stringify(fault)})`, async () => {
     const f = fixture(); finishedCapture(f, fault); await f.controller.tryFinalize();
@@ -374,7 +395,7 @@ test('cancel during asset creation seals prepared assets without arming', async 
   await f.controller.handle({ type: 'cancel' }); firstBegin.resolve(); await start;
   assert.equal(f.engine.commands.some((item) => item.type === 'arm'), false);
   assert.equal(f.controller.pending, null); assert.equal(f.controller.state.capture, null);
-  assert.equal(f.storage.assets.size, 2); assert.ok([...f.storage.assets.values()].every((asset) => asset.status === 'cancelled'));
+  assert.equal(f.storage.assets.size, 0, 'cancelled preparation releases its stored audio');
 });
 
 test('failed second-asset preparation cancels the first asset and never arms', async () => {
@@ -383,7 +404,132 @@ test('failed second-asset preparation cancels the first asset and never arms', a
   await assert.rejects(f.controller.startCapture('vocal'), /Master storage quota/);
   assert.equal(f.engine.commands.some((item) => item.type === 'arm'), false);
   assert.equal(f.controller.pending, null); assert.equal(f.controller.state.capture, null);
-  assert.equal(f.storage.assets.size, 1); assert.equal([...f.storage.assets.values()][0].status, 'cancelled');
+  assert.equal(f.storage.assets.size, 0, 'partly prepared recording is discarded after its intent is saved');
+});
+
+function cancelledCapture(f, options = {}) {
+  finishedCapture(f, { rawStatus: 'cancelled', masterStatus: 'cancelled', ...options });
+  f.controller.pending.end.status = 'cancelled';
+  f.controller.state.project.pendingCapture.masterAssetId = f.controller.pending.masterAssetId;
+  f.storage.projects.set(f.controller.state.project.id, clone(f.controller.state.project));
+}
+
+test('cancelled raw and master audio are deleted only after intent removal commits, retaining backing and real history', async () => {
+  const f = fixture(), commit = deferred(); cancelledCapture(f, { rawFrames: 10000000, masterFrames: 10000000 });
+  const project = f.controller.state.project, backing = createTrack({ assetId: 'backing', frames: 48000 });
+  project.tracks.push(backing); f.storage.assets.set('backing', { id: 'backing', projectId: project.id, status: 'complete' });
+  f.controller.history.push(project); // Stale pendingCapture alone must not prevent cleanup.
+  const deleted = []; f.storage.deleteHook = id => { assert.equal(f.storage.projects.get(project.id).pendingCapture, undefined); deleted.push(id); };
+  f.storage.saveHook = () => commit.promise;
+  const finishing = f.controller.tryFinalize(); await tick();
+  assert.equal(deleted.length, 0); assert.ok(f.controller.pending);
+  await assert.rejects(f.controller.startCapture('loop'), /recording is already active/);
+  commit.resolve(); await finishing;
+  assert.deepEqual(new Set(deleted), new Set(['raw-1', 'master-1'])); assert.ok(f.storage.assets.has('backing'));
+  assert.equal(f.controller.state.discarded.length, 0); assert.equal(f.controller.state.recovered.length, 0);
+  await f.controller.handle({ type: 'undo' }); assert.equal(f.controller.state.project.pendingCapture, undefined);
+  assert.equal(f.controller.state.project.tracks[0].assetId, 'backing');
+});
+
+test('cancel metadata failure preserves its intent and audio until an explicit cleanup retry commits', async () => {
+  const f = fixture(); cancelledCapture(f); const project = f.controller.state.project;
+  f.storage.saveHook = () => { throw new Error('Metadata quota exceeded'); };
+  await assert.rejects(f.controller.tryFinalize(), /Metadata quota/);
+  assert.equal(f.storage.assets.size, 2); assert.equal(project.pendingCapture.id, 'capture-1');
+  assert.equal(f.storage.projects.get(project.id).pendingCapture.id, 'capture-1'); assert.equal(f.controller.state.discarded.length, 2);
+  await assert.rejects(f.controller.deleteDiscardedRecording('raw-1'), /Metadata quota/);
+  assert.equal(f.storage.assets.size, 2); assert.equal(project.pendingCapture.id, 'capture-1');
+  f.storage.saveHook = null;
+  await f.controller.handle({ type: 'delete-discarded', id: 'raw-1' });
+  assert.equal(project.pendingCapture, undefined); assert.equal(f.storage.projects.get(project.id).pendingCapture, undefined);
+  assert.equal(f.storage.assets.has('raw-1'), false); assert.ok(f.storage.assets.has('master-1'));
+  await f.controller.deleteDiscardedRecording('master-1'); assert.equal(f.storage.assets.size, 0);
+});
+
+test('failed cancellation deletion stays discoverable and retry reclaims only the discarded recording', async () => {
+  const f = fixture(); cancelledCapture(f);
+  f.storage.deleteHook = id => { if (id === 'master-1') throw new Error('Disk deletion failed'); };
+  await f.controller.tryFinalize();
+  assert.equal(f.controller.pending, null); assert.equal(f.storage.assets.has('raw-1'), false); assert.ok(f.storage.assets.has('master-1'));
+  assert.deepEqual(f.controller.state.discarded.map(asset => asset.id), ['master-1']);
+  assert.equal(f.controller.state.recovered.length, 0); assert.ok(f.ui.notifications.some(item => /cleanup is pending/.test(item.message)));
+  f.storage.deleteHook = null; await f.controller.deleteDiscardedRecording('master-1');
+  assert.equal(f.storage.assets.size, 0); assert.equal(f.controller.state.discarded.length, 0);
+});
+
+for (const source of ['project', 'past', 'future']) {
+  test(`cancel cleanup preserves audio with a real ${source} reference`, async () => {
+    const f = fixture(); cancelledCapture(f, { kind: 'loop' });
+    const snapshot = clone(f.controller.state.project); snapshot.tracks.push(createTrack({ assetId: 'raw-1', frames: 100 }));
+    if (source === 'project') f.controller.state.project.tracks = snapshot.tracks;
+    else f.controller.history[source].push(snapshot);
+    await f.controller.tryFinalize(); assert.ok(f.storage.assets.has('raw-1'));
+    await assert.rejects(f.controller.deleteDiscardedRecording('raw-1'), /still used/);
+    assert.ok(f.storage.assets.has('raw-1'));
+  });
+}
+
+test('cancel cleanup cannot delete an asset from a different capture or an unsealed recoverable partner', async () => {
+  const f = fixture(); cancelledCapture(f);
+  f.storage.assets.get('raw-1').captureId = 'another-capture';
+  f.storage.assets.get('master-1').status = 'interrupted';
+  await f.controller.tryFinalize(); assert.equal(f.storage.assets.size, 2);
+  assert.equal(f.controller.state.project.pendingCapture.id, 'capture-1');
+  assert.deepEqual(f.controller.state.recovered.map(asset => asset.id), ['master-1']);
+  await assert.rejects(f.controller.deleteDiscardedRecording('raw-1'), /still used/);
+});
+
+test('reopening shows cancelled recordings as discard cleanup, and a stop during retry prevents deletion', async () => {
+  const f = fixture(); cancelledCapture(f); f.controller.pending = null; f.controller.state.capture = null;
+  await f.controller.openProject(f.controller.state.project.id);
+  assert.equal(f.controller.state.discarded.length, 2); assert.equal(f.controller.state.recovered.length, 0);
+  const read = deferred(), originalList = f.storage.listAssets.bind(f.storage);
+  f.storage.listAssets = async id => { await read.promise; return originalList(id); };
+  const deleting = f.controller.deleteDiscardedRecording('raw-1'); await tick();
+  await f.controller.handle({ type: 'stop' }); read.resolve(); await deleting;
+  assert.equal(f.storage.assets.size, 2); assert.equal(f.controller.state.busy, false);
+});
+
+test('Stop during an already issued discard deletion removes its completed card without affecting a new operation', async () => {
+  const f = fixture(), deletion = deferred(); cancelledCapture(f, { kind: 'loop' });
+  f.storage.deleteHook = () => { throw new Error('Retain for retry'); }; await f.controller.tryFinalize();
+  f.storage.deleteHook = () => deletion.promise;
+  const deleting = f.controller.deleteDiscardedRecording('raw-1'); await tick();
+  await f.controller.handle({ type: 'stop' }); f.controller.state.busy = true;
+  deletion.resolve(); await deleting;
+  assert.equal(f.storage.assets.has('raw-1'), false); assert.equal(f.controller.state.discarded.length, 0);
+  assert.equal(f.controller.state.busy, true, 'an older deletion cannot unlock a newer operation');
+});
+
+test('a fatal storage failure during cancelled-capture cleanup keeps the recovery banner and retained audio', async () => {
+  const f = fixture(), deletion = deferred(); cancelledCapture(f);
+  f.storage.deleteHook = () => deletion.promise;
+  const finishing = f.controller.tryFinalize(); await tick();
+  await f.controller.storageFailed('The storage worker stopped');
+  deletion.reject(new Error('Worker is unavailable')); await finishing;
+  assert.equal(f.controller.state.status, 'Saved audio needs recovery');
+  assert.match(f.controller.state.error, /Reopen the studio/); assert.equal(f.storage.assets.size, 2);
+  assert.equal(f.controller.state.capture, null); assert.equal(f.controller.state.busy, false);
+});
+
+test('a stale RPC error cannot replace the fatal storage recovery banner', async () => {
+  const f = fixture(); await f.controller.storageFailed('Storage worker stopped');
+  const message = f.controller.state.error, notifications = f.ui.notifications.length, originalError = console.error, logged = [];
+  console.error = error => logged.push(error);
+  try { f.controller.handleError(new Error('RPC failed after worker shutdown')); }
+  finally { console.error = originalError; }
+  assert.equal(f.controller.state.error, message); assert.equal(f.controller.state.status, 'Saved audio needs recovery');
+  assert.equal(f.ui.notifications.length, notifications); assert.equal(logged.length, 1);
+});
+
+test('discard cleanup cards are limited to cancelled captures supported by the safe retry action', async () => {
+  const f = fixture(); cancelledCapture(f); f.controller.pending = null; f.controller.state.capture = null;
+  const project = f.controller.state.project;
+  f.storage.assets.set('import-cancelled', { id: 'import-cancelled', projectId: project.id, kind: 'import', status: 'cancelled', frames: 100 });
+  await f.controller.openProject(project.id);
+  assert.deepEqual(new Set(f.controller.state.discarded.map(asset => asset.id)), new Set(['raw-1', 'master-1']));
+  await assert.rejects(f.controller.deleteDiscardedRecording('import-cancelled'), /Choose a discarded recording/);
+  assert.ok(f.storage.assets.has('import-cancelled'));
 });
 
 test('undo and project switching are blocked while capture intent is pending', async () => {
@@ -452,6 +598,73 @@ test('export owns the UI before its pending save and prevents capture or a secon
   await assert.rejects(f.controller.withExport(async () => {}), /already running/);
   gate.resolve(); await exporting;
   assert.equal(f.controller.state.exportProgress, null); assert.equal(f.controller.state.exporting, false);
+});
+
+test('a failed metadata save cannot trap sealed recordings behind the export button', async () => {
+  const f = fixture();
+  f.storage.saveHook = async () => { throw Object.assign(new Error('Device storage is full'), { name: 'QuotaExceededError' }); };
+  await assert.rejects(f.controller.saveNow(), { name: 'QuotaExceededError' });
+  let exported = false;
+  const result = await f.controller.withExport(async signal => {
+    assert.equal(signal.aborted, false); exported = true; return 'independent backup';
+  });
+  assert.equal(result, 'independent backup'); assert.equal(exported, true);
+  assert.equal(f.controller.state.exporting, false);
+  assert.match(f.controller.state.status, /save needs attention/i);
+  assert.match(f.controller.state.error, /could not be saved.*Download a backup/);
+  assert.ok(f.ui.notifications.some(item => item.kind === 'error' && /storage is full/.test(item.message)));
+  assert.equal(f.storage.saved.length, 0, 'export must not pretend the device save succeeded');
+});
+
+test('invalid local edits cannot overwrite the last reloadable project manifest', async () => {
+  const f = fixture(); await f.controller.saveNow();
+  const durable = clone(f.storage.projects.get(f.controller.state.project.id));
+  f.controller.state.project.sections.push({ id: 'bad-section', name: 'Invalid section', tracks: null });
+  await assert.rejects(f.controller.saveNow(), { code: 'INVALID_PROJECT' });
+  assert.deepEqual(f.storage.projects.get(durable.id), durable);
+  assert.equal(f.storage.saved.length, 1);
+  f.controller.state.project.sections.pop();
+  await f.controller.saveNow();
+  assert.equal(f.storage.saved.length, 2, 'corrected edits remain saveable');
+});
+
+test('cancelled or dead-worker exports never bypass the failed-save gate', async () => {
+  for (const failure of ['cancel', 'worker']) {
+    const f = fixture(), gate = deferred(); let exports = 0;
+    f.controller.flushSave = () => gate.promise;
+    const operation = f.controller.withExport(async () => { exports++; });
+    if (failure === 'cancel') f.controller.exportAbort.abort();
+    else await f.controller.storageFailed('Storage transport closed');
+    gate.reject(new Error('Save unavailable'));
+    await assert.rejects(operation);
+    assert.equal(exports, 0); assert.equal(f.controller.state.exporting, false);
+    if (failure === 'worker') assert.match(f.controller.state.error, /Reopen the studio/);
+  }
+  const f = fixture(); f.controller.state.storageFailed = true;
+  await assert.rejects(f.controller.withExport(async () => assert.fail('No export with a dead worker')), /Reopen/);
+});
+
+test('export after a save error still rejects an active recording before reading any files', async () => {
+  const f = fixture(); f.controller.state.capture = { status: 'recording' };
+  f.controller.flushSave = async () => { throw new Error('Quota full'); };
+  await assert.rejects(f.controller.withExport(async () => assert.fail('No export during capture')), /Finish or cancel/);
+  assert.equal(f.controller.state.exporting, false);
+});
+
+test('WAV download routes a fallback file limit into numbered range downloads', async () => {
+  const f = fixture(), downloads = [], pcm = new Float32Array([.1, -.2, .3, -.4]);
+  f.storage.assets.set('fallback-master', { id: 'fallback-master', projectId: f.controller.state.project.id, name: 'Long original', sampleRate: 48000, channels: 2, frames: 2, status: 'complete' });
+  f.storage.getAssetFile = async () => { throw Object.assign(new Error('Whole-file fallback limit'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
+  f.storage.getAssetRange = async (assetId, range) => {
+    assert.equal(assetId, 'fallback-master'); assert.deepEqual(range, { startFrame: 0, frames: 2 }); return new Blob([pcm]);
+  };
+  f.controller.offerDownload = (file, label, options) => downloads.push({ file, label, options });
+  await f.controller.downloadAsset('fallback-master', 'Stereo performance');
+  assert.equal(downloads.length, 1); assert.equal(downloads[0].file.assetId, 'fallback-master');
+  assert.equal(downloads[0].file.part, 1); assert.equal(downloads[0].file.partCount, 1);
+  assert.equal(downloads[0].options.autoDownload, false);
+  assert.match(f.ui.notifications.at(-1).message, /numbered WAV parts/);
+  assert.equal(f.controller.state.exporting, false);
 });
 
 test('edited export delegates default performance duration and honors explicit durations', async () => {
@@ -578,6 +791,16 @@ test('recovery uses and clears only matching persisted capture intent', async ()
   await f.controller.recoverAsset('recover-1');
   assert.equal(f.controller.state.project.pendingCapture, undefined); assert.equal(f.controller.state.project.takes[0].startFrame, 200);
   assert.equal(f.controller.state.project.performances[0].editableFrames, 90); assert.equal(f.controller.state.project.performances[0].events[0].frame, 220);
+});
+
+test('recovery retains an incomplete arrangement boundary even when more vocal and master samples survived', async () => {
+  const f = fixture(); recoverable(f, { kind: 'vocal' }); recoverable(f, { id: 'master', kind: 'master', channels: 2, leadAssetId: 'recover-1' });
+  f.controller.state.project.pendingCapture = { assetId: 'recover-1', startFrame: 200, sealedThroughFrame: 290, arrangementIncomplete: true, arrangementThroughFrame: 235, events: [], initialState: { frame: 200 } };
+  await f.controller.recoverAsset('recover-1');
+  const performance = f.controller.state.project.performances[0];
+  assert.equal(performance.arrangementIncomplete, true); assert.equal(performance.status, 'interrupted'); assert.equal(performance.editableFrames, 35);
+  assert.equal(performance.frames, 100); assert.equal(f.controller.state.project.takes[0].frames, 100);
+  assert.equal(f.storage.assets.get('master').frames, 100);
 });
 
 test('recovery checks the layer limit before reading waveforms and immediately before publishing', async () => {
