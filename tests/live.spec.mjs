@@ -153,6 +153,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     expect(await loopFile.failure()).toBeNull();
     loopRecording = inspectRecording(await readFile(await loopFile.path()), 2);
     expect(await page.evaluate(() => window.__unexpectedLoopMicRequests)).toBe(0);
+    await expect(page.locator('[data-ref="recovery"], [data-ref="downloads"]')).toHaveCount(0);
     await page.getByTestId('stop').click();
     // Recheck the network after the recording. A competing branch-root Pages
     // publish must not replace this package while its cached shell still works.

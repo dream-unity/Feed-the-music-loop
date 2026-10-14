@@ -118,19 +118,17 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .status-banner > [data-action="reload-studio"], .status-banner > [data-action="retry-recovery"] { font-size: 12px; }
 .status-banner.is-error { background: #392725; border-color: #69443c; color: #ffc7b8; }
 .status-banner, .toast > span, .dialog-copy { overflow-wrap: anywhere; }
-.recovery-panel { margin-top: 20px; padding: 22px; border: 1px solid #786b43; background: #302f23; border-radius: 16px; }
-.recovery-heading { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 18px; }
-.recovery-heading > .icon { color: #d4ca93; margin-top: 2px; }
-.recovery-heading h2 { color: #e7ddb0; font-size: 19px; }
-.recovery-heading p { color: #b7b095; font-size: 11px; margin-top: 7px; max-width: 720px; }
+.saved-mixes { margin-top: 28px; }
+.storage-recordings { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.storage-recordings > h3 { font-size: 14px; }
+.storage-recordings > .help-copy { margin: 8px 0 14px; }
 .recovery-list { display: flex; flex-direction: column; gap: 8px; }
-.recovery-card { display: flex; align-items: center; gap: 9px; border: 1px solid #59563d; background: #383729; padding: 11px; border-radius: 10px; }
+.recovery-card { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); background: var(--panel); padding: 11px; border-radius: 10px; }
 .recovery-card > div { flex: 1; min-width: 0; }
 .recovery-card strong { display: block; font-size: 12px; font-weight: 550; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.recovery-card > div > span { display: block; margin-top: 5px; font-size: 9px; color: #b3ae90; }
-.recovery-card > .button { font-size: 10px; min-height: 40px; }
+.recovery-card > div > span { display: block; margin-top: 5px; font-size: 10px; color: var(--muted); }
+.recovery-card > .button { font-size: 10px; min-height: 44px; }
 .recovery-card > .button .icon { width: 15px; height: 15px; }
-.recovery-card > .delete-saved-mix { color: var(--coral); flex: 0 0 48px; min-height: 48px; }
 .damaged-panel { margin-top: 20px; padding: 22px; border: 1px solid #765346; background: #332b25; border-radius: 16px; }
 .damaged-heading h2 { color: #ffd0b9; font-size: 19px; }
 .damaged-heading p { margin-top: 9px; max-width: 780px; color: #dec5b9; font-size: 12px; line-height: 1.65; }
@@ -180,12 +178,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .audition-panel > .button .icon { width: 14px; height: 14px; }
 .audition-progress-track { height: 3px; border-radius: 3px; overflow: hidden; background: #42634d; margin-top: 10px; }
 .audition-progress-track > div { width: 0; height: 100%; background: var(--mint); }
-.downloads-panel { margin-top: 16px; background: #21332a; border: 1px solid #42654e; border-radius: 14px; padding: 16px 18px; }
-.downloads-heading { display: flex; align-items: center; gap: 9px; color: #a9d7b8; font-size: 11px; margin-bottom: 11px; }
-.downloads-heading .icon { width: 15px; height: 15px; }
 .download-links { display: flex; gap: 9px; flex-wrap: wrap; max-height: min(360px,45vh); overflow: auto; padding: 3px; scrollbar-gutter: stable; overscroll-behavior: contain; }
-.download-parts-note { color: #c5dfcc; font-size: 12px; margin: 0 0 10px; }
-.download-part-label { display: block; color: #bfe4ca; font-size: 11px; margin-top: 4px; }
 .ready-download { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 10px 13px; border: 1px solid #42654e; border-radius: 9px; background: #2b4134; text-decoration: none; max-width: 100%; }
 .ready-download > .icon { width: 16px; height: 16px; }
 .ready-download > span { font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
@@ -676,7 +669,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .audition-copy { flex: 1; }
   .audition-time { order: 3; margin-left: 32px; }
   .audition-panel > .button { min-height: 48px; padding: 10px; }
-  .downloads-panel { padding: 16px; }
   .ready-download { width: 100%; }
   .export-progress-panel { gap: 12px; padding: 16px; }
   .export-progress-panel > .button { min-height: 48px; padding: 10px; font-size: 9px; }
@@ -831,10 +823,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .export-mix-row { gap: 12px; }
   .export-mix-buttons { width: 100%; }
   .export-mix-buttons > .button { flex: 1; }
-  .recovery-panel { padding: 17px; }
-  .recovery-heading { gap: 11px; }
-  .recovery-heading h2 { font-size: 18px; }
-  .recovery-heading p { font-size: 10px; }
   .recovery-card { gap: 7px; flex-wrap: wrap; }
   .recovery-card > div { flex: 0 0 100%; padding: 3px 3px 5px; }
   .recovery-card > .button { min-height: 48px; flex: 1; }
@@ -907,7 +895,6 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .status-banner { flex-wrap: wrap; gap: 8px; }
   .status-banner > [data-action="reload-studio"], .status-banner > [data-action="retry-recovery"] { flex-basis: 100%; }
   .preview-loading { order: 3; flex-basis: 100%; max-width: none; }
-  .recovery-card > .delete-saved-mix { flex: 0 0 48px; }
   .discarded-panel { padding: 17px; }
   .damaged-panel { padding: 17px; }
   .damaged-card { flex-wrap: wrap; }

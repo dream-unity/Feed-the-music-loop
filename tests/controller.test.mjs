@@ -365,7 +365,7 @@ test('reopening exposes audio named by an unfinished capture intent for recovery
   for(const [id,channels] of [['raw-pending',1],['master-pending',2]]) f.storage.assets.set(id,{id,projectId:project.id,channels,sampleRate:48000,frames:128,status:'recovered'});
   await f.controller.openProject(project.id);
   assert.deepEqual(new Set(f.controller.state.recovered.map(asset=>asset.id)),new Set(['raw-pending','master-pending']));
-  assert.ok(f.ui.notifications.some(item=>/unfinished recording was recovered/i.test(item.message)));
+  assert.ok(f.ui.notifications.some(item=>/unfinished recording was recovered.*Manage storage/i.test(item.message)));
 });
 
 test('Stop cancels recorded playback preparation without creating a late audio player', async () => {
@@ -959,20 +959,53 @@ test('export after a save error still rejects an active recording before reading
   assert.equal(f.controller.state.exporting, false);
 });
 
-test('WAV download routes a fallback file limit into numbered range downloads', async () => {
-  const f = fixture(), downloads = [], pcm = new Float32Array([.1, -.2, .3, -.4]);
+test('WAV fallback opens only the requested recording’s numbered parts', async () => {
+  const f = fixture(), dialogs = [], pcm = new Float32Array([.1, -.2, .3, -.4]);
+  f.controller.offerDownload({ blob: new Blob(['backup']), filename: 'Earlier project.fml' }, 'Project backup', { autoDownload: false, notify: false });
+  f.ui.showDownloadParts = (entries, label) => dialogs.push({ entries, label });
   f.storage.assets.set('fallback-master', { id: 'fallback-master', projectId: f.controller.state.project.id, name: 'Long original', sampleRate: 48000, channels: 2, frames: 2, status: 'complete' });
   f.storage.getAssetFile = async () => { throw Object.assign(new Error('Whole-file fallback limit'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
   f.storage.getAssetRange = async (assetId, range) => {
     assert.equal(assetId, 'fallback-master'); assert.deepEqual(range, { startFrame: 0, frames: 2 }); return new Blob([pcm]);
   };
-  f.controller.offerDownload = (file, label, options) => downloads.push({ file, label, options });
   await f.controller.downloadAsset('fallback-master', 'Stereo performance');
-  assert.equal(downloads.length, 1); assert.equal(downloads[0].file.assetId, 'fallback-master');
-  assert.equal(downloads[0].file.part, 1); assert.equal(downloads[0].file.partCount, 1);
-  assert.equal(downloads[0].options.autoDownload, false);
+  assert.equal(dialogs.length, 1); assert.equal(dialogs[0].label, 'Stereo performance');
+  const [part] = dialogs[0].entries;
+  assert.equal(dialogs[0].entries.length, 1); assert.equal(part.assetId, 'fallback-master');
+  assert.equal(part.part, 1); assert.equal(part.partCount, 1); assert.match(part.filename, /^Long original-part-1\.wav$/);
+  assert.equal(f.controller.state.downloads.length, 2, 'earlier URL remains tracked for revocation, but is absent from this dialog');
+  assert.ok(f.controller.urls.has(part.url));
   assert.match(f.ui.notifications.at(-1).message, /numbered WAV parts/);
   assert.equal(f.controller.state.exporting, false);
+  for (const url of f.controller.urls) URL.revokeObjectURL(url);
+});
+
+test('a later WAV part failure leaves the finished parts in the recording’s dialog', async () => {
+  const f = fixture(), dialogs = [], partBytes = 64 * 1024 * 1024;
+  const page = new Blob([new Uint8Array(1024 * 1024)]), firstPart = new Blob(Array(64).fill(page));
+  f.ui.showDownloadParts = (entries, label) => dialogs.push({ entries, label });
+  f.storage.assets.set('long-master', { id: 'long-master', projectId: f.controller.state.project.id, name: 'Long original', sampleRate: 48000, channels: 2, frames: partBytes / 8 + 1, status: 'complete' });
+  f.storage.getAssetFile = async () => { throw Object.assign(new Error('Whole-file fallback limit'), { code: 'FALLBACK_EXPORT_LIMIT' }); };
+  f.storage.getAssetRange = async (assetId, range) => {
+    assert.equal(assetId, 'long-master');
+    if (range.startFrame) throw new Error('Second part unavailable');
+    assert.equal(range.frames, partBytes / 8); return firstPart;
+  };
+  await assert.rejects(f.controller.downloadAsset('long-master', 'Stereo performance'), /Second part unavailable/);
+  assert.equal(dialogs.length, 1); assert.equal(dialogs[0].label, 'Stereo performance');
+  assert.equal(dialogs[0].entries.length, 1); assert.equal(dialogs[0].entries[0].part, 1); assert.equal(dialogs[0].entries[0].partCount, 2);
+  assert.ok(f.controller.urls.has(dialogs[0].entries[0].url));
+  assert.equal(f.ui.notifications.some(item => /complete recording.*ready/.test(item.message)), false);
+  assert.equal(f.controller.state.exporting, false);
+  for (const url of f.controller.urls) URL.revokeObjectURL(url);
+});
+
+test('single downloads do not promise a studio-wide download list', () => {
+  const f = fixture();
+  f.ui.showDownloadParts = () => assert.fail('A single download does not need a parts dialog');
+  f.controller.offerDownload({ blob: new Blob(['recording']), filename: 'Original.wav' }, 'Clean recording', { autoDownload: false });
+  assert.deepEqual(f.ui.notifications.at(-1), { message: 'Your download is ready.', kind: 'success' });
+  for (const url of f.controller.urls) URL.revokeObjectURL(url);
 });
 
 test('edited export delegates default performance duration and honors explicit durations', async () => {
