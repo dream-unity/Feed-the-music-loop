@@ -2,14 +2,14 @@
 
 A vocal looper and song studio that runs entirely in your browser. Record a beat with your voice, loop it, add layers, sing a full lead over the groove, and shape the result into a song.
 
-**Website:** [dream-unity.github.io/Feed-the-music-loop](https://dream-unity.github.io/Feed-the-music-loop/) once GitHub Pages is enabled and the publishing workflow succeeds.
+**Website:** [dream-unity.github.io/Feed-the-music-loop](https://dream-unity.github.io/Feed-the-music-loop/)
 
 ## Make your first song
 
 1. Open the studio over HTTPS and use headphones. Wired headphones avoid the extra delay common with Bluetooth.
-2. Choose **Record a loop**. Allow microphone access, perform your first beat, then finish the loop. Its length becomes your song's base cycle.
+2. Choose **Add loop**. Allow microphone access, perform your first beat, then finish the loop. Its length becomes your song's base cycle.
 3. Add another loop. Choose a cycle length to keep layers aligned, or an independent length for evolving patterns. Your existing layers keep playing.
-4. Choose **Record a vocal** and sing for as long as you need. Finish when you are done. The studio keeps the separate vocal and a stereo recording of the complete performance.
+4. Choose **Sing over loops** and sing for as long as you need. Finish when you are done. The studio keeps the separate vocal and a stereo recording of the complete performance.
 5. Open **Mix** to adjust level, pan, low/mid/high EQ, low cut, compression, room reverb and echo. Try the Beat, Bass, Harmony, Lead and Texture starting points, then fine-tune them.
 6. Save sections such as an intro and chorus, and launch them at cycle boundaries while performing. Use the Song view to audition takes, export the original performance, or render an edited mix.
 7. Download a **project backup** regularly. It contains your project and original audio and can be restored on another supported browser or device.
@@ -20,6 +20,7 @@ The built-in demo creates a few synthetic layers locally, so you can try the stu
 
 - Free-length first loop; additional synchronized or independent loops.
 - Optional click and four- or eight-beat first-loop count-in. The click follows your loop's subdivisions and stays out of the recorded mix.
+- Microphone input selection for built-in, USB and headset inputs after permission is granted. Switching is blocked during recording and keeps the previous input if the replacement fails.
 - Separate continuous lead recordings while loops play.
 - An original stereo master for each vocal performance, alongside editable vocal audio and timestamped arrangement events.
 - Sample-frame transport, loop boundaries and queued section changes in an `AudioWorklet`.
@@ -58,7 +59,7 @@ Browser storage is not a substitute for a backup. Clearing site data, removing a
 
 Recording duration is limited by device storage, CPU and browser behavior, rather than an arbitrary short timer. The live engine reads bounded page windows rather than loading an entire recording into an `AudioBuffer`. More simultaneous layers still require more memory and processing. The project format guards against excessive metadata and permits up to 512 loop tracks; that is a format ceiling, not a claim that every device can play 512 effects-heavy tracks.
 
-Ordinary audio-file import is limited to 128 MiB and 20 minutes because browser decoding needs a full buffer. Direct microphone recording uses the streaming path. Standard RIFF WAV has a 4 GiB size limit; exceptionally long exports are split into numbered WAV parts. The IndexedDB fallback cannot assemble a single export asset over 128 MiB and reports that limit rather than exhausting memory.
+Ordinary audio-file import is limited to 128 MiB and 20 minutes because browser decoding needs a full buffer. Direct microphone recording uses the streaming path. Standard RIFF WAV has a 4 GiB size limit; exceptionally long exports are split into numbered WAV parts. Every part remains available as a separate download link; save each one to retain the complete recording. The latest eight export groups remain linked until the page closes. The IndexedDB fallback cannot assemble a single export asset over 128 MiB and reports that limit rather than exhausting memory.
 
 Keep the app foregrounded for reliable recording on phones. Mobile operating systems can suspend audio when the screen locks or another app takes the microphone. A wake lock is requested where supported; it cannot override operating-system suspension. Interrupted takes are marked accordingly.
 
@@ -66,7 +67,7 @@ Keep the app foregrounded for reliable recording on phones. Mobile operating sys
 
 Use a recent Chromium-based desktop browser for the primary workflow. The application requires a secure context, microphone permission and `AudioWorklet`. The code includes feature detection and an IndexedDB storage fallback; platform behavior still differs. Safari/iOS, Bluetooth routing, background recording and physical-device latency need hands-on testing on your specific device.
 
-Automated browser checks use Chromium with a deterministic synthetic microphone. They verify application behavior and exported audio, not the quality or latency of a real microphone or an untested phone.
+Automated browser checks use Chromium with a deterministic synthetic microphone. Firefox and WebKit checks run the generated demo through native playback, mixer export, reload and exact backup restoration. These verify application behavior and exported audio, not the quality or latency of a real microphone or an untested phone.
 
 ## Publish on GitHub Pages
 
@@ -76,6 +77,8 @@ Automated browser checks use Chromium with a deterministic synthetic microphone.
 4. For an already verified commit, the publishing workflow can also be run manually from Actions.
 
 The build preserves the repository subpath, packages only public app assets, and generates an atomic, revisioned offline cache. Repository documentation, tests and development scripts are not included in the Pages artifact.
+
+Use the GitHub Actions source setting to make publication follow the browser checks. GitHub's alternative branch publishing can publish repository files immediately on a push, before those checks or the packaged offline build finish. The publishing workflow also checks the exact deployed service-worker fingerprint and exercises recording and WAV export against the live HTTPS site.
 
 ## Development and verification
 
@@ -104,4 +107,6 @@ Core modules:
 
 The archive layout and validation rules are documented in [`src/export/FORMAT.md`](src/export/FORMAT.md).
 
-Implementation references include the [Web Audio specification](https://webaudio.github.io/web-audio-api/), [AudioWorklet processing rules](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor/process), the [File System standard](https://fs.spec.whatwg.org/), [output latency semantics](https://developer.mozilla.org/en-US/docs/Web/API/AudioContext/outputLatency) and [GitHub Pages deployment documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
+A reproducible [audio benchmark](docs/audio-benchmark.md) covers independently phased long loops, delayed page delivery and simultaneous vocal/master recording, with measured results and their limits.
+
+Implementation references include the [Web Audio specification](https://webaudio.github.io/web-audio-api/), [AudioWorklet processing rules](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor/process), the [File System standard](https://fs.spec.whatwg.org/), [output latency semantics](https://developer.mozilla.org/en-US/docs/Web/API/AudioContext/outputLatency), [microphone enumeration](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/enumerateDevices) and [GitHub Pages deployment documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).

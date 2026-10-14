@@ -259,6 +259,39 @@ test('stop while microphone permission is pending cancels the late stream', asyn
   await expect.poll(() => page.evaluate(() => window.__testMicStreams.length > 0 && window.__testMicStreams.every(stream => stream.getTracks().every(track => track.readyState === 'ended')))).toBe(true);
 });
 
+test('microphone inputs switch between takes and remain locked while recording', async ({ page }) => {
+  await boot(page);
+  await page.getByTestId('enable-mic').click();
+  await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Disconnect microphone');
+  await page.locator('.advanced-settings > summary').click();
+  const input = page.getByRole('combobox', { name: 'Microphone input', exact: true });
+  await expect(input).toBeEnabled();
+  await expect.poll(() => input.locator('option').count()).toBeGreaterThan(1);
+  const deviceId = await input.evaluate(select => [...select.options].findLast(option => option.value && !option.disabled).value);
+  await input.selectOption(deviceId);
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue(deviceId);
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => {
+    const streams = window.__testMicStreams;
+    return streams.length >= 2 && streams.slice(0, -1).every(stream => stream.getTracks().every(track => track.readyState === 'ended')) && streams.at(-1).getAudioTracks().some(track => track.readyState === 'live');
+  })).toBe(true);
+
+  await page.getByTestId('add-loop').click();
+  await state(page, 'recording');
+  await expect(input).toBeDisabled();
+  await page.waitForTimeout(1100);
+  await page.getByTestId('finish').click();
+  await state(page, 'idle');
+  await expect(tracks(page)).toHaveCount(1);
+  await expect(input).toBeEnabled();
+  await expect.poll(async () => Number(await page.locator('[data-ref="output-db"]').textContent())).toBeGreaterThan(-60);
+  await page.getByTestId('stop').click();
+  await page.getByTestId('enable-mic').click();
+  await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Connect microphone');
+  await expect.poll(() => page.evaluate(() => window.__testMicStreams.every(stream => stream.getTracks().every(track => track.readyState === 'ended')))).toBe(true);
+});
+
 test('browser storage keeps exact PCM and prevents competing recovery during recording', async ({ page }) => {
   await boot(page);
   const result = await page.evaluate(async () => {
@@ -370,4 +403,9 @@ test('narrow touch layout keeps recording controls visible and usable', async ({
   await expect(page.getByRole('slider', { name: 'Warmth · low EQ', exact: true })).toBeVisible();
   await reviewScreenshot(page, testInfo, 'mobile-mix');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.locator('.advanced-settings > summary').click();
+  await page.locator('.advanced-settings').scrollIntoViewIfNeeded();
+  const timingScreenshot = testInfo.outputPath('review-mobile-timing.png');
+  await page.screenshot({ path: timingScreenshot, animations: 'disabled' });
+  await testInfo.attach('mobile-timing', { path: timingScreenshot, contentType: 'image/png' });
 });

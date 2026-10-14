@@ -13,6 +13,7 @@ const turn = () => new Promise(resolve => setImmediate(resolve));
 /** Device fakes leave EventTarget/CustomEvent native, including browser listener semantics. */
 function fakeBrowser(t, options = {}) {
   const requests = [], contexts = [], nodes = [], sources = [], channels = [];
+  let enumerations = 0;
   const originals = new Map();
   const replace = (name, value) => {
     originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -59,9 +60,16 @@ function fakeBrowser(t, options = {}) {
   replace('MessageChannel', class {
     constructor() { this.port1 = new Port(); this.port2 = new Port(); channels.push(this); }
   });
-  replace('navigator', { mediaDevices: { getUserMedia(constraints) {
+  const mediaDevices = new EventTarget();
+  mediaDevices.getUserMedia = function (constraints) {
     const request = deferred(); requests.push({ ...request, constraints }); return request.promise;
-  } } });
+  };
+  mediaDevices.enumerateDevices = async function () {
+    enumerations++; await options.enumerationGate?.promise;
+    if (options.enumerationError) throw options.enumerationError;
+    return options.devices || [];
+  };
+  replace('navigator', { mediaDevices });
   const storage = { async attachAudioPort(port) {
     await options.storageGate?.promise;
     if (options.storageError) throw options.storageError;
@@ -75,16 +83,16 @@ function fakeBrowser(t, options = {}) {
       else delete globalThis[name];
     }
   });
-  return { engine, requests, contexts, nodes, sources, channels, storage,
+  return { engine, requests, contexts, nodes, sources, channels, storage, mediaDevices, get enumerations() { return enumerations; },
     init: () => engine.init(createProject('Lifecycle test')),
     commands: () => nodes.flatMap(node => node.port.messages).filter(message => !['storage-port', 'pool'].includes(message.type)) };
 }
 
-function microphone() {
+function microphone(deviceId = '') {
   class Track extends EventTarget {
     constructor() { super(); this.readyState = 'live'; this.stopCount = 0; }
     stop() { this.stopCount++; this.readyState = 'ended'; }
-    getSettings() { return { sampleRate: 48000, channelCount: 1 }; }
+    getSettings() { return { sampleRate: 48000, channelCount: 1, deviceId, groupId: 'private-device-group' }; }
     interrupt(type) { if (type === 'ended') this.readyState = 'ended'; this.dispatchEvent(new Event(type)); }
   }
   const track = new Track();
@@ -314,4 +322,122 @@ test('removing the only unready track unblocks waiting for the remaining residen
   const tracks = ['one', 'two'].map(id => createTrack({ id, assetId: `asset-${id}`, frames: 48000 }));
   h.engine.syncTracks(tracks); h.nodes[0].emit({ type: 'track-ready', id: 'one', assetId: 'asset-one' });
   const waiting = h.engine.waitUntilReady(50); h.engine.syncTracks([tracks[0]]); await waiting;
+});
+
+test('microphone enumeration filters inputs and exposes only session IDs and labels without requesting access', async t => {
+  const options = { devices: [
+    { kind: 'audioinput', deviceId: 'default', label: 'System microphone', groupId: 'private-group' },
+    { kind: 'videoinput', deviceId: 'camera', label: 'Camera', groupId: 'private-group' },
+    { kind: 'audiooutput', deviceId: 'speakers', label: 'Speakers' },
+    { kind: 'audioinput', deviceId: 'usb-input', label: 'USB microphone', groupId: 'private-group' },
+  ] }, h = fakeBrowser(t, options);
+  assert.deepEqual(await h.engine.listMicrophones(), [{ id: 'default', label: 'System microphone' }, { id: 'usb-input', label: 'USB microphone' }]);
+  assert.equal(h.requests.length, 0); assert.equal(h.contexts.length, 0);
+  options.enumerationError = new Error('Enumeration unavailable'); assert.deepEqual(await h.engine.listMicrophones(), []);
+  delete h.mediaDevices.enumerateDevices; assert.deepEqual(await h.engine.listMicrophones(), []);
+});
+
+test('default input leaves device constraints open while a named input uses an exact constraint', async t => {
+  const h = fakeBrowser(t); await h.init();
+  const events = []; h.engine.addEventListener('mic', e => events.push(e.detail));
+  const first = h.engine.enableMic(), defaultStream = microphone('resolved-default');
+  assert.equal(Object.hasOwn(h.requests[0].constraints.audio, 'deviceId'), false);
+  assert.equal(h.requests[0].constraints.audio.echoCancellation, false);
+  h.requests[0].resolve(defaultStream); await first;
+  assert.equal(events.at(-1).selectedDeviceId, ''); assert.equal(events.at(-1).settings.deviceId, 'resolved-default');
+  assert.equal(Object.hasOwn(events.at(-1).settings, 'groupId'), false);
+  const switching = h.engine.enableMic('usb-input');
+  assert.deepEqual(h.requests[1].constraints.audio.deviceId, { exact: 'usb-input' });
+  assert.equal(h.engine.stream, defaultStream); assert.equal(h.sources[0].connected, true);
+  assert.equal(defaultStream.track.readyState, 'live', 'The current microphone remains usable while the new one opens');
+  const replacement = microphone('usb-input'); h.requests[1].resolve(replacement); await switching;
+  assert.equal(defaultStream.track.readyState, 'ended'); assert.equal(h.sources[0].disconnected, true);
+  assert.equal(h.sources[1].connected, true); assert.equal(h.engine.stream, replacement);
+  assert.equal(h.engine.selectedDeviceId, 'usb-input'); assert.equal(events.at(-1).selectedDeviceId, 'usb-input');
+  assert.equal(await h.engine.enableMic('usb-input'), replacement); assert.equal(h.requests.length, 2);
+});
+
+for (const failure of ['NotAllowedError', 'OverconstrainedError', 'sourceError', 'connectError']) {
+  test(`failed microphone switching (${failure}) preserves the previous live source and preference`, async t => {
+    const options = {}, h = fakeBrowser(t, options); await h.init();
+    const enabling = h.engine.enableMic('old'), old = microphone('old'); h.requests[0].resolve(old); await enabling;
+    const switching = h.engine.enableMic('new');
+    const rejected = assert.rejects(switching, failure === 'NotAllowedError' ? /denied/i : failure === 'OverconstrainedError' ? /selected microphone.*unavailable/i : /connection failed/i);
+    let abandoned;
+    if (failure.endsWith('Error') && !['sourceError', 'connectError'].includes(failure)) h.requests[1].reject(Object.assign(new Error('Device unavailable'), { name: failure }));
+    else { options[failure] = new Error('Input connection failed'); abandoned = microphone('new'); h.requests[1].resolve(abandoned); }
+    await rejected;
+    assert.equal(h.engine.stream, old); assert.equal(old.track.readyState, 'live'); assert.equal(h.sources[0].connected, true);
+    assert.equal(h.engine.selectedDeviceId, 'old'); assert.equal(await h.engine.enableMic('old'), old);
+    if (abandoned) assert.equal(abandoned.track.readyState, 'ended');
+    if (failure === 'connectError') assert.equal(h.sources[1].disconnected, true);
+  });
+}
+
+test('switching is rejected during capture and a pending replacement cannot enter a newly started take', async t => {
+  const h = fakeBrowser(t); await h.init();
+  const enabling = h.engine.enableMic('old'), old = microphone('old'); h.requests[0].resolve(old); await enabling;
+  h.nodes[0].emit({ type: 'state', playing: true, capture: { id: 'take', status: 'queued' } });
+  await assert.rejects(h.engine.enableMic('new'), /Finish or cancel.*recording/i);
+  assert.equal(await h.engine.enableMic('old'), old); assert.equal(h.requests.length, 1);
+  h.nodes[0].emit({ type: 'capture-end' });
+  const switching = h.engine.enableMic('new'); const rejected = assert.rejects(switching, /Finish or cancel.*recording/i);
+  h.nodes[0].emit({ type: 'state', playing: true, capture: { id: 'take-2', status: 'recording' } });
+  const replacement = microphone('new'); h.requests[1].resolve(replacement); await rejected;
+  assert.equal(replacement.track.readyState, 'ended'); assert.equal(old.track.readyState, 'live');
+  assert.equal(h.engine.stream, old); assert.equal(h.sources.length, 1);
+});
+
+test('concurrent choices share equal requests and retire stale grants without disturbing the newest source', async t => {
+  const h = fakeBrowser(t); await h.init();
+  const first = h.engine.enableMic('first'), shared = h.engine.enableMic('first');
+  const staleFirst = assert.rejects(first, { name: 'AbortError' }), staleShared = assert.rejects(shared, { name: 'AbortError' });
+  assert.equal(h.requests.length, 1);
+  const second = h.engine.enableMic('second'), current = microphone('second');
+  h.requests[1].resolve(current); await second;
+  const stale = microphone('first'); h.requests[0].resolve(stale); await Promise.all([staleFirst, staleShared]);
+  assert.equal(stale.track.readyState, 'ended'); assert.equal(current.track.readyState, 'live');
+  assert.equal(h.engine.stream, current); assert.equal(h.engine.selectedDeviceId, 'second');
+});
+
+test('reselecting the current microphone cancels a pending alternative without reopening the current source', async t => {
+  const h = fakeBrowser(t); await h.init();
+  const first = h.engine.enableMic('old'), old = microphone('old'); h.requests[0].resolve(old); await first;
+  const switching = h.engine.enableMic('new'), rejected = assert.rejects(switching, { name: 'AbortError' });
+  assert.equal(await h.engine.enableMic('old'), old);
+  const stale = microphone('new'); h.requests[1].resolve(stale); await rejected;
+  assert.equal(stale.track.readyState, 'ended'); assert.equal(old.track.readyState, 'live'); assert.equal(h.requests.length, 2);
+});
+
+for (const action of ['stop', 'cancel', 'clear', 'disableMic', 'close']) {
+  test(`${action} cancels a pending microphone replacement without connecting a late grant`, async t => {
+    const h = fakeBrowser(t); await h.init();
+    const first = h.engine.enableMic('old'), old = microphone('old'); h.requests[0].resolve(old); await first;
+    const switching = h.engine.enableMic('new'), rejected = assert.rejects(switching, { name: 'AbortError' });
+    await h.engine[action](); const stale = microphone('new'); h.requests[1].resolve(stale); await rejected;
+    assert.equal(stale.track.readyState, 'ended'); assert.equal(h.sources.length, 1);
+    assert.equal(old.track.readyState, ['disableMic', 'close'].includes(action) ? 'ended' : 'live');
+    assert.equal(h.engine.selectedDeviceId, 'old');
+  });
+}
+
+test('device lists refresh after access, hardware changes and disconnection, and listeners stop on close', async t => {
+  const options = { devices: [{ kind: 'audioinput', deviceId: 'one', label: 'Microphone one' }] }, h = fakeBrowser(t, options);
+  const events = []; h.engine.addEventListener('devices', e => events.push(e.detail.devices));
+  h.mediaDevices.dispatchEvent(new Event('devicechange')); await turn(); assert.equal(h.enumerations, 0);
+  await h.init(); const first = h.engine.enableMic('one'), stream = microphone('one'); h.requests[0].resolve(stream); await first; await turn();
+  assert.deepEqual(events.at(-1), [{ id: 'one', label: 'Microphone one' }]);
+  options.devices.push({ kind: 'audioinput', deviceId: 'two', label: 'Microphone two', groupId: 'not-exposed' });
+  h.mediaDevices.dispatchEvent(new Event('devicechange')); await turn(); assert.equal(events.at(-1).length, 2);
+  options.devices = [options.devices[1]]; stream.track.interrupt('ended'); await turn();
+  assert.deepEqual(events.at(-1), [{ id: 'two', label: 'Microphone two' }]);
+  const before = h.enumerations; await h.engine.close(); h.mediaDevices.dispatchEvent(new Event('devicechange')); await turn();
+  assert.equal(h.enumerations, before); assert.deepEqual(await h.engine.listMicrophones(), []);
+});
+
+test('late device enumeration after close cannot publish a stale devices event', async t => {
+  const enumerationGate = deferred(), h = fakeBrowser(t, { enumerationGate }); await h.init();
+  const events = []; h.engine.addEventListener('devices', e => events.push(e.detail));
+  const first = h.engine.enableMic(), stream = microphone(); h.requests[0].resolve(stream); await first;
+  await h.engine.close(); enumerationGate.resolve(); await turn(); assert.equal(events.length, 0);
 });

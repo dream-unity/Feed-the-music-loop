@@ -152,6 +152,7 @@ test('storage management preserves a cancelled deletion, then removes the confir
   await expect(dialog).toHaveAccessibleName('Make room for your next song');
   const currentProject = dialog.locator('.storage-project.is-current');
   await expect(currentProject).toContainText('Current project');
+  await screenshot(page, testInfo, 'storage-manager');
   const originalProjectId = await currentProject.locator('[data-action="delete-project"]').getAttribute('data-id');
   await currentProject.locator('[data-action="delete-project"]').click();
   await expect(dialog).toContainText('permanently removes this project');

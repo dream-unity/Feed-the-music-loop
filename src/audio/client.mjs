@@ -9,6 +9,7 @@ export class AudioEngine extends EventTarget {
     super(); this.storage = storage; this.context = null; this.node = null; this.stream = null; this.source = null;
     this.micGeneration = 0; this.initPromise = null; this.tracks = new Map(); this.playing = false; this.frame = 0;
     this.capture = null; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
+    this.selectedDeviceId = ''; this.pendingDeviceId = null; this.deviceTarget = null; this.deviceListener = null; this.deviceListGeneration = 0;
     this.suppressedStateChange = false;
     this.readyTracks = new Set(); this.readyWaiters = new Set(); this.trackAssets = new Map(); this.readinessGeneration = 0;
     this.resumeTimeoutMs = resumeTimeoutMs;
@@ -113,43 +114,88 @@ export class AudioEngine extends EventTarget {
       check();
     });
   }
-  async enableMic() {
+  async listMicrophones() {
+    const devices = globalThis.navigator?.mediaDevices;
+    if (this.closed || typeof devices?.enumerateDevices !== 'function') return [];
+    try {
+      const available = await devices.enumerateDevices();
+      return available.filter(device => device.kind === 'audioinput').map(device => ({ id: String(device.deviceId || ''), label: String(device.label || '') }));
+    } catch { return []; }
+  }
+  async refreshMicrophones() {
+    const generation = ++this.deviceListGeneration, devices = await this.listMicrophones();
+    if (!this.closed && generation === this.deviceListGeneration) this.dispatchEvent(event('devices', { devices }));
+    return devices;
+  }
+  watchMicrophones() {
+    // Device enumeration never opens the microphone. Observe changes only after
+    // an explicit successful access request, and retain no preference on disk.
+    const target = globalThis.navigator?.mediaDevices;
+    if (!this.deviceTarget && typeof target?.addEventListener === 'function') {
+      this.deviceTarget = target; this.deviceListener = () => { void this.refreshMicrophones(); };
+      target.addEventListener('devicechange', this.deviceListener);
+    }
+    void this.refreshMicrophones();
+  }
+  async enableMic(deviceId = '') {
+    if (this.closed) throw abortError();
     if (!this.node) throw new Error('Enable the audio engine first.');
-    if (this.stream?.getAudioTracks().some(t => t.readyState === 'live')) return this.stream;
-    if (this.micPromise) return this.micPromise;
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access requires the HTTPS site and a supported browser.');
+    const requestedDeviceId = typeof deviceId === 'string' ? deviceId : '';
+    const currentIsLive = this.stream?.getAudioTracks().some(track => track.readyState === 'live');
+    if (currentIsLive && this.selectedDeviceId === requestedDeviceId) {
+      if (this.micPromise && this.pendingDeviceId !== requestedDeviceId) this.cancelPendingMic();
+      return this.stream;
+    }
+    if (this.capture) throw new Error('Finish or cancel the recording before changing microphones.');
+    if (this.micPromise && this.pendingDeviceId === requestedDeviceId) return this.micPromise;
+    if (!globalThis.navigator?.mediaDevices?.getUserMedia) throw new Error('Microphone access requires the HTTPS site and a supported browser.');
+    if (this.micPromise) this.cancelPendingMic();
     const token = ++this.micGeneration;
+    this.pendingDeviceId = requestedDeviceId;
     this.micPromise = (async () => {
-      let stream;
+      let stream, source;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 1 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: { ideal: 0.01 } }, video: false });
-        if (token !== this.micGeneration || this.closed) { for (const track of stream.getTracks()) track.stop(); throw abortError(); }
-        this.stream = stream; this.source = this.context.createMediaStreamSource(stream); this.source.connect(this.node);
+        const audio = { channelCount: { ideal: 1 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: { ideal: 0.01 } };
+        if (requestedDeviceId) audio.deviceId = { exact: requestedDeviceId };
+        stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+        if (token !== this.micGeneration || this.closed) throw abortError();
+        // A recording may have begun while a device request was pending.
+        if (this.capture) throw new Error('Finish or cancel the recording before changing microphones.');
+        if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('The selected microphone did not provide a live audio input. Choose another microphone and try again.');
+        source = this.context.createMediaStreamSource(stream); source.connect(this.node);
         for (const track of stream.getAudioTracks()) {
-          track.addEventListener('ended', () => { if (this.stream === stream) { this.send('interrupt', { reason: 'Microphone disconnected' }); this.dispatchEvent(event('device-lost', { message: 'The microphone disconnected. The recorded portion is retained.' })); this.disableMic(); } });
+          track.addEventListener('ended', () => { if (this.stream === stream) { this.send('interrupt', { reason: 'Microphone disconnected' }); this.dispatchEvent(event('device-lost', { message: 'The microphone disconnected. The recorded portion is retained.' })); this.disableMic(); void this.refreshMicrophones(); } });
           track.addEventListener('mute', () => { if (this.stream === stream && this.capture) { this.send('interrupt', { reason: 'Microphone muted by device' }); this.dispatchEvent(event('interrupted', { message: 'Microphone input was interrupted. The take was stopped to preserve its timing.' })); } });
         }
-        this.dispatchEvent(event('mic', { enabled: true, settings: stream.getAudioTracks()[0]?.getSettings?.() || {} }));
+        const { groupId, ...settings } = stream.getAudioTracks()[0]?.getSettings?.() || {};
+        // Keep the old graph alive until acquiring and connecting the replacement
+        // has succeeded. A denied or unavailable choice must not destroy it.
+        const previousStream = this.stream, previousSource = this.source;
+        this.stream = stream; this.source = source; this.selectedDeviceId = requestedDeviceId;
+        previousSource?.disconnect(); for (const track of previousStream?.getTracks() || []) track.stop();
+        this.dispatchEvent(event('mic', { enabled: true, selectedDeviceId: requestedDeviceId, settings }));
+        this.watchMicrophones();
         return stream;
       } catch (error) {
+        source?.disconnect();
         if (stream) {
-          if (this.stream === stream) { this.source?.disconnect(); this.source = null; this.stream = null; }
           for (const track of stream.getTracks()) track.stop();
         }
-        if (token !== this.micGeneration) throw abortError();
+        if (token !== this.micGeneration || this.closed) throw abortError();
         if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') throw new Error('Microphone access was denied. Allow the microphone in this site’s browser settings, then try again.');
         if (error.name === 'NotFoundError') throw new Error('No microphone was found. Connect a microphone and try again.');
         if (error.name === 'NotReadableError') throw new Error('The microphone is busy or unavailable. Close another app using it and try again.');
+        if (error.name === 'OverconstrainedError') throw new Error('The selected microphone is unavailable. Choose another microphone or System default, then try again.');
         throw error;
-      } finally { if (token === this.micGeneration) this.micPromise = null; }
+      } finally { if (token === this.micGeneration) { this.micPromise = null; this.pendingDeviceId = null; } }
     })();
     return this.micPromise;
   }
-  cancelPendingMic() { ++this.micGeneration; this.micPromise = null; }
+  cancelPendingMic() { ++this.micGeneration; this.micPromise = null; this.pendingDeviceId = null; }
   disableMic() {
     this.cancelPendingMic(); this.source?.disconnect(); this.source = null;
     const stream = this.stream; this.stream = null; for (const track of stream?.getTracks() || []) track.stop();
-    this.send('configure', { monitor: false }); this.dispatchEvent(event('mic', { enabled: false }));
+    this.send('configure', { monitor: false }); this.dispatchEvent(event('mic', { enabled: false, selectedDeviceId: this.selectedDeviceId, settings: {} }));
   }
   play() { this.send('play'); }
   cancelReadiness() { ++this.readinessGeneration; for (const check of this.readyWaiters) check(); }
@@ -160,6 +206,7 @@ export class AudioEngine extends EventTarget {
   clear() { this.cancelPendingMic(); this.cancelReadiness(); this.send('clear'); this.tracks.clear(); this.readyTracks.clear(); this.trackAssets.clear(); }
   async close() {
     if (this.closed) return; this.closed = true; this.disableMic(); this.suppressedStateChange = true;
+    ++this.deviceListGeneration; this.deviceTarget?.removeEventListener?.('devicechange', this.deviceListener); this.deviceTarget = null; this.deviceListener = null;
     for (const check of this.readyWaiters) check();
     this.send('stop'); this.node?.disconnect(); this.node?.port.close();
     await this.context?.close().catch(() => {}); this.node = null; this.context = null; this.initPromise = null;

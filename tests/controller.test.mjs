@@ -142,6 +142,49 @@ test('Stop cancels recorded playback preparation without creating a late audio p
   read.resolve();await preparing;assert.equal(f.controller.state.preview,null);assert.equal(f.controller.urls.size,0);
 });
 
+test('numbered WAV exports retain every part even when automatic multi-file downloads are blocked', () => {
+  const f=fixture(), result={blob:new Blob(['test']),filename:'part.wav'};
+  for(let part=1;part<=20;part++) f.controller.offerDownload({...result,part,partCount:20},`Part ${part}`,{group:'long-recording',autoDownload:false,notify:false});
+  for(let i=0;i<7;i++) f.controller.offerDownload(result,'Another export',{group:`other-${i}`,autoDownload:false,notify:false});
+  assert.equal(f.controller.state.downloads.filter(item=>item.group==='long-recording').length,20);
+  assert.equal(f.controller.urls.size,27);
+  f.controller.offerDownload(result,'Ninth export',{group:'ninth',autoDownload:false,notify:false});
+  assert.equal(f.controller.state.downloads.length,8);assert.equal(f.controller.urls.size,8);
+  for(const url of f.controller.urls)URL.revokeObjectURL(url);
+});
+
+test('microphone selection is session-only, validates available inputs, and is blocked during capture', async () => {
+  const f=fixture(), selected=[];f.engine.enableMic=async deviceId=>selected.push(deviceId);
+  f.controller.state.micDevices=[{id:'usb-mic',label:'USB microphone'}];
+  await assert.rejects(f.controller.selectMicrophone('unknown'),/available microphone/);
+  await f.controller.selectMicrophone('usb-mic');
+  assert.deepEqual(selected,['usb-mic']);assert.equal(f.controller.state.preferredDeviceId,'usb-mic');
+  assert.equal(JSON.stringify(f.controller.state.project).includes('usb-mic'),false);
+  f.controller.state.capture={kind:'vocal',status:'recording'};
+  await assert.rejects(f.controller.selectMicrophone(''),/Finish or cancel/);
+});
+
+test('Stop during microphone replacement does not leave the recording controls busy', async () => {
+  const f=fixture(), permission=deferred();f.engine.enableMic=()=>permission.promise;
+  f.controller.state.micDevices=[{id:'usb-mic',label:'USB microphone'}];
+  const selecting=f.controller.selectMicrophone('usb-mic');await tick();
+  assert.equal(f.controller.state.micChanging,true);
+  await f.controller.handle({type:'stop'});assert.equal(f.controller.state.micChanging,false);assert.equal(f.controller.state.busy,false);
+  permission.resolve();await selecting;assert.equal(f.controller.state.preferredDeviceId,'');
+});
+
+test('autosave reports pending changes immediately and an older write cannot mark newer changes saved', async () => {
+  const f=fixture(), write=deferred();f.controller.scheduleSave=StudioController.prototype.scheduleSave;
+  f.storage.saveHook=()=>write.promise;f.controller.state.status='Saved on this device';
+  f.controller.edit(project=>{project.name='Renamed song';});
+  assert.equal(f.controller.state.status,'Saving…');
+  const first=f.controller.flushSave();await tick();
+  f.controller.edit(project=>{project.name='Another edit';});write.resolve();await first;
+  assert.equal(f.controller.state.status,'Saving…','queued newer edits remain visibly unsaved');
+  await f.controller.flushSave();
+  assert.equal(f.controller.state.status,'Saved on this device');assert.equal(f.storage.saved.at(-1).name,'Another edit');
+});
+
 test('a performance commits only after both raw vocal and master seal', async () => {
   const f = fixture(); finishedCapture(f); const masterSeal = f.controller.sealed.get('master-1'); f.controller.sealed.delete('master-1');
   await f.controller.tryFinalize();

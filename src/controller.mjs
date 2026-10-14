@@ -15,7 +15,8 @@ export class StudioController {
     this.state = { project: null, projects: [], selectedTrackId: null, view: 'build', playing: false, capture: null, status: 'Opening studio…', micEnabled: false, monitor: false,
       inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
-      recovered: [], readonly: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null };
+      recovered: [], readonly: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
+      micDevices: [], preferredDeviceId: '', micChanging: false };
     this.ui.addEventListener('action', e => { this.handle(e.detail).catch(error => this.handleError(error)); });
     this.storage.addEventListener('progress', e => this.storageProgress(e.detail));
     this.storage.addEventListener('error', e => {
@@ -76,7 +77,7 @@ export class StudioController {
     if (!this.engine) {
       this.engine = new AudioEngine(this.storage);
       const engine = this.engine;
-      for (const name of ['state', 'meter', 'count-in', 'capture-start', 'capture-end', 'asset-sealed', 'section', 'command', 'automation', 'track-ready', 'mic', 'error', 'interrupted', 'device-lost', 'context-state', 'audition-start', 'audition-end']) {
+      for (const name of ['state', 'meter', 'count-in', 'capture-start', 'capture-end', 'asset-sealed', 'section', 'command', 'automation', 'track-ready', 'mic', 'devices', 'error', 'interrupted', 'device-lost', 'context-state', 'audition-start', 'audition-end']) {
         engine.addEventListener(name, e => { if (this.engine === engine && !this.state.storageFailed) this.audioEvent(name, e.detail); });
       }
       engine.addEventListener('underrun', () => {
@@ -105,7 +106,8 @@ export class StudioController {
       } else this.render();
       return;
     }
-    if (type === 'mic') { this.state.micEnabled = data.enabled; if (!data.enabled) { this.state.monitor = false; this.state.inputLevel = 0; } this.state.micSettings = data.settings; this.render(); return; }
+    if (type === 'mic') { this.state.micEnabled = data.enabled; if (!data.enabled) { this.state.monitor = false; this.state.inputLevel = 0; } else if (typeof data.selectedDeviceId === 'string') this.state.preferredDeviceId = data.selectedDeviceId; this.state.micSettings = data.settings; this.render(); return; }
+    if (type === 'devices') { this.state.micDevices = data.devices || []; this.render(); return; }
     if (type === 'audition-start') {
       this.state.audition = { ...this.state.audition, id: data.id, startFrame: data.startFrame, endFrame: data.endFrame, status: 'playing' };
       this.state.playing = true;
@@ -170,6 +172,7 @@ export class StudioController {
   }
   async startCapture(kind, cycles = 1) {
     this.assertWritable(); if (this.pending || this.state.capture) throw new Error('A recording is already active.');
+    if (this.state.busy) throw new Error('Finish the current operation before recording.');
     if (this.state.exporting) throw new Error('Finish or cancel the export before recording.');
     if (kind === 'loop' && this.state.project.tracks.length >= MAX_TRACKS) throw new Error(`This project has reached ${MAX_TRACKS} layers. Start another project or remove unused layers.`);
     this.closePreview(); this.state.error = null;
@@ -178,7 +181,7 @@ export class StudioController {
     let pending = null;
     try {
       const engine = await this.ensureAudio(); if (token !== this.generation) return;
-      await engine.enableMic(); if (token !== this.generation) return;
+      await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return;
       const capacity = await this.storage.estimate(); if (token !== this.generation) return;
       this.state.storage = { ...this.state.storage, ...capacity };
       if (capacity.quota && capacity.quota - capacity.usage < 8 * 1024 * 1024) throw new Error('There is very little recording space left. Export a project backup and free device storage before recording.');
@@ -333,7 +336,12 @@ export class StudioController {
     })();
     try { return await this.audioRecovery; } finally { this.audioRecovery = null; }
   }
-  scheduleSave(delay = 350) { if (this.state.readonly) return; clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.saveNow().catch(error => this.handleError(error)), delay); }
+  scheduleSave(delay = 350) {
+    if (this.state.readonly || this.state.storageFailed) return;
+    clearTimeout(this.saveTimer);
+    if (!this.pending && !this.state.capture) this.state.status = 'Saving…';
+    this.saveTimer = setTimeout(() => this.saveNow().catch(error => this.handleError(error)), delay);
+  }
   async saveNow() {
     if (!this.state.project || this.state.readonly) return;
     clearTimeout(this.saveTimer); this.saveTimer = null;
@@ -341,7 +349,7 @@ export class StudioController {
     const serial = ++this.saveSerial; if (!this.pending) this.state.status = 'Saving…';
     this.saveChain = this.saveChain.catch(() => {}).then(() => this.storage.saveProject(snapshot));
     await this.saveChain;
-    if (serial === this.saveSerial && this.state.project === savedProject) { savedProject.updatedAt = snapshot.updatedAt; if (!this.pending) this.state.status = 'Saved on this device'; }
+    if (serial === this.saveSerial && this.state.project === savedProject && !this.saveTimer) { savedProject.updatedAt = snapshot.updatedAt; if (!this.pending) this.state.status = 'Saved on this device'; }
     this.render();
   }
   async flushSave() { if (this.saveTimer) await this.saveNow(); else await this.saveChain; }
@@ -367,12 +375,20 @@ export class StudioController {
     if (this.state.preview?.url) { URL.revokeObjectURL(this.state.preview.url); this.urls.delete(this.state.preview.url); }
     this.state.preview = null;
   }
-  offerDownload(result, label = 'Download ready') {
+  offerDownload(result, label = 'Download ready', { group = id('download-group-'), autoDownload = true, notify = true } = {}) {
     const url = URL.createObjectURL(result.blob); this.urls.add(url);
-    this.state.downloads.push({ id: id('download-'), url, filename: result.filename, label });
-    if (this.state.downloads.length > 8) { const old = this.state.downloads.shift(); URL.revokeObjectURL(old.url); this.urls.delete(old.url); }
-    this.render(); const a = document.createElement('a'); a.href = url; a.download = result.filename; document.body.append(a); a.click(); a.remove();
-    this.ui.notify('Your download is ready. The download link stays available in the studio.', 'success');
+    this.state.downloads.push({ id: id('download-'), group, url, filename: result.filename, label, part: result.part, partCount: result.partCount });
+    // Keep the latest eight exports, including every numbered part of each one.
+    // A browser may block automatic multi-file downloads; no part may disappear.
+    const groups = [...new Set(this.state.downloads.map(item => item.group || item.id))];
+    const expired = new Set(groups.slice(0, Math.max(0, groups.length - 8)));
+    this.state.downloads = this.state.downloads.filter(item => {
+      if (!expired.has(item.group || item.id)) return true;
+      URL.revokeObjectURL(item.url); this.urls.delete(item.url); return false;
+    });
+    this.render();
+    if (autoDownload) { const a = document.createElement('a'); a.href = url; a.download = result.filename; document.body.append(a); a.click(); a.remove(); }
+    if (notify) this.ui.notify('Your download is ready. The download link stays available in the studio.', 'success');
   }
   async withExport(fn) {
     this.assertIdle(); if (this.state.exporting) throw new Error('An export is already running.');
@@ -385,7 +401,11 @@ export class StudioController {
     try { this.offerDownload(await exportWav(this.storage, assetId, { signal }), label); }
     catch (error) {
       if (error.code !== 'WAV_SPLIT_REQUIRED') throw error;
-      for await (const part of exportWavParts(this.storage, assetId, { signal, maxDataBytes: 256 * 1024 * 1024 })) this.offerDownload(part, `${label} · part ${part.part}`);
+      const group = id('download-group-'); let count = 0;
+      for await (const part of exportWavParts(this.storage, assetId, { signal, maxDataBytes: 256 * 1024 * 1024 })) {
+        this.offerDownload(part, `${label} · part ${part.part} of ${part.partCount}`, { group, autoDownload: false, notify: false }); count++;
+      }
+      this.ui.notify(`Your complete recording is ready in ${count} numbered WAV parts. Use each download link to save every part.`, 'success');
     }
   }
   async downloadAsset(assetId, label) {
@@ -563,6 +583,23 @@ export class StudioController {
     this.ui.showStorageManager?.(rows, this.state.storage);
     this.render();
   }
+  async selectMicrophone(deviceId) {
+    this.assertWritable(); this.assertIdle();
+    if (this.state.busy || this.state.exporting) throw new Error('Finish the current operation before changing microphones.');
+    if (typeof deviceId !== 'string' || (deviceId && !this.state.micDevices.some(device => device.id === deviceId))) throw new Error('Choose an available microphone from the input list.');
+    if (this.state.micEnabled && deviceId === this.state.preferredDeviceId) return;
+    const token = ++this.generation, operation = {};
+    this.microphoneOperation = operation; this.state.busy = true; this.state.micChanging = true; this.state.status = 'Connecting your microphone…'; this.render();
+    try {
+      const engine = await this.ensureAudio(); if (token !== this.generation) return;
+      await engine.enableMic(deviceId); if (token !== this.generation) return;
+      this.state.preferredDeviceId = deviceId; this.state.status = 'Microphone connected · ready to record'; this.state.error = null;
+    } finally {
+      if (this.microphoneOperation === operation) { this.microphoneOperation = null; this.state.micChanging = false; }
+      if (token === this.generation) this.state.busy = false;
+      this.render();
+    }
+  }
   async deleteProject(projectId) {
     this.assertIdle();
     if (this.state.exporting) throw new Error('Finish or cancel the export before deleting a project.');
@@ -592,11 +629,12 @@ export class StudioController {
     if (this.state.storageFailed && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview'].includes(action.type)) throw new Error('Reopen the studio to recover saved recordings before continuing.');
     const p = this.state.project; if (!p && !['help', 'reload-studio', 'dismiss-error', 'view'].includes(action.type)) return;
     switch (action.type) {
-      case 'enable-mic': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; await engine.enableMic(); return; }
+      case 'enable-mic': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; await engine.enableMic(this.state.preferredDeviceId); return; }
+      case 'select-microphone': return this.selectMicrophone(action.deviceId);
       case 'mic-off': { ++this.generation; if (this.pending) { this.pending.interrupted = true; this.engine?.send('interrupt', { reason: 'Microphone switched off' }); } this.engine?.disableMic(); if (!this.pending) { this.state.capture = null; this.state.busy = false; } p.input.monitor = false; this.state.monitor = false; this.render(); return; }
-      case 'monitor': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; if (!this.state.micEnabled) await engine.enableMic(); if (token !== this.generation) return; p.input.monitor = action.enabled ?? !p.input.monitor; this.state.monitor = p.input.monitor; engine.configure(p); this.scheduleSave(); this.render(); return; }
+      case 'monitor': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; if (!this.state.micEnabled) await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return; p.input.monitor = action.enabled ?? !p.input.monitor; this.state.monitor = p.input.monitor; engine.configure(p); this.scheduleSave(); this.render(); return; }
       case 'play': { if (this.state.playing) return this.handle({ type: 'stop' }); this.closePreview(); const token = this.generation, e = await this.ensureAudio(); if (token !== this.generation) return; e.play(); this.keepAwake(); return; }
-      case 'stop': { ++this.generation; this.closePreview(); p.input.monitor = false; this.state.monitor = false; this.engine?.configure(p); this.engine?.stop(); this.state.audition = null; if (!this.pending) { this.state.capture = null; this.state.busy = false; } this.state.playing = false; await this.releaseWake(); this.render(); return; }
+      case 'stop': { ++this.generation; this.closePreview(); this.microphoneOperation = null; this.state.micChanging = false; p.input.monitor = false; this.state.monitor = false; this.engine?.configure(p); this.engine?.stop(); this.state.audition = null; if (!this.pending) { this.state.capture = null; this.state.busy = false; } this.state.playing = false; await this.releaseWake(); this.render(); return; }
       case 'add-loop': { const cycles = action.cycles === 'custom' ? Math.max(1, Math.min(64, Number(action.customCycles) || 1)) : action.cycles === 0 ? 0 : Number(action.cycles) || 1; return this.startCapture('loop', cycles); }
       case 'sing': return this.startCapture('vocal', 0);
       case 'finish': this.engine?.finish(); return;

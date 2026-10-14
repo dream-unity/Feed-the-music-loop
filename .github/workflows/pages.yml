@@ -23,6 +23,8 @@ jobs:
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      sw_sha256: ${{ steps.package.outputs.sw_sha256 }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,7 +34,12 @@ jobs:
           node-version: '22'
       - run: npm run check
       - run: npm test
-      - run: npm run build
+      - name: Package verified studio and fingerprint its service worker
+        id: package
+        run: |
+          npm run build
+          build_hash="$(sha256sum _site/sw.js)"
+          echo "sw_sha256=${build_hash%% *}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -51,3 +58,33 @@ jobs:
       - name: Publish verified studio
         id: deployment
         uses: actions/deploy-pages@v4
+  live-verification:
+    needs: [package, deploy]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install pinned production verification tooling
+        run: npm install --no-save --ignore-scripts --package-lock=false @playwright/test@1.58.2
+      - name: Install Chromium
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Verify the exact published studio over HTTPS
+        run: npx --no-install playwright test --config tests/playwright.live.config.mjs
+        env:
+          FML_LIVE_URL: https://dream-unity.github.io/Feed-the-music-loop/
+          FML_EXPECTED_SW_SHA256: ${{ needs.package.outputs.sw_sha256 }}
+      - name: Upload production verification evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: live-site-verification
+          path: |
+            live-report/
+            test-results/live/
+          if-no-files-found: ignore
+          retention-days: 14
