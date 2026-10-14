@@ -60,15 +60,16 @@ export class StudioUI extends EventTarget {
   shell() {return `
     <header class="app-header">
       <button class="brand" data-action="studio-home" aria-label="Feed the Music Loop, return to Build"><img src="./icon.svg" alt="" width="42" height="42"><span>FEED THE<br><strong>MUSIC LOOP</strong></span></button>
-      <div class="project-heading"><div class="eyebrow">YOUR STUDIO</div><button class="project-title" data-action="rename-project" title="Rename project"><span data-ref="project-name">Untitled session</span><span class="edit-mark">↗</span></button><span class="save-state" data-ref="save-state" role="status">Ready when you are</span></div>
-      <div class="header-actions"><button class="button icon-button help-button" data-action="help" aria-label="Studio guide">${icon('help')}</button><button class="button quiet" data-action="projects" aria-haspopup="dialog">${icon('folder')}<span>Projects</span></button><button class="button quiet" data-action="export-menu" aria-haspopup="dialog">${icon('download')}<span>Export</span></button></div>
+      <div class="project-heading"><div class="eyebrow">YOUR STUDIO</div><button class="project-title" data-action="rename-project" title="Rename project" aria-label="Rename project"><span data-ref="project-name">Untitled session</span><span class="edit-mark">↗</span></button><span class="save-state" data-ref="save-state" role="status">Ready when you are</span></div>
+      <div class="header-actions"><button class="button icon-button help-button" data-action="help" aria-label="Studio guide">${icon('help')}</button><button class="button quiet" data-action="projects" aria-label="Projects" aria-haspopup="dialog">${icon('folder')}<span>Projects</span></button><button class="button quiet" data-action="export-menu" aria-label="Export music and project" aria-haspopup="dialog">${icon('download')}<span>Export</span></button></div>
     </header>
     <main id="workspace" tabindex="-1">
-      <div class="status-banner" data-ref="banner" role="status" hidden></div>
+      <div class="status-banner" data-ref="banner" role="status" hidden><span data-ref="banner-text"></span><button class="button icon-button" data-action="dismiss-error" data-ref="banner-dismiss" aria-label="Dismiss error message" hidden>${icon('close')}</button></div>
       <section class="recovery-panel" data-ref="recovery" aria-label="Recovered recordings" hidden></section>
       <div class="workspace-top"><nav class="view-tabs" aria-label="Studio views"><button class="view-tab is-active" data-action="view" data-view="build" aria-current="page">${icon('layers')}<span>Build</span></button><button class="view-tab" data-action="view" data-view="song">${icon('song')}<span>Song</span></button><button class="view-tab" data-action="view" data-view="mix">${icon('sliders')}<span>Mix</span></button></nav><div class="studio-signals"><span class="local-badge" title="Recordings stay in this browser until you export them.">${icon('shield')}<span>Yours. On this device.</span></span><button class="mic-status" data-action="toggle-mic" data-testid="enable-mic"><span class="status-dot"></span><span data-ref="mic-label">Connect mic</span>${icon('mic')}</button></div></div>
       <section class="transport-panel" aria-label="Playback transport"><div class="transport-time"><span class="eyebrow" data-ref="transport-label">THE GROOVE</span><div class="time-display" data-ref="transport-time">0:00.0</div></div><div class="cycle-display"><div class="cycle-meta"><span data-ref="cycle-description">Your first loop sets the rhythm</span><span data-ref="cycle-position">FREE</span></div><div class="cycle-track"><div class="cycle-progress" data-ref="cycle-progress"></div><div class="cycle-ticks" aria-hidden="true"><i></i><i></i><i></i></div></div><div class="transport-caption"><span data-ref="track-count">No layers yet</span><span data-ref="sample-rate">LOCAL AUDIO STUDIO</span></div></div><div class="master-meter" aria-label="Master output level"><div class="meter-label">OUT</div><div class="meter-track"><div class="meter-fill" data-ref="output-meter"></div></div><span class="meter-value" data-ref="output-db">−∞</span></div><button class="button icon-button restart-button" data-action="seek-start" aria-label="Return to start" title="Return to start">${icon('rewind')}</button></section>
       <section class="preview-panel" data-ref="preview-panel" aria-label="Recording preview" hidden><div class="preview-description">${icon('headphones')}<span><small>LISTEN BACK</small><strong data-ref="preview-name">Your performance</strong></span></div><audio id="performance-player" data-ref="preview-audio" controls preload="metadata"></audio><button class="button icon-button" data-action="close-preview" aria-label="Close recording preview">${icon('close')}</button></section>
+      <section class="audition-panel" data-ref="audition-panel" aria-label="Live mix playback" hidden><div class="audition-symbol">${icon('headphones')}</div><div class="audition-copy"><span class="eyebrow">HEAR YOUR CHANGES</span><strong data-ref="audition-name">Live vocal mix</strong><div class="audition-progress-track"><div data-ref="audition-progress"></div></div></div><span class="audition-time" data-ref="audition-time">0:00.0</span><button class="button quiet" data-action="stop">${icon('stop')}Stop mix</button></section>
       <section class="downloads-panel" data-ref="downloads" aria-label="Ready downloads" hidden></section>
       <section class="export-progress-panel" data-ref="export-panel" aria-label="Export progress" hidden><div><strong data-ref="export-title">Preparing your audio…</strong><p data-ref="export-caption">Your recordings remain safe while this file is prepared.</p><div class="export-progress-track" role="progressbar" aria-label="Export completion" aria-valuemin="0" aria-valuemax="100" data-ref="export-progressbar"><div data-ref="export-progress"></div></div></div><button class="button quiet" data-action="cancel-export">${icon('close')}Cancel export</button></section>
       <section class="capture-panel" data-ref="capture-panel" aria-label="Current recording" hidden><div class="capture-symbol">${icon('mic')}</div><div class="capture-copy"><strong data-ref="capture-title">Recording your first loop</strong><p data-ref="capture-hint">Make your sound. Finish whenever it feels right.</p><div class="capture-progress-track"><div data-ref="capture-progress"></div></div></div><span class="capture-clock" data-ref="capture-time" aria-label="Recording duration">0:00.0</span></section>
@@ -103,6 +104,7 @@ export class StudioUI extends EventTarget {
     this.root.addEventListener('change',e=>this.onChange(e),{signal});
     this.refs['audio-file'].addEventListener('change',e=>{if(e.target.files?.[0])this.emit('import-audio',{file:e.target.files[0]});e.target.value='';},{signal});
     this.refs['project-file'].addEventListener('change',e=>{if(e.target.files?.[0])this.emit('import-project',{file:e.target.files[0]});e.target.value='';},{signal});
+    for(const type of ['play','pause','ended'])this.refs['preview-audio'].addEventListener(type,()=>{this.previewPlaying=!this.refs['preview-audio'].paused&&!this.refs['preview-audio'].ended;this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.previewPlaying);},{signal});
     document.addEventListener('keydown',e=>this.onKey(e),{signal});
     const spotlight = this.root.querySelector('[data-action="spotlight"]');
     const release=()=>{if(this.spotlight){this.spotlight=false;spotlight.setAttribute('aria-pressed','false');this.emit('spotlight',{active:false});}};
@@ -128,6 +130,7 @@ export class StudioUI extends EventTarget {
     if(type==='projects')return this.showProjects();
     if(type==='export-menu')return this.showExport();
     if(type==='help')return this.showHelp();
+    if(type==='dismiss-error'){this.refs.toasts.querySelectorAll('.toast-error').forEach(el=>el.remove());return this.emit(type);}
     if(type==='toggle-mic')return this.emit(this.state.micEnabled?'mic-off':'enable-mic');
     if(type==='import-audio')return this.refs['audio-file'].click();
     if(type==='import-project'){this.refs.dialog.close();return this.refs['project-file'].click();}
@@ -187,7 +190,7 @@ export class StudioUI extends EventTarget {
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();this.emit(e.shiftKey?'redo':'undo');return;}
     if(e.ctrlKey||e.metaKey)return;
     if(e.target.closest('button,a,summary')&&(e.key===' '||e.key==='Enter'))return;
-    if(e.key===' '){e.preventDefault();this.emit(this.state.playing||this.state.capture?'stop':'play');}
+    if(e.key===' '){e.preventDefault();this.emit(this.state.playing||this.state.capture||this.previewPlaying?'stop':'play');}
     if(e.key.toLowerCase()==='r'&&!this.state.capture&&!this.state.busy&&!this.state.exporting)this.emit('add-loop',{cycles:this.state.project?.baseFrames?this.cycles:0,customCycles:this.customCycles});
     if(e.key.toLowerCase()==='v'&&!this.state.capture&&!this.state.busy&&!this.state.exporting)this.emit('sing');
     if(e.key==='Enter'&&this.state.capture?.status==='recording')this.emit('finish');
@@ -219,6 +222,7 @@ export class StudioUI extends EventTarget {
     this.renderMixer(p,tracks);
     this.renderInput(p);
     this.renderPreview(state.preview);
+    this.renderAudition(state.audition,state.transportFrame);
     this.renderDownloads(state.downloads||[]);
     this.renderRecovery(state.recovered||[],rate);
     this.refs['export-panel'].hidden=!state.exporting;
@@ -235,7 +239,7 @@ export class StudioUI extends EventTarget {
     if(state.capabilities?.secureContext===false)banner='Microphone recording needs HTTPS or localhost. Open the published studio to record.';
     else if(state.capabilities?.audio===false)banner='This browser cannot open the audio engine. Open the studio in a current browser with Web Audio support.';
     else if(state.capabilities?.microphone===false)banner='Microphone recording is unavailable here. Open the HTTPS studio in a current browser to connect your microphone.';
-    this.refs.banner.hidden=!banner;this.refs.banner.textContent=banner;this.refs.banner.classList.toggle('is-error',!!state.error);
+    this.refs.banner.hidden=!banner;if(this.refs['banner-text'].textContent!==banner)this.refs['banner-text'].textContent=banner;this.refs['banner-dismiss'].hidden=!state.error;this.refs.banner.classList.toggle('is-error',!!state.error);
     this.root.querySelectorAll('[data-action="undo"]').forEach(el=>el.disabled=!state.undoAvailable||recording||!!state.busy);
     this.root.querySelectorAll('[data-action="redo"]').forEach(el=>el.disabled=!state.redoAvailable||recording||!!state.busy);
     this.root.querySelectorAll('[data-action="add-loop"],[data-action="sing"],[data-action="demo"],[data-action="import-audio"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting||!!state.readonly||state.capabilities?.audio===false||(['add-loop','sing'].includes(el.dataset.action)&&state.capabilities?.microphone===false));
@@ -293,7 +297,7 @@ export class StudioUI extends EventTarget {
     this.refs['performance-count'].textContent=`${performances.length} ${performances.length===1?'recording':'recordings'}`;
     this.region('performances',JSON.stringify(performances.map(x=>[x.id,x.name,x.frames,x.status])),performances.length?performances.slice().reverse().map((x,i)=>`<article class="performance-card"><div class="performance-art" aria-hidden="true">${icon('song')}</div><div class="performance-copy"><h3>${html(x.name||`Performance ${performances.length-i}`)}</h3><p>${duration(x.frames,rate)} · ${x.status==='interrupted'||x.status==='recovered'?'Recovered recording':'Full stereo performance'}${x.createdAt?` · ${this.date(x.createdAt)}`:''}</p></div><button class="button icon-button" data-action="preview-performance" data-performance-id="${html(x.id)}" aria-label="Listen to ${html(x.name||'performance')}">${icon('play')}</button><button class="button quiet" data-action="export-master" data-performance-id="${html(x.id)}" aria-label="Download ${html(x.name||'performance')} as WAV">${icon('download')}<span>WAV</span></button></article>`).join(''):'<div class="quiet-empty">'+icon('song')+'<h3>Your song lives here.</h3><p>Choose “Sing over loops” to capture your voice and backing together.</p></div>');
     this.region('takes',JSON.stringify(takes.map(x=>[x.id,x.name,x.frames])),takes.length?takes.slice().reverse().map((t,i)=>`<article class="take-card" data-take-id="${html(t.id)}"><div class="take-main"><button class="button icon-button" data-action="preview-take" data-id="${html(t.id)}" aria-label="Listen to ${html(t.name||'vocal take')} with recorded backing" title="Listen with recorded backing">${icon('play')}</button><button class="take-name" data-action="select-track" data-id="${html(t.id)}" aria-label="Mix ${html(t.name||'vocal take')}"><strong>${html(t.name||`Vocal take ${takes.length-i}`)}</strong><span>${duration(t.frames,rate)} · original vocal</span></button><button class="button icon-button" data-action="rename-take" data-id="${html(t.id)}" aria-label="Rename ${html(t.name||'vocal take')}">${icon('more')}</button><button class="button icon-button" data-action="delete-take" data-id="${html(t.id)}" aria-label="Remove ${html(t.name||'vocal take')}">${icon('trash')}</button></div><div class="take-footer"><label class="take-selection"><input type="checkbox" data-control="selected-take" data-id="${html(t.id)}"><span>Use in edited song</span></label><button class="text-button" data-action="layer-vocal" data-id="${html(t.id)}" title="Make a separate looping layer from this vocal">${icon('loop')}Turn into a loop</button></div></article>`).join(''):'<p class="help-copy empty-takes">Each continuous vocal is kept as a separate take, ready for another version.</p>');
-    for(const el of this.refs.takes.children){const selected=el.dataset.takeId===p.selectedTakeId;el.classList.toggle('is-selected',selected);const input=el.querySelector('[data-control="selected-take"]');if(input&&input!==document.activeElement)input.checked=selected;}
+    for(const el of this.refs.takes.children){const selected=el.dataset.takeId===p.selectedTakeId;el.classList.toggle('is-selected',selected);const input=el.querySelector('[data-control="selected-take"]');if(input)input.checked=selected;}
   }
 
   renderMixer(p,tracks) {
@@ -306,7 +310,7 @@ export class StudioUI extends EventTarget {
     this.region('mix-console',`${id}:${selected.name}:${isVocal}`,`<div class="mixer-header"><div><span class="eyebrow">${isVocal?'VOCAL TAKE':'LAYER SOUND'}</span><h2>${html(selected.name)}</h2></div><label class="preset-picker">Starting sound<select data-control="role" data-id="${html(id)}">${ROLES.map(r=>`<option value="${r}">${ROLE_NAMES[r]}</option>`).join('')}</select></label></div>${isVocal?`<div class="vocal-mix-strip"><label class="take-selection"><input type="checkbox" data-control="selected-take" data-id="${html(id)}"><span>Use this vocal in the edited song</span></label><button class="text-button" data-action="preview-take" data-id="${html(id)}">${icon('headphones')}Original performance</button></div><p class="vocal-mix-note">Shape this take, then preview or export the edited mix to hear your changes. Your original performance stays available.</p>`:''}<div class="mixer-grid"><section class="mixer-group"><h3>Balance<span>01</span></h3>${slider({label:'Volume',key:'volume',value:m.volume,max:2,id,display:db(m.volume)})}${slider({label:'Pan',key:'pan',value:m.pan,min:-1,max:1,id,display:this.pan(m.pan)})}${slider({label:'Low cut',key:'highpass',value:m.highpass,min:20,max:2000,step:1,id,suffix:' Hz'})}</section><section class="mixer-group"><h3>Colour<span>02</span></h3>${slider({label:'Warmth · low EQ',key:'low',value:m.low,min:-18,max:18,step:.5,id,suffix:' dB'})}${slider({label:'Body · mid EQ',key:'mid',value:m.mid,min:-18,max:18,step:.5,id,suffix:' dB'})}${slider({label:'Air · high EQ',key:'high',value:m.high,min:-18,max:18,step:.5,id,suffix:' dB'})}</section><section class="mixer-group"><h3>Feel<span>03</span></h3>${slider({label:'Punch · compression',key:'compression',value:m.compression,id,display:`${Math.round(m.compression*100)}%`})}${slider({label:'Space · reverb',key:'reverb',value:m.reverb,id,display:`${Math.round(m.reverb*100)}%`})}${slider({label:'Echo · delay',key:'delay',value:m.delay,max:.75,id,display:`${Math.round(m.delay*100)}%`})}</section><section class="mixer-group timing-group"><h3>${isVocal?'Your original':'Timing'}<span>04</span></h3>${isVocal?`<p class="help-copy">Your ${duration(selected.frames,p.sampleRate)} vocal stays separate from the backing. Choose another take whenever you want.</p><button class="button quiet full-width" data-action="export-menu">${icon('headphones')}Preview edited mix</button><button class="text-button" data-action="layer-vocal" data-id="${html(id)}">Turn this vocal into a loop${icon('loop')}</button>`:`<p class="help-copy">Nudge this layer into the pocket without changing your recording.</p><div class="nudge-buttons"><button class="button quiet" data-action="nudge" data-id="${html(id)}" data-ms="-5">−5 ms</button><button class="button quiet" data-action="nudge" data-id="${html(id)}" data-ms="5">+5 ms</button></div><p class="nudge-value" data-ref-offset>Offset: 0 ms</p>`}<button class="text-button" data-action="export-track" data-id="${html(id)}">Download original ${isVocal?'vocal':'layer'}${icon('download')}</button></section></div>`);
     for(const input of this.refs['mix-console'].querySelectorAll('input[data-control="mix"]')){this.patchInput(input,m[input.dataset.key]);this.displayRange(input);}
     const role=this.refs['mix-console'].querySelector('[data-control="role"]');this.patchInput(role,selected.role||'beat');
-    const takeCheck=this.refs['mix-console'].querySelector('[data-control="selected-take"]');if(takeCheck&&takeCheck!==document.activeElement)takeCheck.checked=id===p.selectedTakeId;
+    const takeCheck=this.refs['mix-console'].querySelector('[data-control="selected-take"]');if(takeCheck)takeCheck.checked=id===p.selectedTakeId;
     const offset=this.refs['mix-console'].querySelector('[data-ref-offset]');if(offset)offset.textContent=`Offset: ${(finite(selected.offsetFrames)/(p.sampleRate||48000)*1000).toFixed(1)} ms`;
     this.patchInput(this.refs['mix-channels'].querySelector('select'),id);
     for(const pill of this.refs['mix-channels'].querySelectorAll('.channel-pill')){pill.classList.toggle('is-active',pill.dataset.id===id);pill.setAttribute('aria-pressed',String(pill.dataset.id===id));}
@@ -316,7 +320,7 @@ export class StudioUI extends EventTarget {
     this.region('input-controls','input',slider({label:'Input gain',key:'gain',value:p.input?.gain??1,max:4,scope:'input',display:db(p.input?.gain??1)}));
     this.region('master-controls','master',slider({label:'Master volume',key:'volume',value:p.master?.volume??.8,max:2,scope:'master',display:db(p.master?.volume??.8)}));
     for(const [scope,value] of [['input',p.input?.gain??1],['master',p.master?.volume??.8]]){const input=this.root.querySelector(`input[data-control="${scope}"]`);this.patchInput(input,value);this.displayRange(input);}
-    const monitor=this.root.querySelector('[data-control="monitor"]');if(monitor!==document.activeElement)monitor.checked=!!(this.state.monitor??p.input?.monitor);
+    const monitor=this.root.querySelector('[data-control="monitor"]');monitor.checked=!!(this.state.monitor??p.input?.monitor);
     this.patchInput(this.root.querySelector('[data-control="compensation"]'),p.input?.compensationMs??0);
   }
 
@@ -325,7 +329,16 @@ export class StudioUI extends EventTarget {
     panel.hidden=!preview?.url;
     if(!preview?.url){if(audio.hasAttribute('src')){audio.pause();audio.removeAttribute('src');audio.load();}return;}
     this.refs['preview-name'].textContent=preview.name||'Your performance';
-    if(audio.getAttribute('src')!==preview.url){audio.src=preview.url;audio.load();}
+    if(audio.getAttribute('src')!==preview.url){audio.src=preview.url;audio.load();panel.scrollIntoView({block:'nearest'});}
+  }
+
+  renderAudition(audition,frame=0) {
+    this.refs['audition-panel'].hidden=!audition||!!this.state.capture;
+    if(!audition)return;
+    const take=this.state.project?.takes?.find(t=>t.id===audition.id),rate=this.state.sampleRate||48000,elapsed=Math.max(0,finite(frame)-finite(audition.startFrame)),length=Math.max(1,finite(audition.endFrame)-finite(audition.startFrame));
+    this.refs['audition-name'].textContent=audition.status==='loading'?'Preparing your vocal…':`${take?.name||'Selected vocal'} · live mix`;
+    this.refs['audition-time'].textContent=audition.status==='loading'?'Loading':elapsed>=length?'Final echoes':`${time(elapsed,rate)} / ${time(length,rate)}`;
+    this.refs['audition-progress'].style.width=`${clamp(elapsed/length*100,0,100)}%`;
   }
 
   renderDownloads(downloads) {
@@ -357,6 +370,8 @@ export class StudioUI extends EventTarget {
     this.root.classList.toggle('is-recording',status==='recording');
     let label='Start with a sound.',caption='Your first loop is the beginning.';
     if(tracks.length){label=this.state.playing?'Your world is playing.':'The groove is ready.';caption='Add a layer, or sing something new.';}
+    if(this.previewPlaying&&!capture){label='Listening to your performance.';caption='Your original recording, just as you made it.';}
+    if(this.state.audition&&!capture){label=this.state.audition.status==='loading'?'Preparing your live mix.':'Hear the feeling take shape.';caption='Selected vocal + current layers. Adjust the mixer as it plays.';}
     if(status==='arming'){label=capture.kind==='vocal'?'Your vocal is queued.':'Your next layer is queued.';caption='Starting on the next loop boundary. Cancel anytime.';}
     if(capture?.waitingForMic){label='Waiting for your microphone.';caption='Allow microphone access in your browser. Stop cancels this request.';}
     if(status==='recording'){label=capture.kind==='vocal'?'This is your moment.':'A new layer is taking shape.';caption=`Recording ${time(capture.elapsedFrames,rate)}${capture.targetFrames?` / ${time(capture.targetFrames,rate)}`:' · finish when you are ready'}`;}
@@ -385,6 +400,8 @@ export class StudioUI extends EventTarget {
     if(data.playing!==undefined)this.root.dataset.playing=String(!!data.playing);
     if(data.capture?.status)this.root.dataset.captureState=data.capture.status;
     const p=this.state.project||{},frame=finite(data.transportFrame??data.projectFrame??data.frame),rate=finite(data.sampleRate||this.state.sampleRate||p.sampleRate,48000),base=finite(data.baseFrames??p.baseFrames);
+    this.refs['transport-label'].textContent=this.state.audition?'LIVE MIX':'THE GROOVE';
+    this.renderAudition(this.state.audition,frame);
     this.refs['transport-time'].textContent=time(frame,rate);
     this.refs['cycle-progress'].style.width=base?`${(frame%base)/base*100}%`:'0%';
     this.refs['cycle-position'].textContent=base?`CYCLE ${Math.floor(frame/base)+1}`:'FREE';
@@ -399,9 +416,11 @@ export class StudioUI extends EventTarget {
   date(value){try{return new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric'}).format(new Date(value));}catch{return '';}}
 
   notify(message,kind='info') {
+    for(const prior of this.refs.toasts.children){if(prior.querySelector('span')?.textContent===String(message))return;}
+    if(kind!=='error')this.refs.toasts.querySelectorAll('.toast:not(.toast-error)').forEach(el=>el.remove());
     const el=document.createElement('div');el.className=`toast toast-${['error','warning','success'].includes(kind)?kind:'info'}`;el.setAttribute('role',kind==='error'?'alert':'status');
     const text=document.createElement('span');text.textContent=String(message);const close=document.createElement('button');close.className='toast-close';close.setAttribute('aria-label','Dismiss notification');close.innerHTML=icon('close');close.addEventListener('click',()=>el.remove());el.append(text,close);this.refs.toasts.append(el);
-    while(this.refs.toasts.children.length>3)this.refs.toasts.firstElementChild.remove();
+    while(this.refs.toasts.children.length>2)this.refs.toasts.firstElementChild.remove();
     if(kind!=='error')setTimeout(()=>el.remove(),kind==='warning'?10000:6000);
   }
 
@@ -418,7 +437,7 @@ export class StudioUI extends EventTarget {
   }
 
   showProjects() {
-    const p=this.state.project,projects=this.state.projects||[];
+    const p=this.state.project,projects=(this.state.projects||[]).map(x=>x.id===p?.id?{...x,...p}:x);
     this.showDialog('Your projects',`<p class="dialog-copy">Projects are saved in this browser. Download a backup to keep a copy elsewhere.</p><div class="project-list">${projects.length?projects.map(x=>`<button type="button" class="project-row ${x.id===p?.id?'is-current':''}" data-action="open-project" data-id="${html(x.id)}">${icon('folder')}<span><strong>${html(x.name||'Untitled session')}</strong><small>${this.date(x.updatedAt||x.createdAt)}${x.id===p?.id?' · Current project':''}</small></span>${icon('arrow')}</button>`).join(''):'<p class="help-copy">Your current session is your first project.</p>'}</div>`,`<button type="button" class="button quiet" data-action="import-project">${icon('upload')}Restore backup</button><button type="button" class="button primary" data-action="new-project">${icon('plus')}New project</button>`);
   }
 

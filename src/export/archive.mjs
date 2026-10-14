@@ -137,6 +137,9 @@ export async function exportProject(storage, project, { signal, onProgress, incl
     payloadBytes += metadata.bytes;
     integer(payloadBytes, 0, Number.MAX_SAFE_INTEGER - ARCHIVE_HEADER_BYTES - MAX_MANIFEST_BYTES, 'total audio size');
   }
+  // A stereo-only recovered prefix may point at an empty/cancelled raw asset
+  // that intentionally is not archived. Keep the stereo audio independently.
+  for (const asset of assets) if (asset.leadAssetId && !ids.has(asset.leadAssetId)) delete asset.leadAssetId;
   validateAssetReferences(snapshot, new Map(assets.map(asset => [asset.id, asset])));
   const manifest = { format: 'feed-the-music-loop', version: ARCHIVE_VERSION, createdAt: new Date().toISOString(), project: snapshot, assets };
   validateJsonTree(manifest);

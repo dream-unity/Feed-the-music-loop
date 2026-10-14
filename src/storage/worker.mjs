@@ -30,6 +30,14 @@ const methods = {
   },
   loadProject: ([id]) => { validId(id, 'Project'); return backend.loadProject(id); },
   deleteProject: ([id]) => { validId(id, 'Project'); return backend.deleteProject(id); },
+  projectUsage: ([id]) => { validId(id, 'Project'); return backend.projectUsage(id); },
+  purgeProject: async ([id]) => {
+    validId(id, 'Project');
+    try { return await backend.purgeProject(id); }
+    finally {
+      for (const [assetId, asset] of journal.assets) if (asset.projectId === id && asset.status !== 'recording') { journal.assets.delete(assetId); journal.failures.delete(assetId); }
+    }
+  },
   beginAsset: ([metadata]) => journal.begin(metadata),
   finishAsset: ([id, options]) => seal(id, options),
   getAsset: async ([id]) => ({ ...await journal.get(id) }),
@@ -122,7 +130,7 @@ self.onmessage = ({ data }) => {
   if (data?.type !== 'rpc') return;
   const { id, method, args = [] } = data;
   if (!Object.hasOwn(methods, method)) { self.postMessage({ type: 'rpc-result', id, error: serializeError(storageError('UNKNOWN_METHOD', 'Unknown storage operation.')) }); return; }
-  const read = ['getAsset', 'listAssets', 'readPage', 'estimate', 'loadProject', 'listProjects'].includes(method);
+  const read = ['getAsset', 'listAssets', 'readPage', 'estimate', 'loadProject', 'listProjects', 'projectUsage'].includes(method);
   const bytes = method === 'putPage' ? args[2]?.byteLength || 0 : 0;
   queue.add(async () => {
     if (disposed && method !== 'dispose') throw storageError('STORAGE_CLOSED', 'Audio storage is closed.');

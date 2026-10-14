@@ -471,6 +471,7 @@ export class StudioController {
       case 'export-mix': return this.exportMix(action);
       case 'preview-mix': return this.previewMix(action);
       case 'help': this.ui.showHelp?.(); return;
+      case 'dismiss-error': this.state.error = null; this.render(); return;
     }
   }
   async exportMix(action) {

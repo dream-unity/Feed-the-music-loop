@@ -235,20 +235,66 @@ export class BrowserBackend {
       throw error;
     }
   }
-  async deleteAsset(id) {
-    const asset = await this.getAsset(id);
-    if (!asset) return { id, deleted: true };
-    await this.lockProject(asset.projectId);
-    // This API is intentionally explicit; deleting a project never calls it.
-    this.closeHandle(id);
+  async removeAssetMetadata(id) {
     const tx = transaction(this.db, ['assets', 'pages'], 'readwrite'), done = completion(tx);
     tx.objectStore('assets').delete(id);
     tx.objectStore('pages').delete(IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]));
     await done;
-    if (asset.backend === 'opfs' && this.directory) {
+  }
+  async removeProjectMetadata(id) {
+    const tx = transaction(this.db, 'projects', 'readwrite'), done = completion(tx);
+    tx.objectStore('projects').delete(id); await done;
+  }
+  async deleteAsset(id, expectedProjectId = null) {
+    const asset = await this.getAsset(id);
+    if (!asset) return { id, deleted: true };
+    if (expectedProjectId !== null && asset.projectId !== expectedProjectId) throw storageError('ASSET_OWNER_MISMATCH', 'This audio belongs to another project and was not deleted.');
+    await this.lockProject(asset.projectId);
+    // This API is intentionally explicit; deleting a project never calls it.
+    this.closeHandle(id);
+    // Remove the file first: a failed file deletion leaves its metadata visible
+    // for retry. If the later metadata transaction fails, retry tolerates the
+    // already absent file. The reverse order could strand unreclaimable audio.
+    if (asset.backend === 'opfs') {
+      if (!this.directory) throw storageError('OPFS_UNAVAILABLE', 'Audio storage is unavailable. Reopen this browser before deleting the project.');
       try { await this.directory.removeEntry(`${id}.pcm`); } catch (error) { if (error.name !== 'NotFoundError') throw error; }
     }
+    await this.removeAssetMetadata(id);
     return { id, deleted: true };
+  }
+  async projectUsage(projectId) {
+    const assets = await this.listAssets(projectId), byKind = Object.create(null);
+    let audioBytes = 0, recordingAssets = 0;
+    for (const asset of assets) {
+      const bytes = Number.isSafeInteger(asset.byteLength) && asset.byteLength >= 0 ? asset.byteLength
+        : Math.max(0, Number(asset.frames) || 0) * Math.max(0, Number(asset.channels) || 0) * 4;
+      audioBytes += bytes; if (asset.status === 'recording') recordingAssets++;
+      const kind = typeof asset.kind === 'string' ? asset.kind : 'audio';
+      const group = byKind[kind] ||= { assets: 0, bytes: 0 }; group.assets++; group.bytes += bytes;
+    }
+    return { projectId, audioBytes, bytes: audioBytes, assetCount: assets.length, recordingAssets, byKind, includesMetadataOverhead: false };
+  }
+  async purgeProject(projectId) {
+    await this.lockProject(projectId);
+    const assets = await this.listAssets(projectId);
+    if (assets.some(asset => asset.projectId !== projectId)) throw storageError('ASSET_OWNER_MISMATCH', 'Project deletion found an inconsistent audio owner and stopped without deleting audio.');
+    if (assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
+    const project = await this.loadProject(projectId);
+    // Keep an interrupted purge discoverable, with its metadata, until every
+    // owned file and page transaction has succeeded.
+    if (project) await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() });
+    let deletedAssets = 0, freedAudioBytes = 0;
+    try {
+      for (const asset of assets) {
+        await this.deleteAsset(asset.id, projectId);
+        deletedAssets++; freedAudioBytes += asset.byteLength || asset.frames * asset.channels * 4 || 0;
+      }
+      await this.removeProjectMetadata(projectId);
+      await this.releaseProject(projectId);
+      return { projectId, purged: true, deletedAssets, freedAudioBytes };
+    } catch (error) {
+      throw Object.assign(storageError('PROJECT_PURGE_INCOMPLETE', `Project deletion stopped after ${deletedAssets} audio file${deletedAssets === 1 ? '' : 's'}. Remaining project data was retained. Retry permanent deletion to finish. ${error.message || ''}`), { projectId, deletedAssets, freedAudioBytes, cause: error });
+    }
   }
   async releaseProject(projectId) {
     const entry = this.projectLocks.get(projectId);

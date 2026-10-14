@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { Worker as NodeWorker } from 'node:worker_threads';
+import { createHash } from 'node:crypto';
 import { createProject, createTrack, DEFAULT_MIX } from '../src/project.mjs';
 import { prepareRenderPlan, renderEditedMix } from '../src/export/render.mjs';
 
@@ -162,4 +163,96 @@ test('worker cancellation waits for a pending storage write before deleting its 
     await assert.rejects(renderEditedMix(storage, project, { durationSeconds: 2.2, tailSeconds: 0, prerollSeconds: 0, signal: controller.signal }), { name: 'AbortError' });
     assert.ok(delayedWriteCompleted); assert.deepEqual([...storage.assets.keys()], originals);
   } finally { if (previous) globalThis.Worker = previous; else delete globalThis.Worker; }
+});
+
+test('same-frame events keep their saved order exactly across output-page and DSP-block boundaries', async () => {
+  for (const at of [127, 128, PAGE - 1, PAGE, PAGE + 1]) {
+    const { storage, project } = await fixture(); project.takes[0].mix.volume = 0;
+    const perf = project.performances[0], options = { useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+    const baseline = await renderEditedMix(storage, project, options);
+    perf.events = [
+      { frame: perf.startFrame + at, type: 'mix', id: 'loop-track', muted: false },
+      { frame: perf.startFrame + at, type: 'mix', id: 'loop-track', muted: true },
+    ];
+    const muted = await renderEditedMix(storage, project, options);
+    const a = storage.samples(baseline.assetId), b = storage.samples(muted.assetId);
+    assert.deepEqual(b.subarray(0, at * 2), a.subarray(0, at * 2));
+    assert.ok(rms(b, (at + 4000) * 2, (at + 8000) * 2) < rms(a, (at + 4000) * 2, (at + 8000) * 2) * .001);
+    perf.events.reverse();
+    const restored = await renderEditedMix(storage, project, options);
+    assert.deepEqual(storage.samples(restored.assetId), a, 'last same-frame event wins without a single muted sample');
+  }
+});
+
+test('current sound preserves the mute state at a recorded track entrance', async () => {
+  const { storage, project } = await fixture();
+  const perf = project.performances[0], options = { useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+  project.takes[0].mix.volume = 0; perf.initialState.tracks = [];
+  const entered = { ...structuredClone(project.tracks[0]), muted: true };
+  perf.events = [{ frame: perf.startFrame + 173, type: 'track', track: entered }];
+  const quiet = await renderEditedMix(storage, project, options);
+  assert.equal(rms(storage.samples(quiet.assetId), 0, 40001 * 2), 0);
+  perf.events.push({ frame: perf.startFrame + PAGE, type: 'mix', id: entered.id, muted: false });
+  const audible = await renderEditedMix(storage, project, options), pcm = storage.samples(audible.assetId);
+  assert.equal(rms(pcm, 0, PAGE * 2), 0);
+  assert.ok(rms(pcm, (PAGE + 1000) * 2, (PAGE + 8000) * 2) > .01);
+});
+
+test('a performance that starts with Spotlight already held retains its backing attenuation', async () => {
+  const { storage, project } = await fixture(); project.takes[0].mix.volume = 0;
+  const options = { useWorker: false, tailSeconds: 0, prerollSeconds: .1 };
+  const normal = await renderEditedMix(storage, project, options);
+  project.performances[0].initialState.spotlight = true;
+  const spotlight = await renderEditedMix(storage, project, options);
+  const ratio = rms(storage.samples(spotlight.assetId), 2000, 60000) / rms(storage.samples(normal.assetId), 2000, 60000);
+  assert.ok(ratio > .34 && ratio < .36);
+});
+
+test('cancellation during the final asset seal removes the cancelled render after sealing settles', async () => {
+  const { storage, project } = await fixture(), controller = new AbortController();
+  const originals = [...storage.assets.keys()], finish = storage.finishAsset.bind(storage);
+  storage.finishAsset = async (...args) => { controller.abort(); await new Promise(resolve => setTimeout(resolve, 5)); return finish(...args); };
+  await assert.rejects(renderEditedMix(storage, project, { useWorker: false, tailSeconds: 0, prerollSeconds: 0, signal: controller.signal }), { name: 'AbortError' });
+  assert.deepEqual([...storage.assets.keys()], originals);
+});
+
+test('long rendering of six independently phased consumers shares audio without cache collisions or full-song buffers', async () => {
+  const run = async shared => {
+    const project = createProject('Streaming stress', SR), frames = PAGE * 101 + 37;
+    const assets = new Map(), hash = createHash('sha256');
+    let reads = 0, written = 0, largestWrite = 0, largestRead = 0, activeReads = 0, maxConcurrentReads = 0;
+    for (let i = 0; i < 6; i++) {
+      const assetId = shared ? 'shared-audio' : `audio-${i}`;
+      assets.set(assetId, { id: assetId, projectId: project.id, frames, channels: 1, sampleRate: SR, status: 'complete' });
+      project.tracks.push(createTrack({ id: `track-${i}`, assetId, frames, offsetFrames: (i * 12 + 5) * PAGE + i * 73, mix: { ...plainMix, volume: .08 } }));
+    }
+    project.baseFrames = frames;
+    const storage = {
+      getAsset: async id => assets.get(id),
+      beginAsset: async asset => assets.set(asset.id, { ...asset, frames: 0, status: 'recording' }),
+      readPage: async (id, index) => {
+        reads++; maxConcurrentReads = Math.max(maxConcurrentReads, ++activeReads);
+        await new Promise(resolve => setImmediate(resolve));
+        const count = Math.min(PAGE, frames - index * PAGE), pcm = new Float32Array(count);
+        for (let i = 0; i < count; i++) pcm[i] = Math.sin((index * PAGE + i) * .117) * .2;
+        largestRead = Math.max(largestRead, pcm.byteLength); activeReads--;
+        return { buffer: pcm.buffer, frames: count, channels: 1, index };
+      },
+      putPage: async (id, index, buffer, count, channels) => {
+        assert.equal(index, Math.floor(written / PAGE)); assert.equal(channels, 2);
+        largestWrite = Math.max(largestWrite, buffer.byteLength);
+        const pcm = new Float32Array(buffer, 0, count * 2); assert.ok(pcm.every(Number.isFinite));
+        hash.update(new Uint8Array(buffer, 0, count * 8)); written += count; assets.get(id).frames += count;
+      },
+      finishAsset: async (id, meta) => { Object.assign(assets.get(id), meta); return assets.get(id); },
+      deleteAsset: async id => assets.delete(id),
+    };
+    const result = await renderEditedMix(storage, project, { durationSeconds: 60, tailSeconds: .031, prerollSeconds: .017, useWorker: false });
+    assert.equal(written, SR * 60 + Math.round(.031 * SR)); assert.equal(result.frames, written);
+    assert.ok(reads > 100, 'must advance through many cache windows');
+    assert.ok(largestRead <= PAGE * 4); assert.ok(largestWrite <= PAGE * 8);
+    assert.ok(maxConcurrentReads <= 60, `unbounded pending reads: ${maxConcurrentReads}`);
+    return hash.digest('hex');
+  };
+  assert.equal(await run(true), await run(false), 'reusing an asset at different phases must match independent immutable copies');
 });

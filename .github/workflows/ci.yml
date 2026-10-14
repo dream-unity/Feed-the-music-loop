@@ -61,3 +61,35 @@ jobs:
           path: test-results/**/review-*.png
           if-no-files-found: ignore
           retention-days: 14
+  cross-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install pinned browser test tooling
+        run: npm install --no-save --ignore-scripts --package-lock=false @playwright/test@1.58.2
+      - name: Install Firefox and WebKit
+        run: npx --no-install playwright install --with-deps firefox webkit
+      - name: Verify generated audio, mix export and backup across browsers
+        run: npx --no-install playwright test --config tests/playwright.cross-browser.config.mjs
+      - name: Upload cross-browser report and evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cross-browser-verification
+          path: |
+            cross-browser-report/
+            test-results/cross-browser/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload cross-browser studio screenshots
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: cross-browser-screenshots
+          path: test-results/cross-browser/**/review-*.png
+          if-no-files-found: ignore
+          retention-days: 14

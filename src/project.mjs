@@ -47,7 +47,7 @@ export function sectionFromProject(project, name) {
 export function applySection(project, section) {
   for (const track of project.tracks) {
     if (track.kind !== 'loop') continue;
-    const saved = section.tracks[track.id];
+    const saved = Object.hasOwn(section.tracks, track.id) ? section.tracks[track.id] : undefined;
     track.muted = saved ? !!saved.muted : true;
     track.solo = saved ? !!saved.solo : false;
     if (saved) track.mix = normalizeMix(saved.mix);
@@ -64,7 +64,7 @@ class ValidationError extends Error { constructor(message) { super(`Invalid proj
 function fail(message) { throw new ValidationError(message); }
 function object(value, label) { if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} must be an object.`); return value; }
 function string(value, label, max = 120) { if (typeof value !== 'string' || !value.trim() || value.length > max) fail(`${label} must be text of 1–${max} characters.`); return value; }
-function validId(value, label) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(value)) fail(`${label} has an invalid identifier.`); return value; }
+function validId(value, label) { if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(value) || ['__proto__', 'constructor', 'prototype'].includes(value)) fail(`${label} has an invalid identifier.`); return value; }
 function number(value, label, min = 0, max = Number.MAX_SAFE_INTEGER, integer = false) { if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isSafeInteger(value))) fail(`${label} is out of range.`); return value; }
 function array(value, label, max = 10000) { if (!Array.isArray(value) || value.length > max) fail(`${label} must be an array with at most ${max} entries.`); return value; }
 function bool(value, label, fallback = false) { if (value === undefined) return fallback; if (typeof value !== 'boolean') fail(`${label} must be true or false.`); return value; }

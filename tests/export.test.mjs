@@ -244,3 +244,52 @@ test('import never reads a long audio payload into a full-length ArrayBuffer', a
   await importProject(storage, new AuditBlob([blob]));
   assert.equal(largestRead, 1024 * 1024);
 });
+
+test('backup restoration preserves recovery pairing and remaps every recovery audio reference', async () => {
+  const { storage, project } = await fixture();
+  const track = createTrack({ id: 'orphan-track', assetId: 'orphan-vocal', role: 'lead', name: 'Lost take' });
+  track.mix.reverb = .36;
+  await addAsset(storage, project.id, 'orphan-vocal', new Float32Array(999).fill(.1), 1, { kind: 'vocal', captureId: 'capture-orphan', performanceId: 'performance-orphan', track });
+  await addAsset(storage, project.id, 'orphan-master', new Float32Array(1998).fill(.1), 2, { kind: 'master', captureId: 'capture-orphan', leadAssetId: 'orphan-vocal', performanceId: 'performance-orphan' });
+  const { blob } = await exportProject(storage, project);
+  const imported = await importProject(storage, blob), recovered = await storage.listAssets(imported.id);
+  const voice = recovered.find(asset => asset.kind === 'vocal' && asset.captureId === 'capture-orphan');
+  const master = recovered.find(asset => asset.kind === 'master' && asset.captureId === voice.captureId);
+  assert.ok(voice && master); assert.equal(master.leadAssetId, voice.id); assert.notEqual(voice.id, 'orphan-vocal');
+  assert.equal(voice.track.assetId, voice.id); assert.equal(voice.track.frames, voice.frames); assert.equal(voice.track.mix.reverb, .36);
+  assert.equal(voice.performanceId, 'performance-orphan');
+});
+
+test('a stereo-only recovery backup does not depend on an empty abandoned vocal', async () => {
+  const { storage, project } = await fixture();
+  await addAsset(storage, project.id, 'orphan-master', new Float32Array(200).fill(.1), 2, { kind: 'master', captureId: 'capture-orphan', leadAssetId: 'empty-abandoned' });
+  const { blob } = await exportProject(storage, project), imported = await importProject(storage, blob);
+  const master = (await storage.listAssets(imported.id)).find(asset => asset.captureId === 'capture-orphan');
+  assert.equal(master.channels, 2); assert.equal(master.frames, 100); assert.equal(master.leadAssetId, undefined);
+});
+
+test('malformed historic arrangement and recovery metadata are rejected before import writes', async () => {
+  const { storage, project } = await fixture(), { blob } = await exportProject(storage, project);
+  const badArchives = [
+    await mutateManifest(blob, m => { m.project.performances[0].initialState.tracks[0].frames--; }),
+    await mutateManifest(blob, m => { m.project.performances[0].initialState.tracks[0].mix.volume = 1e10; }),
+    await mutateManifest(blob, m => { m.project.performances[0].initialState.tracks = {}; }),
+    await mutateManifest(blob, m => { m.project.events[0].track.channels = 2; }),
+    await mutateManifest(blob, m => { m.assets[0].captureId = '../../bad'; }),
+    await mutateManifest(blob, m => { m.assets[0].leadAssetId = 'missing'; }),
+    await mutateManifest(blob, m => { m.assets[0].track = m.project.tracks[0]; m.assets[0].track.assetId = 'other-audio'; }),
+  ];
+  for (const archive of badArchives) {
+    storage.calls = [];
+    await assert.rejects(importProject(storage, archive));
+    assert.deepEqual(storage.calls, []); assert.equal(storage.projects.size, 1); assert.equal(storage.assets.size, 4);
+  }
+});
+
+test('cancelling while the new project commits waits for the commit then removes only the new import', async () => {
+  const { storage, project } = await fixture(), { blob } = await exportProject(storage, project);
+  const controller = new AbortController(), save = storage.saveProject.bind(storage);
+  storage.saveProject = async value => { controller.abort(); await new Promise(resolve => setTimeout(resolve, 5)); return save(value); };
+  await assert.rejects(importProject(storage, blob, { signal: controller.signal }), { name: 'AbortError' });
+  assert.equal(storage.projects.size, 1); assert.equal(storage.assets.size, 4); assert.ok(storage.projects.has(project.id));
+});

@@ -161,3 +161,21 @@ test('DSP accepts the full project high-pass range and shared delay range',()=>{
 test('stereo loop archives downmix both channels instead of discarding right-only audio',()=>{
   const h=harness();const stereo=new Float32Array(512);for(let i=0;i<256;i++)stereo[i*2+1]=Math.sin(i*.1)*.4;h.engine.command({type:'page',assetId:'stereo',index:0,frames:256,channels:2,buffer:stereo.buffer});h.engine.command({type:'track',track:{id:'stereo',assetId:'stereo',frames:256,channels:2,mix:{volume:1,pan:0,highpass:0,compression:0,reverb:0,delay:0}}});h.engine.command({type:'play'});const audio=h.run(1000);assert(audio.l.some(x=>Math.abs(x)>.05));for(let i=0;i<audio.l.length;i++)assert(Math.abs(audio.l[i]-audio.r[i])<1e-7);
 });
+
+test('compensated vocal controls apply exactly C frames later while command acknowledgement stays musical',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:200,inputMix:{volume:1,highpass:0,compression:0,reverb:0,delay:0}});h.arm({kind:'vocal',masterAssetId:'master'});h.run(500,()=>.2);h.engine.command({type:'configure',inputMix:{volume:.3}});const ack=h.events.filter(e=>e.type==='command'&&e.inputMix?.volume===.3).at(-1);assert.equal(ack.frame,500);assert.equal(h.engine.vocalDSP.mix.volume,1);assert.equal(h.engine.inputMixTarget.volume,.3);h.run(200,()=>.2);assert.equal(h.engine.vocalDSP.mix.volume,1);h.run(1,()=>.2);assert.equal(h.engine.vocalDSP.mix.volume,.3);
+});
+
+test('recorded vocal FX automation matches uncompensated musical replay sample-for-sample',()=>{
+  const h=harness(),ref=harness(),mix={volume:1,pan:-1,highpass:0,compression:0,reverb:0,delay:0};h.engine.command({type:'configure',compensationFrames:160,inputMix:mix});ref.engine.command({type:'configure',monitor:true,inputMix:mix});h.run(2000);ref.run(2000);h.arm({kind:'vocal',masterAssetId:'master'});ref.engine.command({type:'play'});const startClock=h.engine.clock,source=(_,clock)=>clock>=startClock+160?Math.sin((clock-startClock-160)*.1)*.2:0;
+  h.run(300,source);const first=ref.run(300,i=>Math.sin(i*.1)*.2);h.engine.command({type:'configure',inputMix:{volume:.3,low:3}});ref.engine.command({type:'configure',inputMix:{volume:.3,low:3}});h.run(900,source);const next=ref.run(900,i=>Math.sin((i+300)*.1)*.2);h.engine.command({type:'finish'});h.run(161,source);const recorded=h.samples('master'),expected=new Float32Array(1200);expected.set(first.l);expected.set(next.l,300);for(let i=0;i<1200;i++)assert(Math.abs(recorded[i*2]-expected[i])<2e-6,`vocal automation moved at ${i}`);
+});
+
+test('cancel and Stop drain clear queued vocal-control changes before a subsequent take',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:200});h.arm({kind:'vocal'});h.run(500);h.engine.command({type:'configure',inputMix:{volume:.31}});h.engine.command({type:'cancel'});assert.equal(h.engine.inputMixQueue.length,0);assert.equal(h.engine.vocalDSP.mix.volume,.31);
+  h.arm({id:'again',assetId:'again',kind:'vocal',track:{id:'again-track',mix:{volume:.31}}});h.run(500);h.engine.command({type:'configure',inputMix:{volume:.72}});h.engine.command({type:'stop'});h.run(201);assert.equal(h.engine.inputMixQueue.length,0);assert.equal(h.engine.vocalDSP.mix.volume,.72);h.engine.command({type:'configure',compensationFrames:0,inputMix:{volume:.44}});h.arm({id:'third',assetId:'third',kind:'vocal',track:{id:'third-track',mix:{volume:.44}}});h.run(400);assert.equal(h.engine.vocalDSP.mix.volume,.44);
+});
+
+test('section membership never inherits object prototype names from imported track identifiers',()=>{
+  const h=harness();h.engine.command({type:'track',track:{id:'constructor',assetId:'raw',frames:1000,channels:1,mix:{}}});h.engine.applySection({id:'empty',tracks:{}});assert.equal(h.engine.tracks.get('constructor').track.muted,true);assert.equal(h.engine.tracks.get('constructor').track.solo,false);
+});

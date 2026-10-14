@@ -26,3 +26,12 @@ test('asset collection includes historical takes and performance snapshots', () 
   const p=createProject();p.tracks=[{assetId:'a'}];p.performances=[{leadAssetId:'b',masterAssetId:'c',initialState:{tracks:[{assetId:'old'}]}}];
   assert.deepEqual(referencedAssets(p).sort(),['a','b','c','old']);
 });
+test('section membership cannot be inherited from an object prototype', () => {
+  const p=createProject();
+  p.tracks.push(createTrack({id:'constructor',assetId:'safe-audio',frames:100}));
+  applySection(p,{tracks:{}});
+  assert.equal(p.tracks[0].muted,true);
+  assert.throws(()=>validateProject(p),/identifier/);
+  p.tracks[0].id='safe-track'; p.tracks[0].assetId='__proto__';
+  assert.throws(()=>validateProject(p),/identifier/);
+});

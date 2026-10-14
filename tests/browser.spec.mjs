@@ -27,6 +27,8 @@ async function download(page, click) {
 }
 
 async function reviewScreenshot(page, testInfo, name) {
+  const notifications = page.locator('.toast:not(.toast-error) [aria-label="Dismiss notification"]');
+  while (await notifications.count()) await notifications.first().click();
   const path = testInfo.outputPath(`review-${name}.png`);
   await page.screenshot({ path, fullPage: true, animations: 'disabled' });
   await testInfo.attach(name, { path, contentType: 'image/png' });
@@ -328,5 +330,8 @@ test('narrow touch layout keeps recording controls visible and usable', async ({
   await reviewScreenshot(page, testInfo, 'mobile-build');
   await page.getByTestId('stop').click();
   await playing(page, false);
+  await view(page, 'mix');
+  await expect(page.getByRole('slider', { name: 'Warmth · low EQ', exact: true })).toBeVisible();
+  await reviewScreenshot(page, testInfo, 'mobile-mix');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
 });

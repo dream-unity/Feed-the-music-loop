@@ -1,4 +1,4 @@
-import {clamp,TrackDSP,SharedFX,softCeiling} from './dsp.mjs';
+import {clamp,cleanMix,TrackDSP,SharedFX,softCeiling} from './dsp.mjs';
 
 const positiveModulo=(n,d)=>((n%d)+d)%d;
 const integer=(n,lo=0,hi=Number.MAX_SAFE_INTEGER)=>Math.round(clamp(n,lo,hi,lo));
@@ -31,6 +31,7 @@ export class LoopEngine {
     this.sampleRate=sampleRate;this.pageFrames=pageFrames;this.post=post;this.storage=null;this.pool=[];this.tracks=new Map();this.trackList=[];this.caches=new Map();this.cacheGroups=new Map();this.playing=false;this.frame=0;this.clock=0;this.baseFrames=0;this.capture=null;this.pendingSection=null;this.sourceEndFrame=Infinity;
     this.inputGain=1;this.monitor=false;this.compensationFrames=0;this.masterVolume=.8;this.masterCurrent=.8;this.masterSmooth=1-Math.exp(-1/(.005*sampleRate));this.spotlight=false;this.spotlightGain=1;
     this.backingFX=new SharedFX(sampleRate);this.vocalFX=new SharedFX(sampleRate);this.vocalDSP=new TrackDSP(sampleRate,{volume:.85,highpass:65,compression:.3,reverb:.12});
+    this.inputMixTarget={...this.vocalDSP.mix};this.inputMixQueue=[];
     this.historyLength=Math.ceil(sampleRate)+2;this.backingL=new Float32Array(this.historyLength);this.backingR=new Float32Array(this.historyLength);this.masterHistory=new Float32Array(this.historyLength);this.masterHistory.fill(.8);
     this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;this.meterInterval=Math.max(1,Math.round(sampleRate/20));this.missing=new Map();this.preview=null;this.audition=null;this.resetAfterCapture=false;
   }
@@ -50,7 +51,7 @@ export class LoopEngine {
         if(Number.isFinite(m.inputGain))this.inputGain=clamp(m.inputGain,0,4,1);
         if(typeof m.monitor==='boolean')this.monitor=m.monitor;
         if(Number.isFinite(m.masterVolume))this.masterVolume=clamp(m.masterVolume,0,2,.8);
-        if(m.inputMix){if(this.audition)this.audition.restoreMix={...m.inputMix};else this.vocalDSP.setMix(m.inputMix);}
+        if(m.inputMix)this.setInputMix(m.inputMix);
       } else if(m.type==='track')this.addTrack(m.track);
       else if(m.type==='remove-track'){this.tracks.delete(m.id);this.trackList=Array.from(this.tracks.values());this.missing.delete(m.id);this.dropUnusedCaches();}
       else if(m.type==='mix'){const t=this.tracks.get(m.id);if(t){if(m.mix){t.track.mix={...t.track.mix,...m.mix};t.dsp.setMix(t.track.mix);}if(typeof m.muted==='boolean')t.track.muted=m.muted;if(typeof m.solo==='boolean')t.track.solo=m.solo;this.emit('automation',{action:'mix',id:m.id,mix:m.mix,muted:m.muted,solo:m.solo});}else if(this.audition?.id===m.id&&m.mix){this.audition.mix={...this.audition.mix,...m.mix};this.vocalDSP.setMix(this.audition.mix);}}
@@ -102,6 +103,18 @@ export class LoopEngine {
     const t={track:{...track,offsetFrames:integer(track.offsetFrames??0,-Number.MAX_SAFE_INTEGER),mix:{...track.mix}},cache:c,dsp:new TrackDSP(this.sampleRate,track.mix),ready:false};this.tracks.set(track.id,t);this.trackList.push(t);this.prefetchTrack(t);this.refreshReady(t);
   }
   nextBoundary(){return this.baseFrames?(Math.floor(this.frame/this.baseFrames)+1)*this.baseFrames:this.frame;}
+  setInputMix(mix){
+    const next=cleanMix({...this.inputMixTarget,...mix});let changed=false;for(const key of Object.keys(next))if(next[key]!==this.inputMixTarget[key]){changed=true;break;}if(!changed)return;
+    if(this.audition){this.inputMixTarget=next;this.audition.restoreMix={...next};return;}
+    const delay=this.capture?.kind==='vocal'?this.capture.compensation:0;
+    if(delay){
+      const targetClock=this.clock+delay,last=this.inputMixQueue[this.inputMixQueue.length-1];
+      if(last?.clock===targetClock)last.mix=next;
+      else{if(this.inputMixQueue.length>=256)throw new Error('Vocal controls are changing too quickly. Allow the current adjustment to settle.');this.inputMixQueue.push({clock:targetClock,mix:next});}
+    }else{this.inputMixQueue.length=0;this.vocalDSP.setMix(next);}
+    this.inputMixTarget=next;
+  }
+  flushInputMix(){this.inputMixQueue.length=0;this.vocalDSP.setMix(this.inputMixTarget);}
   startAudition(take,startFrame,tailFrames){
     if(this.capture)throw new Error('Finish or cancel the recording before listening to a take.');
     if(!take){this.endAudition('stopped');return;}
@@ -109,7 +122,7 @@ export class LoopEngine {
     this.endAudition('replaced');this.preview=null;this.playing=false;this.pendingSection=null;
     const origin=integer(take.startFrame??startFrame??0);this.frame=integer(startFrame??origin,0,origin+take.frames-1);
     const cache=this.consumerCache(take.assetId,1);cache.totalFrames=take.frames;
-    this.audition={...take,id:take.id||take.assetId,startFrame:origin,endFrame:origin+take.frames,tailFrames:integer(tailFrames??this.sampleRate*2,0,this.sampleRate*10),status:'loading',cache,mix:{...this.vocalDSP.mix,...take.mix},restoreMix:{...this.vocalDSP.mix},restoreSourceEnd:this.sourceEndFrame};
+    this.audition={...take,id:take.id||take.assetId,startFrame:origin,endFrame:origin+take.frames,tailFrames:integer(tailFrames??this.sampleRate*2,0,this.sampleRate*10),status:'loading',cache,mix:{...this.inputMixTarget,...take.mix},restoreMix:{...this.inputMixTarget},restoreSourceEnd:this.sourceEndFrame};
     this.sourceEndFrame=this.audition.endFrame;this.resetDSP();this.vocalDSP.setMix(this.audition.mix);
     for(const t of this.tracks.values())t.ready=this.trackResident(t);
     this.dropUnusedCaches();this.prefetch();this.refreshAudition();
@@ -123,7 +136,7 @@ export class LoopEngine {
     a.status='playing';this.playing=true;this.emit('audition-start',{id:a.id,startFrame:a.startFrame,endFrame:a.endFrame});this.state();
   }
   endAudition(reason='complete'){
-    const a=this.audition;if(!a)return;this.audition=null;this.playing=false;this.sourceEndFrame=a.restoreSourceEnd;this.vocalDSP.setMix(a.restoreMix);this.vocalDSP.reset();this.vocalFX.reset();this.missing.delete(a.id);this.dropUnusedCaches();this.emit('audition-end',{id:a.id,reason});this.state();
+    const a=this.audition;if(!a)return;this.audition=null;this.playing=false;this.sourceEndFrame=a.restoreSourceEnd;this.inputMixTarget={...a.restoreMix};this.flushInputMix();this.vocalDSP.reset();this.vocalFX.reset();this.missing.delete(a.id);this.dropUnusedCaches();this.emit('audition-end',{id:a.id,reason});this.state();
   }
   arm(capture){
     if(this.audition)throw new Error('Stop the take audition before starting a recording.');if(this.capture)throw new Error('A recording is already in progress.');if(!this.storage)throw new Error('Audio storage is not connected.');if(!capture?.assetId||!capture.id)throw new Error('A recording needs an audio asset.');
@@ -136,12 +149,12 @@ export class LoopEngine {
     // All capture-time memory and the future loop's DSP are reserved before process().
     const preparedTrack={track:{...capture.track,id:capture.track?.id||capture.id,assetId:capture.assetId,kind:'loop',channels:1,frames:1,offsetFrames:0,mix:{...capture.track?.mix}},cache,dsp:new TrackDSP(this.sampleRate,capture.track?.mix),ready:true};
     this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:'arming',startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
-    if(capture.kind==='vocal'&&capture.track?.mix)this.vocalDSP.setMix(capture.track.mix);
+    if(capture.kind==='vocal'&&capture.track?.mix)this.setInputMix(capture.track.mix);
     this.playing=true;this.prefetch();
   }
   startCapture(c){
     c.status='recording';c.startClock=this.clock;c.startFrame=this.frame;if(c.lengthFrames)c.targetEndFrame=c.startFrame+c.lengthFrames;
-    const initialState={tracks:this.trackList.map(t=>({...t.track,mix:{...t.dsp.mix}})),baseFrames:this.baseFrames,master:{volume:this.masterVolume},input:{gain:this.inputGain,monitor:this.monitor,compensationMs:c.compensation*1000/this.sampleRate},inputMix:{...this.vocalDSP.mix},spotlight:this.spotlight,frame:this.frame,sampleRate:this.sampleRate,engineVersion:1};
+    const initialState={tracks:this.trackList.map(t=>({...t.track,mix:{...t.dsp.mix}})),baseFrames:this.baseFrames,master:{volume:this.masterVolume},input:{gain:this.inputGain,monitor:this.monitor,compensationMs:c.compensation*1000/this.sampleRate},inputMix:{...this.inputMixTarget},spotlight:this.spotlight,frame:this.frame,sampleRate:this.sampleRate,engineVersion:1};
     this.emit('capture-start',{captureId:c.id,kind:c.kind,startFrame:c.startFrame,assetId:c.assetId,masterAssetId:c.masterAssetId,compensationFrames:c.compensation,initialState});
   }
   finishCapture(stopping=false){
@@ -160,11 +173,11 @@ export class LoopEngine {
     const c=this.capture;if(!c)return;const frames=c.raw.frames;c.raw.end(status);c.master?.end(status);
     const track=c.kind==='loop'&&frames>=c.minFrames?{...c.preparedTrack.track,frames,offsetFrames:positiveModulo(c.startFrame,frames)}:null;
     if(c.kind==='loop'&&track){const t=this.tracks.get(track.id);if(t){t.track.frames=frames;t.cache.totalFrames=frames;}}
-    this.capture=null;if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status,reason,assetId:c.assetId,masterAssetId:c.masterAssetId,frames,startFrame:c.startFrame,endFrame:c.startFrame+frames,track,compensationFrames:c.compensation});this.state();
+    this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status,reason,assetId:c.assetId,masterAssetId:c.masterAssetId,frames,startFrame:c.startFrame,endFrame:c.startFrame+frames,track,compensationFrames:c.compensation});this.state();
   }
   abortCapture(reason){const c=this.capture;if(!c)return;if(c.kind==='loop')this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;this.completeCapture('interrupted',reason);}
-  cancelCapture(){const c=this.capture;if(!c)return;this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
-  applySection(section){for(const t of this.tracks.values()){const state=section.tracks[t.track.id];t.track.muted=state?!!state.muted:true;t.track.solo=state?!!state.solo:false;if(state?.mix){t.track.mix={...t.track.mix,...state.mix};t.dsp.setMix(t.track.mix);}}this.pendingSection=null;this.emit('section',{id:section.id,section});}
+  cancelCapture(){const c=this.capture;if(!c)return;this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
+  applySection(section){for(const t of this.tracks.values()){const state=Object.hasOwn(section.tracks,t.track.id)?section.tracks[t.track.id]:null;t.track.muted=state?!!state.muted:true;t.track.solo=state?!!state.solo:false;if(state?.mix){t.track.mix={...t.track.mix,...state.mix};t.dsp.setMix(t.track.mix);}}this.pendingSection=null;this.emit('section',{id:section.id,section});}
   requestPage(assetId,cache,index){if(!this.storage||index<0||cache.has(index))return;const last=cache.pending.get(index);if(last!==undefined&&this.clock-last<this.sampleRate)return;if(!cache.pending.has(index)&&cache.pending.size>=32)cache.pending.delete(cache.pending.keys().next().value);cache.pending.set(index,this.clock);this.storage.postMessage({type:'read',assetId,index});}
   prefetchTrack(t){const {track,cache}=t,total=Math.ceil(track.frames/this.pageFrames);for(let i=0;i<Math.min(cache.headPages,total);i++)this.requestPage(track.assetId,cache,i);const position=positiveModulo(this.frame-track.offsetFrames,track.frames),page=Math.floor(position/this.pageFrames);for(let i=0;i<6;i++)this.requestPage(track.assetId,cache,(page+i)%total);}
   prefetch(){if(this.frame<this.sourceEndFrame)for(const t of this.tracks.values())this.prefetchTrack(t);if(this.preview){const p=this.preview,c=p.cache,total=Math.ceil(p.frames/this.pageFrames);if(c&&total)for(let i=0;i<6;i++)this.requestPage(p.assetId,c,Math.min(total-1,Math.floor(p.position/this.pageFrames)+i));}if(this.audition){const a=this.audition,total=Math.ceil(a.frames/this.pageFrames),position=Math.max(0,this.frame-a.startFrame);for(let i=0;i<Math.min(4,total);i++)this.requestPage(a.assetId,a.cache,i);if(position<a.frames)for(let i=0;i<6;i++)this.requestPage(a.assetId,a.cache,Math.min(total-1,Math.floor(position/this.pageFrames)+i));}}
@@ -172,6 +185,10 @@ export class LoopEngine {
   process(input,outputL,outputR){
     const size=outputL.length;this.prefetch();let anySolo=false;for(const t of this.tracks.values())if(t.track.solo)anySolo=true;
     for(let i=0;i<size;i++){
+      // The microphone represents a musical instant C frames earlier. Match
+      // vocal-control automation to that instant, just as the backing history
+      // does. Monitoring these controls consequently carries the same offset.
+      while(this.inputMixQueue.length&&this.inputMixQueue[0].clock<=this.clock)this.vocalDSP.setMix(this.inputMixQueue.shift().mix);
       if(this.audition?.status==='playing'&&this.frame>=this.audition.endFrame+this.audition.tailFrames)this.endAudition();
       let c=this.capture;
       // Sections and capture share one boundary. Snapshot the settings actually

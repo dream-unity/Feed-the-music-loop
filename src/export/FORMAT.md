@@ -18,6 +18,9 @@ The 64-byte little-endian header is:
 The manifest follows immediately, then contiguous audio payloads. Each manifest
 asset declares `id`, `sampleRate`, `channels`, `frames`, `encoding: "f32le"`,
 `pageFrames: 16384`, `offset`, `bytes`, `sha256`, `status`, `name` and `kind`.
+Optional `captureId`, `leadAssetId`, `performanceId` and `track` retain recovery
+pairing and sound settings. Audio references in these fields are validated and
+remapped together with project references during import.
 Offsets are relative to the beginning of the PCM payload region. They must be
 contiguous in manifest order, with no holes, overlaps or trailing data. Asset
 length is exactly `frames × channels × 4`; mono and stereo are supported.
