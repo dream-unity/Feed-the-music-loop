@@ -174,6 +174,7 @@ export function validateProject(input, { strict = true } = {}) {
     if (!['complete', 'interrupted', 'recovered'].includes(perf.status)) fail('Unknown performance status.');
     if (perf.tailFrames !== undefined) number(perf.tailFrames, 'performance tail', 0, Number.MAX_SAFE_INTEGER, true);
     if (perf.arrangementIncomplete !== undefined) bool(perf.arrangementIncomplete, 'incomplete arrangement');
+    if (perf.removed !== undefined) bool(perf.removed, 'removed performance');
     if (perf.arrangementThroughFrame !== undefined) number(perf.arrangementThroughFrame, 'arrangement boundary', 0, Number.MAX_SAFE_INTEGER, true);
     if (perf.editableFrames !== undefined) number(perf.editableFrames, 'editable performance length', 0, perf.frames, true);
     if (perf.arrangementIncomplete && (perf.status === 'complete' || perf.editableFrames === undefined)) fail('An incomplete arrangement needs an interrupted status and a verified editable interval.');

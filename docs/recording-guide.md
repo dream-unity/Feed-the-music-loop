@@ -34,6 +34,8 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
    **Song** keeps both a **Vocal take** and its full stereo **Performance**. Another take preserves earlier takes without automatically playing them into the new backing. Select **Use in edited song** for the vocal you want to remix. **Turn into a loop** deliberately creates another repeating layer from a take.
 
+   Use the trash button beside a performance to remove it from the list. Confirm **Remove performance**, or cancel to keep it. **Undo** restores it during the current session. The separate vocal take, its recorded arrangement and audio stay available for remixing; removal is saved across reloads and does not free device storage.
+
 6. **Perform sections.**
 
    In **Build**, arrange the layers and their mix, choose **Save section**, and name it Intro, Verse or Chorus. Save another combination for the next part. A section recalls its saved layers and sound settings; a layer added afterwards is absent from the older section.
@@ -59,3 +61,7 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
    Long recordings depend on available storage and device performance. If an export produces numbered WAV parts, download every part before closing the page. Some browser storage fallbacks cannot preview or bundle very large individual recordings; keep their numbered original WAVs when prompted.
 
    On a phone, keep the studio visible and the screen awake. Calls, screen locking or another app taking the microphone can interrupt a take. Test a short complete recording and export on your device first. If an interruption occurs, follow the recovery notice and listen to the retained audio before relying on it.
+
+During recording, the live microphone history rises and falls with your actual input, including quiet or silent moments. The display shows microphone peak and average levels; it is independent of the backing-loop output.
+
+After finishing a loop or performance, the recording bar remains with a saved status. A **Just recorded** card appears immediately underneath in the current view. Choose **Listen** to hear it there, or download its WAV. Listening stops the backing loops so you hear the recording clearly. The latest recording stays here until another recording replaces it or you open another project; performances and vocal takes remain in Song.
