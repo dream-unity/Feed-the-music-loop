@@ -211,7 +211,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await playing(page, true);
   await view(page, 'song');
   await expect(takes(page)).toHaveCount(1);
-  await expect(page.locator('.performance-card')).toHaveCount(1);
+  await expect(page.locator('.performance-card[data-performance-id]')).toHaveCount(1);
   const longTakeId = await takes(page).first().getAttribute('data-take-id');
   const longPerformanceId = await action(page, 'export-master').getAttribute('data-performance-id');
 
@@ -238,7 +238,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await page.getByTestId('finish').click();
   await state(page, 'idle');
   await expect(takes(page)).toHaveCount(2);
-  await expect(page.locator('.performance-card')).toHaveCount(2);
+  await expect(page.locator('.performance-card[data-performance-id]')).toHaveCount(2);
   await playing(page, true);
   await reviewScreenshot(page, testInfo, 'desktop-song');
 
@@ -269,7 +269,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await expect(tracks(page)).toHaveCount(2);
   await view(page, 'song');
   await expect(takes(page)).toHaveCount(2);
-  await expect(page.locator('.performance-card')).toHaveCount(2);
+  await expect(page.locator('.performance-card[data-performance-id]')).toHaveCount(2);
   const reopenedMaster = await download(page, () => page.locator(`.performance-card [data-action="export-master"][data-performance-id="${longPerformanceId}"]`).click());
   expect(inspectWav(reopenedMaster.bytes).peak).toBeGreaterThan(0.005);
   expect(reopenedMaster.bytes).toEqual(master.bytes);
@@ -354,26 +354,33 @@ test('a saved edited mix can be deleted without its source loops or backup audio
   await page.locator('[data-export-duration]').fill('2');
   const edited = await download(page, () => action(page, 'export-mix').click());
   expect(inspectWav(edited.bytes).peak).toBeGreaterThan(0.005);
-  const remove = page.locator('[data-action="delete-saved-mix"]');
+  await expect(page.locator('[data-ref="downloads"]')).toHaveCount(0);
+  await expect(page.locator('.ready-download')).toHaveCount(0);
+  await view(page, 'song');
+  const savedMix = page.locator('[data-ref="saved-mixes"] .saved-mix-card');
+  await expect(savedMix).toHaveCount(1);
+  const remove = savedMix.locator('[data-action="delete-saved-mix"]');
   await expect(remove).toHaveCount(1);
   await expect(remove).toBeEnabled();
   const mixId = await remove.getAttribute('data-id');
-  const readyLink = page.locator('.ready-download');
-  await expect(readyLink).toHaveCount(1);
-  const mixURL = await readyLink.getAttribute('href');
+  const savedWav = savedMix.locator('[data-action="export-recovered"]');
+  const savedCopy = await download(page, () => savedWav.click());
+  expect(savedCopy.bytes).toEqual(edited.bytes);
   await remove.click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('Your source loops and vocal recordings will be kept.');
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(dialog).not.toBeVisible();
   await expect(remove).toHaveCount(1);
-  await expect(readyLink).toHaveAttribute('href', mixURL);
+  const afterCancel = await download(page, () => savedWav.click());
+  expect(afterCancel.bytes).toEqual(edited.bytes);
 
   await remove.click();
   await dialog.getByRole('button', { name: 'Delete saved mix', exact: true }).click();
   await expect(remove).toHaveCount(0);
+  await expect(savedMix).toHaveCount(0);
   await expect(page.locator('.recovery-card')).toHaveCount(0);
-  await expect(readyLink).toHaveCount(0);
+  await expect(page.locator('.ready-download')).toHaveCount(0);
   await expect(page.getByTestId('add-loop')).toBeEnabled();
   await view(page, 'build');
   await expect(tracks(page)).toHaveCount(3);
@@ -403,6 +410,92 @@ test('a saved edited mix can be deleted without its source loops or backup audio
   await playing(page, true);
   await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
   await reviewScreenshot(page, testInfo, 'source-loops-after-saved-mix-deletion');
+});
+
+test('retained recordings stay out of the studio and are recoverable beside their own download in Manage storage', async ({ page }, testInfo) => {
+  await boot(page);
+  const fixture = await page.evaluate(async () => {
+    const { StorageClient } = await import('./src/storage/client.mjs');
+    const { createProject, createTrack } = await import('./src/project.mjs');
+    const writer = new StorageClient();
+    await writer.init();
+    try {
+      const project = createProject('A song with retained recordings');
+      await writer.saveProject(project);
+      const assetIds = [];
+      const frames = 8192;
+      for (let index = 0; index < 25; index++) {
+        const assetId = `retained_${crypto.randomUUID()}`;
+        const name = index === 0 ? 'Original loop' : `Retained loop ${index}`;
+        await writer.beginAsset({ id: assetId, projectId: project.id, sampleRate: project.sampleRate, channels: 1, kind: 'loop', name });
+        const pcm = Float32Array.from({ length: frames }, (_, frame) => 0.2 * Math.sin(2 * Math.PI * (220 + index * 20) * frame / project.sampleRate));
+        await writer.putPage(assetId, 0, pcm.buffer, frames, 1);
+        await writer.finishAsset(assetId, { frames });
+        assetIds.push(assetId);
+        if (index === 0) project.tracks.push(createTrack({ assetId, name, frames }));
+      }
+      project.baseFrames = frames;
+      await writer.saveProject(project);
+      return { projectId: project.id, originalTrackId: project.tracks[0].id, retainedId: assetIds[12], assetIds };
+    } finally { await writer.dispose(); }
+  });
+  // Reload refreshes the project selector using the same durable storage the
+  // app will see on an ordinary visit; no controller state is substituted.
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await action(page, 'projects').click();
+  await page.locator(`.project-row[data-id="${fixture.projectId}"]`).click();
+  await expect(page.locator('[data-ref="project-name"]')).toHaveText('A song with retained recordings');
+  await expect(tracks(page)).toHaveCount(1);
+  await expect(page.locator('[data-ref="recovery"], [data-ref="downloads"], .recovery-card, .ready-download')).toHaveCount(0);
+  await expect(page.locator('[data-ref="capture-panel"]')).toBeInViewport();
+
+  await view(page, 'mix');
+  const original = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${fixture.originalTrackId}"]`).click());
+  expect(inspectWav(original.bytes).peak).toBeGreaterThan(0.005);
+  await view(page, 'build');
+  await reviewScreenshot(page, testInfo, 'clean-workspace-desktop');
+
+  await action(page, 'manage-storage').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('.recovery-card')).toHaveCount(24);
+  const retained = dialog.locator('.recovery-card').filter({ has: page.locator(`[data-action="export-recovered"][data-id="${fixture.retainedId}"]`) });
+  await expect(retained).toContainText('Retained loop 12');
+  const retainedWav = await download(page, () => retained.locator('[data-action="export-recovered"]').click());
+  expect(inspectWav(retainedWav.bytes).frames).toBe(8192);
+  await retained.getByRole('button', { name: 'Keep in project', exact: true }).click();
+  await expect(retained).toHaveCount(0);
+  await expect(dialog.locator('.recovery-card')).toHaveCount(23);
+  await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(tracks(page)).toHaveCount(2);
+  await expect(page.locator('[data-ref="recovery"], [data-ref="downloads"]')).toHaveCount(0);
+  await expect(page.locator('.recovery-card:visible, .ready-download:visible')).toHaveCount(0);
+  await page.setViewportSize({ width: 360, height: 800 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await reviewScreenshot(page, testInfo, 'clean-workspace-phone');
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect(tracks(page)).toHaveCount(2);
+  const recovered = tracks(page).filter({ hasText: 'Retained loop 12' });
+  const recoveredTrackId = await recovered.getAttribute('data-track-id');
+  await view(page, 'mix');
+  await page.locator(`[data-view-panel="mix"] [data-action="select-track"][data-id="${recoveredTrackId}"]`).click();
+  const recoveredWav = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${recoveredTrackId}"]`).click());
+  expect(recoveredWav.bytes).toEqual(retainedWav.bytes);
+  await page.locator(`[data-view-panel="mix"] [data-action="select-track"][data-id="${fixture.originalTrackId}"]`).click();
+  const originalAfter = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${fixture.originalTrackId}"]`).click());
+  expect(originalAfter.bytes).toEqual(original.bytes);
+  const remaining = await page.evaluate(async projectId => {
+    const { StorageClient } = await import('./src/storage/client.mjs');
+    const reader = new StorageClient();
+    await reader.init();
+    try { return (await reader.listAssets(projectId)).map(asset => asset.id).sort(); }
+    finally { await reader.dispose(); }
+  }, fixture.projectId);
+  expect(remaining).toEqual([...fixture.assetIds].sort());
 });
 
 test('cancel discards persisted loop and vocal capture pages while preserving the original recording', async ({ page }, testInfo) => {
@@ -447,7 +540,7 @@ test('cancel discards persisted loop and vocal capture pages while preserving th
       await expect.poll(async () => (await inspect()).map(asset => asset.id)).toEqual([originalId]);
       await expect(tracks(page)).toHaveCount(1);
       await expect(takes(page)).toHaveCount(0);
-      await expect(page.locator('.performance-card')).toHaveCount(0);
+      await expect(page.locator('.performance-card[data-performance-id]')).toHaveCount(0);
       await expect(page.locator('.recovery-card')).toHaveCount(0);
     }
     await testInfo.attach('cancelled-persisted-captures', { body: JSON.stringify({ initialAssets, persistedCaptures, remainingAssets: await inspect() }, null, 2), contentType: 'application/json' });
@@ -459,7 +552,7 @@ test('cancel discards persisted loop and vocal capture pages while preserving th
   await expect(page.getByTestId('add-loop')).toBeEnabled();
   await expect(tracks(page)).toHaveCount(1);
   await expect(takes(page)).toHaveCount(0);
-  await expect(page.locator('.performance-card')).toHaveCount(0);
+  await expect(page.locator('.performance-card[data-performance-id]')).toHaveCount(0);
   await expect(page.locator('.recovery-card')).toHaveCount(0);
   await page.getByTestId('play').click();
   await playing(page, true);

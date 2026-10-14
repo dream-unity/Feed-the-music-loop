@@ -75,3 +75,9 @@ During microphone recording, the live microphone history rises and falls with yo
 After finishing a loop or performance, the recording bar remains with a saved status. A **Latest recording** card appears immediately underneath in the current view. Choose **Listen** to hear it there, or download its WAV. Listening stops the backing loops so you hear the recording clearly. The recorder is always visible directly beneath **The Groove**, even before recording or after cancelling. Reopening a project restores its latest saved recording here. Performances and vocal takes also remain in Song.
 
 When **Studio update ready** appears, finish and save your recording, close every studio tab and installed app window, then reopen the site. A normal refresh can keep the older offline version while another studio tab is open. Do not clear browser storage: your recordings are stored there. The footer displays the studio version so you can confirm which interface is running.
+
+### Downloading and retained recordings
+
+Use the WAV control beside the recording you want. Saved edited mixes are in **Song → Saved mixes**, with their own WAV and delete controls. The studio does not display a running download history.
+
+Audio retained separately from your current loops and takes is available through **Manage storage → Retained recordings**. Download a recording there, or choose **Keep in project** to restore it. Removing the workspace file list does not delete any saved audio. Exceptionally long WAV exports open a dialog containing only that recording’s numbered parts.

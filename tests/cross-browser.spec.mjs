@@ -106,17 +106,16 @@ async function renderMix(page) {
 }
 
 async function playRenderedWav(page, exported) {
-  const url = await page.locator('.ready-download').evaluateAll((links, filename) => links.find(link => link.download === filename)?.href, exported.filename);
-  expect(url).toMatch(/^blob:/);
   // Exercise the browser's native media decoder using the exact exported
   // Float32 WAV. A real button click supplies the required user activation.
-  await page.evaluate(url => {
+  await page.evaluate(base64 => {
     const fixture = document.createElement('div');
     fixture.id = 'ci-native-wav-preview';
     fixture.style.cssText = 'position:fixed;top:16px;left:16px;z-index:10000';
     const audio = document.createElement('audio');
     audio.preload = 'auto';
-    audio.src = url;
+    const bytes = Uint8Array.from(atob(base64), character => character.charCodeAt(0));
+    audio.src = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = 'Test native WAV playback';
@@ -125,7 +124,7 @@ async function playRenderedWav(page, exported) {
     });
     fixture.append(audio, button);
     document.body.append(fixture);
-  }, url);
+  }, exported.bytes.toString('base64'));
   const fixture = page.locator('#ci-native-wav-preview');
   try {
     await fixture.getByRole('button').click();
@@ -145,6 +144,7 @@ async function playRenderedWav(page, exported) {
     await fixture.evaluate(element => {
       const audio = element.querySelector('audio');
       audio.pause();
+      URL.revokeObjectURL(audio.src);
       audio.removeAttribute('src');
       audio.load();
       element.remove();

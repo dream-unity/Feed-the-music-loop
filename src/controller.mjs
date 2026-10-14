@@ -102,7 +102,7 @@ export class StudioController {
     this.render();
     if (recoveryRequired || deletionPending) this.ui.notify(readonlyReason, 'error');
     else if (readonly) this.ui.notify('This project is open in another tab. Playback and backup are available here.', 'info');
-    else if (next.pendingCapture && this.state.recovered.length) this.ui.notify('An unfinished recording was recovered. Its saved audio is available in the Song view.', 'info');
+    else if (next.pendingCapture && this.state.recovered.length) this.ui.notify('An unfinished recording was recovered. Its saved audio is available in Manage storage.', 'info');
     } finally { this.openingProject = false; this.state.busy = false; this.render(); }
   }
   async ensureAudio() {
@@ -522,7 +522,7 @@ export class StudioController {
       const interrupted = needsRecovery || p.interrupted || p.arrangementIncomplete || raw.status !== 'complete' || (master && (master.status !== 'complete' || master.frames !== raw.frames)) || p.hadUnderrun;
       this.state.status = needsRecovery ? 'Audio retained · recovery required' : cancelled ? 'Recording cancelled · backing continues' : interrupted ? 'Interrupted recording retained' : 'Saved on this device';
       // The persistent saved card confirms success without covering its Listen button.
-      if (!completedRecording || cancelled || interrupted || needsRecovery) this.ui.notify(needsRecovery ? 'Your checkpointed audio is retained. Use Recover in the Song view, or reopen this project, before previewing or exporting it.' : cancelled ? 'Recording cancelled.' : interrupted ? 'The saved portion was retained. Review the interrupted recording before exporting.' : p.kind === 'vocal' ? 'Vocal take and stereo performance saved. Your loops keep playing.' : 'Loop saved. Keep building your song.', cancelled || interrupted ? 'info' : 'success');
+      if (!completedRecording || cancelled || interrupted || needsRecovery) this.ui.notify(needsRecovery ? 'Your checkpointed audio is retained. Use Recover in Manage storage, or reopen this project, before previewing or exporting it.' : cancelled ? 'Recording cancelled.' : interrupted ? 'The saved portion was retained. Review the interrupted recording before exporting.' : p.kind === 'vocal' ? 'Vocal take and stereo performance saved. Your loops keep playing.' : 'Loop saved. Keep building your song.', cancelled || interrupted ? 'info' : 'success');
     } catch (error) {
       if (this.state.storageFailed || this.state.project !== project || this.pending !== p) return;
       if (p.end.status === 'cancelled' && originalIntent && !project.pendingCapture) project.pendingCapture = originalIntent;
@@ -677,7 +677,7 @@ export class StudioController {
     });
     this.render();
     if (autoDownload) { const a = document.createElement('a'); a.href = url; a.download = result.filename; document.body.append(a); a.click(); a.remove(); }
-    if (notify) this.ui.notify('Your download is ready. The download link stays available in the studio.', 'success');
+    if (notify) this.ui.notify('Your download is ready.', 'success');
   }
   removeDownloadAsset(assetId) {
     this.state.downloads = this.state.downloads.filter(item => {
@@ -718,8 +718,14 @@ export class StudioController {
     catch (error) {
       if (!['WAV_SPLIT_REQUIRED', 'FALLBACK_EXPORT_LIMIT'].includes(error.code)) throw error;
       const group = id('download-group-'); let count = 0;
-      for await (const part of exportWavParts(this.storage, assetId, { signal, maxDataBytes: 256 * 1024 * 1024 })) {
-        this.offerDownload({ ...named(part), assetId }, `${label} · part ${part.part} of ${part.partCount}`, { group, autoDownload: false, notify: false }); count++;
+      try {
+        for await (const part of exportWavParts(this.storage, assetId, { signal, maxDataBytes: 256 * 1024 * 1024 })) {
+          this.offerDownload({ ...named(part), assetId }, `${label} · part ${part.part} of ${part.partCount}`, { group, autoDownload: false, notify: false }); count++;
+        }
+      } finally {
+        // Keep this recording's numbered parts together, including any finished
+        // parts if a later range fails, without displaying a download history.
+        if (count) this.ui.showDownloadParts?.(this.state.downloads.filter(item => item.group === group), label);
       }
       this.ui.notify(`${filenameSuffix ? 'The available incomplete audio' : 'Your complete recording'} is ready in ${count} numbered WAV parts. Use each download link to save every part.`, 'success');
     }
