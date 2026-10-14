@@ -1033,3 +1033,13 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .capture-panel[data-status="idle"] .capture-copy strong { color: var(--mint); }
 .update-notice { margin: 0 0 20px; padding: 16px 20px; border: 1px solid #637e6e; border-radius: 14px; background: #253b30; color: var(--mint); font-size: 13px; line-height: 1.6; }
 .studio-version { display: block; margin-top: 6px; font-size: 10px; color: var(--muted); font-style: normal; }
+
+/* A distinct capture action alongside Add loop and Sing over loops. */
+.dock-actions > .loop-record-button { background: #ccbcfa; color: #252330; border-color: #ccbcfa; white-space: normal; }
+@media (max-width: 640px) {
+  .dock-actions { flex-wrap: wrap; }
+  .dock-actions > .loop-record-button { flex: 1 0 100%; font-size: 12px; }
+  .has-loop-record-control main { padding-bottom: calc(230px + env(safe-area-inset-bottom)); }
+  .has-loop-record-control .toast-region { bottom: calc(200px + env(safe-area-inset-bottom)); }
+  html { scroll-padding-bottom: calc(230px + env(safe-area-inset-bottom)); }
+}

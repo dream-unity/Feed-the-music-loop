@@ -337,3 +337,33 @@ test('cancellation during output creation does not start a render worker', async
     assert.equal(instances.length, 0); assert.deepEqual([...storage.assets.keys()], originals);
   });
 });
+
+test('an explicit loop-only performance render never falls back to the selected dry vocal or solo controls', async () => {
+  const { storage, project } = await fixture();
+  const loop = project.tracks[0];
+  await addAudio(storage, project, 'other-loop', loop.frames, 1, i => Math.sin(i * 2 * Math.PI * 739 / SR) * .1);
+  project.tracks.push(createTrack({ id: 'other-track', assetId: 'other-loop', name: 'Other loop', frames: loop.frames, mix: { ...plainMix }, solo: true }));
+  await addAudio(storage, project, 'loops-master', 8000, 2);
+  project.performances.push({ id: 'loops-performance', name: 'Loop recording 1', source: 'loops', masterAssetId: 'loops-master', frames: 8000, startFrame: 16137, endFrame: 24137,
+    status: 'complete', events: [{ type: 'mix', id: loop.id, solo: true, frame: 16400 }, { type: 'spotlight', active: true, frame: 16500 },
+      { type: 'section', frame: 17000, section: { id: 'loop-section', name: 'Loops', tracks: Object.fromEntries(project.tracks.map(track => [track.id, { muted: false, solo: true, mix: track.mix }])) } }],
+    initialState: { tracks: structuredClone(project.tracks), baseFrames: project.baseFrames, master: { volume: .8 }, input: { gain: 4 }, spotlight: true } });
+  const options = { performanceId: 'loops-performance', mode: 'performance', useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+  const before = structuredClone(project);
+  const plan = await prepareRenderPlan(storage, project, options);
+  assert.equal(plan.vocal, null); assert.equal(plan.spotlight, true);
+  assert.equal(plan.assetIds.includes('voice-audio'), false); assert.ok(plan.tracks.every(track => !track.solo));
+  assert.equal(plan.events[0].solo, false); assert.equal(plan.events[1].active, true);
+  assert.ok(Object.values(plan.events[2].section.tracks).every(track => !track.solo));
+  const output = await renderEditedMix(storage, project, options), pcm = storage.samples(output.assetId);
+  assert.ok(rms(pcm, 2000, pcm.length) > .005);
+  assert.equal(storage.reads.some(read => read.id === 'voice-audio'), false);
+  assert.deepEqual(project, before, 'loop-only render does not change the stored solo or selected vocal settings');
+  const reference = structuredClone(project); reference.selectedTakeId = null;
+  const performance = reference.performances.at(-1);
+  for (const track of performance.initialState.tracks) track.solo = false;
+  performance.events = performance.events.map(event => event.type === 'mix' ? { ...event, solo: false } : event);
+  for (const settings of Object.values(performance.events[2].section.tracks)) settings.solo = false;
+  const expected = await renderEditedMix(storage, reference, options);
+  assert.deepEqual(pcm, storage.samples(expected.assetId));
+});

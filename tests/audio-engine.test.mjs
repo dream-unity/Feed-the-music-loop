@@ -305,3 +305,87 @@ test('page tags and writer totals preserve values beyond unsigned 32-bit frames 
   for(const id of ['raw','master']){assert.deepEqual(writes.filter(write=>write.assetId===id).map(write=>[write.index,write.frames]),[[Math.floor(prefix/pageFrames),256],[Math.floor(prefix/pageFrames)+1,156]]);assert.equal(sealed.find(item=>item.assetId===id).frames,prefix+211);}
   }
 });
+
+function storedLoop(h, { id, frames=1003, muted=false, solo=false, mix={} }, source) {
+  const assetId=`source-${id}`,pages=new Map();
+  for(let at=0,index=0;at<frames;at+=h.engine.pageFrames,index++){
+    const pcm=Float32Array.from({length:Math.min(h.engine.pageFrames,frames-at)},(_,i)=>source(at+i));
+    pages.set(index,{buffer:pcm.buffer,frames:pcm.length,channels:1});
+  }
+  h.assets.set(assetId,{pages,channels:1,frames,status:'complete'});
+  h.engine.command({type:'track',track:{id,assetId,frames,channels:1,muted,solo,offsetFrames:0,mix:{volume:.6,pan:0,highpass:0,compression:0,reverb:0,delay:0,...mix}}});
+  return assetId;
+}
+
+test('loop-only stereo capture is the all-unmuted backing mix, excluding mic, vocal effects, metronome and preview',()=>{
+  const actual=harness(),reference=harness();
+  for(const h of [actual,reference]){
+    storedLoop(h,{id:'left',solo:h===actual,mix:{pan:-.7,reverb:.2,delay:.15}},i=>Math.sin(i*.041)*.2);
+    storedLoop(h,{id:'right',mix:{pan:.8,low:3}},i=>Math.cos(i*.092)*.17);
+    storedLoop(h,{id:'muted',muted:true,mix:{volume:2}},i=>Math.sin(i*.3)*.9);
+    h.engine.command({type:'configure',baseFrames:1003,masterVolume:.7});
+  }
+  actual.engine.command({type:'configure',monitor:true,compensationFrames:777,inputGain:4,inputMix:{volume:2,reverb:1,delay:.75},metronome:{enabled:true,volume:1}});
+  actual.engine.command({type:'preview-take',take:{assetId:'source-muted',frames:1003,channels:1}});
+  actual.arm({kind:'mix',assetId:'loops'});reference.engine.command({type:'play'});
+  const expected=[],monitor=[];
+  for(const [frames,commands] of [[2107,[{type:'mix',id:'left',muted:true}]], [1119,[{type:'mix',id:'right',mix:{volume:.3,pan:-.5,reverb:.4}},{type:'configure',masterVolume:1.1}]], [2041,[]]]){
+    const output=actual.run(frames,(_,clock)=>Math.sin(clock*.17)*.95,73),backing=reference.run(frames,()=>0,73);
+    expected.push(backing);monitor.push(output);
+    for(const command of commands){actual.engine.command(command);reference.engine.command(command);}
+  }
+  actual.engine.command({type:'finish'});actual.run(1);
+  const pcm=actual.samples('loops'),end=actual.events.find(e=>e.type==='capture-end');
+  assert.equal(actual.assets.get('loops').channels,2);assert.equal(end.frames,5267);assert.equal(pcm.length,5267*2);
+  assert.equal(end.compensationFrames,0);assert.equal(end.masterAssetId,undefined);
+  assert.deepEqual([...actual.engine.tracks.keys()],['left','right','muted']);
+  assert(actual.events.some(e=>e.type==='meter'&&e.capture?.kind==='mix'&&e.captureLevel>.02&&e.captureRms>.005));
+  let at=0,difference=0;
+  for(let segment=0;segment<expected.length;segment++)for(let i=0;i<expected[segment].l.length;i++,at++){
+    assert.equal(pcm[at*2],monitor[segment].l[i],`captured left matches monitor at ${at}`);
+    assert.equal(pcm[at*2+1],monitor[segment].r[i],`captured right matches monitor at ${at}`);
+    assert.equal(pcm[at*2],expected[segment].l[i],`backing-only left at ${at}`);
+    assert.equal(pcm[at*2+1],expected[segment].r[i],`backing-only right at ${at}`);
+    difference+=Math.abs(pcm[at*2]-pcm[at*2+1]);
+  }
+  assert(difference>10,'Stereo panning is retained');
+  assert(!actual.engine.caches.has('loops'),'A completed stereo mix must not become a loop or leak a capture cache');
+});
+
+test('loop-only capture stays silent with every loop muted despite a live microphone and residual vocal effects',()=>{
+  const h=harness();storedLoop(h,{id:'muted',muted:true},i=>Math.sin(i*.05)*.5);
+  h.engine.command({type:'configure',monitor:true,inputMix:{volume:2,reverb:1,delay:.75},metronome:{enabled:true,volume:1}});
+  h.run(3000,()=>.8);h.arm({kind:'mix',assetId:'muted-mix'});const output=h.run(5000,()=>.9);
+  h.engine.command({type:'finish'});h.run(1);
+  assert(h.samples('muted-mix').every(x=>x===0));assert(output.l.every(x=>x===0));assert(output.r.every(x=>x===0));
+  const meter=h.events.filter(e=>e.type==='meter'&&e.capture?.kind==='mix').at(-1);
+  assert.equal(meter.captureLevel,0);assert.equal(meter.captureRms,0);assert(meter.inputLevel>.5);
+});
+
+test('loop-only capture starts on the next cycle and stops exactly without mic compensation or transport reset',()=>{
+  const h=harness();storedLoop(h,{id:'loop'},i=>Math.sin(i*.05)*.2);
+  h.engine.command({type:'configure',baseFrames:1003,compensationFrames:700,metronome:{countInBeats:8}});
+  h.engine.command({type:'play'});h.run(421);h.arm({kind:'mix',assetId:'song',quantized:true});
+  h.run(2500);const start=h.events.find(e=>e.type==='capture-start');assert.equal(start.startFrame,1003);assert.equal(start.compensationFrames,0);
+  const stoppedAt=h.engine.frame;h.engine.command({type:'stop'});h.run(1);
+  const end=h.events.find(e=>e.type==='capture-end');assert.equal(end.frames,stoppedAt-1003);assert.equal(end.endFrame,stoppedAt);
+  assert.equal(h.samples('song').length,(stoppedAt-1003)*2);assert.equal(h.engine.frame,stoppedAt);assert.equal(h.engine.playing,false);
+});
+
+test('cancelling loop-only capture leaves source loops intact and releases capture memory',()=>{
+  const h=harness();storedLoop(h,{id:'track'},i=>Math.sin(i*.07)*.1);
+  for(let i=0;i<12;i++){
+    h.arm({kind:'mix',id:`mix-${i}`,assetId:`mix-asset-${i}`});h.run(700);h.engine.command({type:'cancel'});
+    assert.equal(h.engine.tracks.size,1);assert(h.engine.tracks.has('track'));assert.equal(h.engine.capture,null);assert.equal(h.engine.caches.size,1);
+    assert.equal(h.assets.get(`mix-asset-${i}`).status,'cancelled');
+  }
+  assert(h.run(1000).l.some(x=>Math.abs(x)>.01));
+});
+
+test('loop-only capture preserves a valid stereo prefix on storage backpressure',()=>{
+  const h=harness({pool:2,autoRecycle:false});storedLoop(h,{id:'track'},i=>Math.sin(i*.04)*.2);
+  h.arm({kind:'mix',assetId:'prefix'});h.run(1300);
+  const end=h.events.find(e=>e.type==='capture-end');assert.equal(end.status,'interrupted');assert.equal(end.reason,'write-buffer-exhausted');assert.equal(end.frames,512);
+  assert.equal(h.assets.get('prefix').channels,2);assert.equal(h.samples('prefix').length,1024);assert(h.samples('prefix').some(x=>Math.abs(x)>.01));
+  assert.equal(h.engine.tracks.size,1);assert.equal(h.engine.capture,null);assert.equal(h.engine.playing,true);
+});

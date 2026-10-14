@@ -26,6 +26,7 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
   const performanceId = options.performanceId || selectedTake?.performanceId;
   const performance = performanceId ? project.performances.find(item => item.id === performanceId) : null;
   if (performanceId && !performance) throw new ExportError('INVALID_RENDER', 'The selected performance is unavailable.');
+  const loopsOnly = performance?.source === 'loops';
   const initial = performance?.initialState;
   if (mode === 'performance' && (!performance || !initial?.tracks)) throw new ExportError('INVALID_RENDER', 'The original mixer snapshot is unavailable. Use the current sound settings.');
   const currentTracks = project.tracks.filter(track => track.kind === 'loop');
@@ -40,7 +41,7 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
   });
   const sampleRate = project.sampleRate;
   const startFrame = int(performance?.startFrame ?? selectedTake?.startFrame ?? 0, 'song start');
-  const vocalAssetId = performance?.leadAssetId || selectedTake?.assetId;
+  const vocalAssetId = loopsOnly ? null : performance?.leadAssetId || selectedTake?.assetId;
   let vocal = null;
   if (vocalAssetId) {
     const asset = await storage.getAsset(vocalAssetId);
@@ -85,13 +86,21 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
     if (asset.projectId !== project.id || asset.sampleRate !== sampleRate || asset.frames !== track.frames || asset.channels !== track.channels || !['complete', 'interrupted', 'recovered'].includes(asset.status)) throw new ExportError('INVALID_RENDER', `The recording for “${track.name}” is unavailable or inconsistent.`);
   }
   if (vocal) assets.set(vocal.assetId, await storage.getAsset(vocal.assetId));
+  // Loop-only capture deliberately ignores solo. Keep project controls intact
+  // while reproducing the same backing-only arrangement and its volume changes.
+  const loopTracks = list => loopsOnly ? list.map(track => ({ ...track, solo: false })) : list;
+  if (loopsOnly) for (const event of events) {
+    if (typeof event.solo === 'boolean') event.solo = false;
+    if (event.track) event.track = { ...event.track, solo: false };
+    if (event.section?.tracks) for (const settings of Object.values(event.section.tracks)) settings.solo = false;
+  }
   const matchingTake = selectedTake?.assetId === vocalAssetId ? selectedTake : project.takes.find(take => take.assetId === vocalAssetId);
   const vocalTrack = project.tracks.find(track => track.kind === 'vocal' && track.assetId === vocalAssetId);
   const vocalMix = normalizeMix(mode === 'performance' ? initial.inputMix || roleMix('lead') : matchingTake?.mix || project.vocalMix || vocalTrack?.mix || initial?.inputMix || roleMix('lead'));
   return {
     projectId: project.id, sampleRate, mode, sourcePerformanceId: performance?.id || null,
     name: `${performance?.name || project.name} — ${mode === 'current' ? 'remix' : 'render'}`,
-    startFrame, bodyFrames, tailFrames, prerollFrames, tracks, currentTracks, events, vocal,
+    startFrame, bodyFrames, tailFrames, prerollFrames, tracks: loopTracks(tracks), currentTracks: loopTracks(currentTracks), events, vocal,
     baseFrames: initial?.baseFrames || project.baseFrames,
     masterVolume: mode === 'performance' ? initial.master?.volume ?? project.master.volume : project.master.volume,
     spotlight: !!initial?.spotlight, vocalMix, assetIds: [...assets.keys()],

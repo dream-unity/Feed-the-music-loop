@@ -48,13 +48,13 @@ function fixture() {
 }
 function finishedCapture(f, { kind = 'vocal', rawStatus = 'complete', masterStatus = 'complete', rawFrames = 100, masterFrames = 100, finalized = true } = {}) {
   const { controller, storage } = f, project = controller.state.project;
-  const track = createTrack({ assetId: 'raw-1', name: 'Vocal take 1', role: kind === 'loop' ? 'beat' : 'lead', frames: rawFrames });
+  const track = createTrack({ assetId: 'raw-1', name: kind === 'mix' ? 'Loop recording 1' : 'Vocal take 1', role: kind === 'loop' ? 'beat' : 'lead', frames: rawFrames });
   const done = deferred();
   controller.pending = { id: 'capture-1', kind, assetId: 'raw-1', masterAssetId: kind === 'vocal' ? 'master-1' : null, performanceId: 'performance-1', takeId: 'take-1',
     track, startFrame: 1000, createdAt: new Date().toISOString(), events: [], initialState: { tracks: [], baseFrames: 0, master: { volume: .8 }, input: clone(project.input), frame: 1000 },
     ended: true, end: { captureId: 'capture-1', kind, status: 'complete', startFrame: 1000, frames: rawFrames, track }, done: done.promise, resolveDone: done.resolve };
   project.pendingCapture = { id: 'capture-1', assetId: 'raw-1' };
-  const raw = { id: 'raw-1', projectId: project.id, captureId: 'capture-1', channels: 1, sampleRate: 48000, kind, frames: rawFrames, checkpointFrames: rawFrames, status: rawStatus };
+  const raw = { id: 'raw-1', projectId: project.id, captureId: 'capture-1', channels: kind === 'mix' ? 2 : 1, sampleRate: 48000, kind: kind === 'mix' ? 'master' : kind, ...(kind === 'mix' ? { source: 'loops' } : {}), frames: rawFrames, checkpointFrames: rawFrames, status: rawStatus };
   storage.assets.set(raw.id, raw); controller.sealed.set(raw.id, { ...raw, finalized });
   if (kind === 'vocal') { const master = { id: 'master-1', projectId: project.id, captureId: 'capture-1', channels: 2, sampleRate: 48000, kind: 'master', frames: masterFrames, checkpointFrames: masterFrames, status: masterStatus }; storage.assets.set(master.id, master); controller.sealed.set(master.id, { ...master, finalized }); }
   controller.state.capture = { kind, status: 'finishing' };
@@ -431,7 +431,7 @@ test('a performance commits only after both raw vocal and master seal', async ()
   assert.equal(f.controller.pending, null);
 });
 
-for (const kind of ['loop', 'vocal']) {
+for (const kind of ['loop', 'vocal', 'mix']) {
   test(`recent ${kind} recording is published only after its project save commits and keeps the current view`, async () => {
     const f = fixture(), saved = deferred();
     const previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
@@ -461,7 +461,7 @@ test('the recent performance waits for both audio streams to seal', async () => 
   assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: 'performance-1', captureId: 'capture-1' });
 });
 
-for (const kind of ['loop', 'vocal']) {
+for (const kind of ['loop', 'vocal', 'mix']) {
   test(`discarded ${kind} capture does not become the recent saved recording`, async () => {
     const f = fixture(), previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
     f.controller.state.recentRecording = previous;
@@ -475,7 +475,7 @@ for (const kind of ['loop', 'vocal']) {
   });
 }
 
-for (const kind of ['loop', 'vocal']) {
+for (const kind of ['loop', 'vocal', 'mix']) {
   test(`a failed ${kind} project save does not publish a recent recording`, async () => {
     const f = fixture(), previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
     f.controller.state.recentRecording = previous;
@@ -509,7 +509,7 @@ test('opening another project clears the recent recording instead of pointing to
   assert.equal(f.controller.state.capture, null);
 });
 
-for (const kind of ['loop', 'vocal']) {
+for (const kind of ['loop', 'vocal', 'mix']) {
   test(`opening a saved ${kind} project restores immediate playback below the recorder`, async () => {
     const f = fixture(); finishedCapture(f, { kind }); await f.controller.tryFinalize();
     const expected = { kind: f.controller.state.recentRecording.kind, id: f.controller.state.recentRecording.id };
@@ -1454,4 +1454,168 @@ test('failure creating a first project is not described as recovery of existing 
   f.storage.saveHook = async () => { throw Object.assign(new Error('Quota full'), { name: 'QuotaExceededError' }); };
   await assert.rejects(f.controller.openProject(), /Quota full/);
   assert.equal(f.controller.state.project, null); assert.equal(f.controller.state.recoveryRequired, false);
+});
+
+function loopMixFixture() {
+  const f = fixture(), project = f.controller.state.project;
+  project.tracks.push(createTrack({ assetId: 'backing', name: 'Saved loop', frames: 48000 })); project.baseFrames = 48000;
+  f.storage.assets.set('backing', { id: 'backing', projectId: project.id, sampleRate: project.sampleRate, kind: 'loop', channels: 1, frames: 48000, status: 'complete' });
+  return f;
+}
+
+test('record all loops never requests a microphone and prepares one stereo master with no vocal asset', async () => {
+  const f = loopMixFixture(), project = f.controller.state.project;
+  f.controller.state.capabilities.microphone = false;
+  project.input.compensationMs = 500;
+  project.tracks[0].solo = true;
+  project.tracks.push(createTrack({ assetId: 'another-loop', name: 'Another loop', frames: 48000 }));
+  const before = clone(project.tracks);
+  let microphoneRequests = 0;
+  f.engine.micHook = () => { microphoneRequests++; throw new Error('Microphone denied'); };
+  await f.controller.handle({ type: 'record-all-loops' });
+  assert.equal(microphoneRequests, 0);
+  assert.equal(f.storage.beginCalls.length, 1);
+  const asset = f.storage.beginCalls[0], pending = f.controller.pending, capture = f.engine.commands.find(command => command.type === 'arm').capture;
+  assert.equal(asset.channels, 2); assert.equal(asset.kind, 'master'); assert.equal(asset.source, 'loops');
+  assert.equal(asset.name, 'Loop recording 1'); assert.equal(asset.leadAssetId, undefined); assert.equal(asset.track, undefined);
+  assert.equal(capture.kind, 'mix'); assert.equal(capture.masterAssetId, null); assert.equal(capture.lengthFrames, 0); assert.equal(capture.quantized, true);
+  assert.equal(pending.takeId, null); assert.equal(project.takes.length, 0); assert.deepEqual(project.tracks, before);
+  assert.equal(project.pendingCapture.kind, 'mix'); assert.equal(project.pendingCapture.masterAssetId, null);
+  f.controller.state.transportFrame = 5000; f.controller.updateCaptureIntent();
+  assert.equal(project.pendingCapture.sealedThroughFrame, 5000, 'loop audio is not delayed by microphone compensation');
+  await f.controller.cancelPrepared(pending);
+});
+
+test('record all loops rejects empty and all-muted projects before opening audio or microphone', async () => {
+  for (const muted of [false, true]) {
+    const f = muted ? loopMixFixture() : fixture();
+    if (muted) f.controller.state.project.tracks[0].muted = true;
+    let audioCalls = 0; f.controller.ensureAudio = async () => { audioCalls++; return f.engine; };
+    await assert.rejects(f.controller.startCapture('mix', 0), /Unmute at least one saved loop/);
+    assert.equal(audioCalls, 0); assert.equal(f.storage.beginCalls.length, 0); assert.equal(f.controller.state.capture, null);
+  }
+});
+
+test('loop recording numbering counts loop performances without renaming or selecting existing vocal takes', async () => {
+  const f = loopMixFixture(); finishedCapture(f); await f.controller.tryFinalize();
+  const project = f.controller.state.project, selectedTakeId = project.selectedTakeId;
+  const originalTakes = clone(project.takes), tracks = clone(project.tracks);
+  finishedCapture(f, { kind: 'mix' });
+  f.controller.pending.performanceId = 'loop-performance-1';
+  await f.controller.tryFinalize();
+  const performance = project.performances.at(-1);
+  assert.equal(performance.source, 'loops'); assert.equal(performance.name, 'Loop recording 1');
+  assert.equal(performance.masterAssetId, 'raw-1'); assert.equal(Object.hasOwn(performance, 'leadAssetId'), false);
+  assert.equal(performance.compensationFrames, 0); assert.equal(performance.status, 'complete');
+  assert.deepEqual(project.takes, originalTakes); assert.equal(project.selectedTakeId, selectedTakeId); assert.deepEqual(project.tracks, tracks);
+  assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: 'loop-performance-1', captureId: 'capture-1' });
+  validateProject(project);
+  await f.controller.startCapture('mix', 0);
+  assert.equal(f.storage.beginCalls.at(-1).name, 'Loop recording 2');
+  await f.controller.cancelPrepared(f.controller.pending);
+});
+
+test('microphone off and microphone interruption cannot cancel loop-only capture during audio preparation', async () => {
+  const f = loopMixFixture(), ready = deferred();
+  f.controller.ensureAudio = () => ready.promise;
+  const starting = f.controller.startCapture('mix', 0), generation = f.controller.generation;
+  assert.equal(f.controller.pending, null); assert.equal(f.controller.state.capture.waitingForMic, false);
+  await f.controller.handle({ type: 'mic-off' });
+  f.controller.audioEvent('device-lost', { message: 'Microphone disconnected' });
+  f.controller.audioEvent('interrupted', { message: 'Microphone muted' });
+  assert.equal(f.controller.generation, generation); assert.equal(f.controller.state.capture.kind, 'mix');
+  ready.resolve(f.engine); await starting;
+  assert.equal(f.engine.commands.some(command => command.type === 'interrupt'), false);
+  assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+  await f.controller.cancelPrepared(f.controller.pending);
+});
+
+test('microphone off and device loss keep an active loop recording running', async () => {
+  const f = loopMixFixture(); await f.controller.startCapture('mix', 0);
+  const pending = f.controller.pending, generation = f.controller.generation;
+  f.controller.audioEvent('capture-start', { captureId: pending.id, kind: 'mix', startFrame: 48000 });
+  await f.controller.handle({ type: 'mic-off' });
+  f.controller.audioEvent('device-lost', { message: 'Microphone disconnected' });
+  f.controller.audioEvent('interrupted', { message: 'Microphone muted' });
+  await tick();
+  assert.equal(f.controller.pending, pending); assert.equal(pending.interrupted, undefined);
+  assert.equal(f.controller.state.capture.status, 'recording'); assert.equal(f.controller.generation, generation);
+  assert.equal(f.engine.commands.some(command => command.type === 'interrupt'), false);
+  assert.equal(f.storage.finishCalls.length, 0);
+  await f.controller.cancelPrepared(pending);
+});
+
+test('audio suspension during loop-only asset preparation waits for creation before cancelling', async () => {
+  const f = loopMixFixture(), creation = deferred(); f.storage.beginHook = () => creation.promise;
+  const starting = f.controller.startCapture('mix', 0); await tick();
+  const assetId = f.controller.pending.assetId;
+  f.engine.context = { state: 'suspended' }; f.controller.audioEvent('context-state', { state: 'suspended' });
+  const recovery = f.controller.audioRecovery;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(f.storage.finishCalls.length, 0); assert.ok(f.controller.pending);
+  creation.resolve(); await starting; await recovery;
+  assert.equal(f.engine.commands.some(command => command.type === 'arm'), false);
+  assert.equal(f.storage.assets.has(assetId), false); assert.equal(f.storage.assets.has('backing'), true);
+  assert.equal(f.controller.pending, null); assert.equal(f.controller.state.capture, null);
+});
+
+test('audio context interruption retains a loop-only stereo prefix as a performance without creating a take', async () => {
+  const f = loopMixFixture(); finishedCapture(f, { kind: 'mix', rawStatus: 'recording' });
+  f.controller.pending.started = true; f.controller.pending.ended = false; delete f.controller.pending.end; f.controller.sealed.clear();
+  f.engine.context = { state: 'suspended' }; f.controller.audioEvent('context-state', { state: 'suspended' });
+  await f.controller.audioRecovery;
+  const project = f.controller.state.project, performance = project.performances[0];
+  assert.equal(performance.source, 'loops'); assert.equal(performance.status, 'interrupted'); assert.equal(performance.frames, 100);
+  assert.equal(performance.masterAssetId, 'raw-1'); assert.equal(performance.leadAssetId, undefined);
+  assert.equal(project.takes.length, 0); assert.equal(project.selectedTakeId, null);
+  assert.equal(f.storage.finishCalls.filter(call => call.id === 'raw-1').length, 1); validateProject(project);
+});
+
+test('loop-only crash recovery restores a performance and latest playback without microphone or another vocal take', async () => {
+  const f = loopMixFixture(), project = f.controller.state.project;
+  const asset = recoverable(f, { kind: 'master', channels: 2, source: 'loops', name: 'Loop recording 4', captureId: 'loop-crash' });
+  project.pendingCapture = { id: 'loop-crash', kind: 'mix', assetId: asset.id, startFrame: 200, sealedThroughFrame: 290,
+    events: [{ type: 'mix', frame: 220 }, { type: 'mix', frame: 400 }], initialState: { frame: 200 } };
+  f.engine.micHook = () => { throw new Error('Microphone must not be requested'); };
+  await f.controller.recoverAsset(asset.id);
+  const performance = project.performances[0];
+  assert.equal(performance.source, 'loops'); assert.equal(performance.name, 'Loop recording 4 · recovered');
+  assert.equal(performance.masterAssetId, asset.id); assert.equal(performance.leadAssetId, undefined);
+  assert.equal(performance.startFrame, 200); assert.equal(performance.endFrame, 300); assert.equal(performance.status, 'recovered');
+  assert.deepEqual(performance.events, [{ type: 'mix', frame: 220 }]); assert.equal(performance.compensationFrames, 0);
+  assert.equal(project.pendingCapture, undefined); assert.equal(project.takes.length, 0); assert.equal(project.selectedTakeId, null);
+  assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: performance.id });
+  assert.equal(f.controller.state.recovered.length, 0); validateProject(project);
+  await f.controller.recoverAsset(asset.id); assert.equal(project.performances.length, 1, 'recovery is idempotent');
+});
+
+test('recovering an older loop-only master retains an unrelated capture intent', async () => {
+  const f = loopMixFixture(); recoverable(f, { kind: 'master', channels: 2, source: 'loops' });
+  const intent = { id: 'other-capture', kind: 'vocal', assetId: 'other-vocal', events: [], startFrame: 300 };
+  f.controller.state.project.pendingCapture = clone(intent);
+  await f.controller.recoverAsset('recover-1');
+  assert.deepEqual(f.controller.state.project.pendingCapture, intent);
+  assert.equal(f.controller.state.project.performances[0].startFrame, 0);
+});
+
+test('loop-only arrangement interruption keeps full stereo audio and a bounded editable interval', async () => {
+  const f = loopMixFixture(); recoverable(f, { kind: 'master', channels: 2, source: 'loops' });
+  f.controller.state.project.pendingCapture = { kind: 'mix', assetId: 'recover-1', startFrame: 200, arrangementIncomplete: true, arrangementThroughFrame: 235, events: [] };
+  await f.controller.recoverAsset('recover-1');
+  const performance = f.controller.state.project.performances[0];
+  assert.equal(performance.arrangementIncomplete, true); assert.equal(performance.status, 'interrupted');
+  assert.equal(performance.editableFrames, 35); assert.equal(performance.frames, 100);
+  assert.equal(f.storage.assets.get('recover-1').frames, 100); validateProject(f.controller.state.project);
+});
+
+test('a loop-only performance can be removed, undone and reopened without losing its stereo recording', async () => {
+  const f = loopMixFixture(); finishedCapture(f, { kind: 'mix' }); await f.controller.tryFinalize();
+  f.ui.confirm = async options => { assert.doesNotMatch(options.message, /Your vocal take/); return true; };
+  const projectId = f.controller.state.project.id, performanceId = f.controller.state.project.performances[0].id;
+  await f.controller.removePerformance(performanceId);
+  assert.equal(f.controller.state.project.performances[0].removed, true); assert.equal(f.storage.assets.has('raw-1'), true);
+  await f.controller.handle({ type: 'undo' }); assert.equal(f.controller.state.project.performances[0].removed, undefined);
+  await f.controller.saveNow(); await f.controller.openProject(projectId);
+  assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: performanceId });
+  assert.equal(f.controller.state.project.takes.length, 0); assert.equal(f.controller.state.recovered.length, 0);
 });

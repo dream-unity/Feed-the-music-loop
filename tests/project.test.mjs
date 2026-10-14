@@ -39,6 +39,33 @@ test('asset collection includes historical takes and performance snapshots', () 
   const p=createProject();p.tracks=[{assetId:'a'}];p.performances=[{leadAssetId:'b',masterAssetId:'c',initialState:{tracks:[{assetId:'old'}]}}];
   assert.deepEqual(referencedAssets(p).sort(),['a','b','c','old']);
 });
+test('loops-only performances round trip with only their stereo master and source loops', () => {
+  const p = createProject();
+  p.performances.push({ id: 'loops-song', name: 'Loops song', source: 'loops', masterAssetId: 'stereo-loops', frames: 48000, startFrame: 96000, endFrame: 144000, status: 'complete', initialState: { tracks: [{ assetId: 'original-loop' }] } });
+  const restored = validateProject(JSON.parse(JSON.stringify(p)));
+  assert.deepEqual(restored, p);
+  assert.equal(Object.hasOwn(restored.performances[0], 'leadAssetId'), false);
+  assert.deepEqual(referencedAssets(restored).sort(), ['original-loop', 'stereo-loops']);
+});
+test('only an explicit loops source may omit the vocal and cannot retain a phantom vocal reference', () => {
+  const p = createProject();
+  const perf = { id: 'performance', name: 'Performance', masterAssetId: 'master', frames: 48000, startFrame: 0, endFrame: 48000, status: 'complete' };
+  p.performances.push(perf);
+  assert.throws(() => validateProject(p), /performance vocal/);
+  perf.leadAssetId = 'lead';
+  assert.deepEqual(validateProject(p).performances[0], perf, 'legacy vocal metadata remains valid');
+  for (const source of ['microphone', 'vocal', null, 1]) {
+    perf.source = source;
+    assert.throws(() => validateProject(p), /Unknown performance source/);
+  }
+  perf.source = 'loops';
+  for (const lead of ['lead', null, '']) {
+    perf.leadAssetId = lead;
+    assert.throws(() => validateProject(p), /cannot reference a vocal/);
+  }
+  delete perf.leadAssetId;
+  assert.equal(validateProject(p).performances[0].source, 'loops');
+});
 test('section membership cannot be inherited from an object prototype', () => {
   const p=createProject();
   p.tracks.push(createTrack({id:'constructor',assetId:'safe-audio',frames:100}));
