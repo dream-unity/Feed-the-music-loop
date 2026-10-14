@@ -129,6 +129,51 @@ test('performance trash removes only the chosen card, supports Undo and persists
   expect(manifest.assets.some(asset => asset.id === performance.leadAssetId)).toBe(true);
 });
 
+test('recorder remains below The Groove when empty, cancelled, switched between views and reopened', async ({ page }, testInfo) => {
+  await boot(page);
+  const panel = page.locator('[data-ref="capture-panel"]');
+  const recent = page.locator('[data-ref="recent-recording"]');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAttribute('data-status', 'idle');
+  await expect(panel).toContainText('Your recorder is ready');
+  expect(await page.locator('.transport-panel').evaluate(element => element.nextElementSibling.dataset.ref)).toBe('capture-panel');
+  for (const view of ['song', 'mix', 'build']) {
+    await page.locator(`[data-action="view"][data-view="${view}"]`).click();
+    await expect(panel).toBeVisible();
+  }
+  await page.getByTestId('add-loop').click();
+  await captureState(page, 'recording');
+  await page.getByTestId('cancel').click();
+  await captureState(page, 'idle');
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Your recorder is ready');
+  await expect(recent).toBeHidden();
+
+  await firstLoop(page);
+  await page.getByTestId('sing').click();
+  await captureState(page, 'recording');
+  await page.waitForTimeout(500);
+  await page.getByTestId('finish').click();
+  await captureState(page, 'idle');
+  await expect(recent).toContainText('Performance 1');
+  await page.getByTestId('stop').click();
+  await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect(panel).toBeVisible();
+  await expect(recent).toBeVisible();
+  await expect(recent).toContainText('Performance 1');
+  expect(await panel.evaluate(element => element.nextElementSibling.dataset.ref)).toBe('recent-recording');
+  await recent.getByRole('button', { name: 'Listen to Performance 1', exact: true }).click();
+  await expect(page.locator('#performance-player')).toBeVisible();
+  await expect(page.locator('[data-view-panel="build"]')).toBeVisible();
+  await screenshot(page, testInfo, 'persistent-recorder-after-reopen');
+  await recent.getByRole('button', { name: 'Remove Performance 1', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Remove performance', exact: true }).click();
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText('Your recorder is ready');
+});
+ 
 test('live microphone history follows input and finished recordings stay beneath the capture bar in Build', async ({ page }, testInfo) => {
   await boot(page);
   await firstLoop(page);

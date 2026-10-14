@@ -80,7 +80,7 @@ test('packaged HTTPS app reopens offline with its saved audio and only caches th
   await reopened.getByTestId('stop').click();
   await reopened.locator('[data-action="view"][data-view="mix"]').click();
   const downloadEvent = reopened.waitForEvent('download');
-  await reopened.locator('[data-action="export-track"]:visible').click();
+  await reopened.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
   const exported = await downloadEvent;
   expect(await exported.failure()).toBeNull();
   const bytes = await readFile(await exported.path());

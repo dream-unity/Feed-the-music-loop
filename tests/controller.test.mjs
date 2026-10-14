@@ -509,6 +509,38 @@ test('opening another project clears the recent recording instead of pointing to
   assert.equal(f.controller.state.capture, null);
 });
 
+for (const kind of ['loop', 'vocal']) {
+  test(`opening a saved ${kind} project restores immediate playback below the recorder`, async () => {
+    const f = fixture(); finishedCapture(f, { kind }); await f.controller.tryFinalize();
+    const expected = { kind: f.controller.state.recentRecording.kind, id: f.controller.state.recentRecording.id };
+    const projectId = f.controller.state.project.id;
+    await f.controller.openProject(projectId);
+    assert.deepEqual(f.controller.state.recentRecording, expected);
+    assert.equal(f.controller.state.capture, null);
+    assert.equal(f.controller.state.view, 'build');
+  });
+}
+
+test('removed performances do not reappear as the latest recording after reopening', async () => {
+  const f = fixture(); finishedCapture(f); await f.controller.tryFinalize();
+  f.controller.state.project.performances[0].removed = true;
+  await f.controller.saveNow();
+  await f.controller.openProject(f.controller.state.project.id);
+  assert.equal(f.controller.state.recentRecording, null);
+  assert.equal(f.controller.state.project.takes.length, 1);
+});
+
+test('reopening selects the newest saved audio rather than the previously selected mix channel', async () => {
+  const f = fixture(); finishedCapture(f); await f.controller.tryFinalize();
+  const project = f.controller.state.project;
+  project.performances[0].createdAt = '2026-10-13T00:00:00.000Z';
+  const track = createTrack({ assetId: 'raw-1', name: 'Newer loop', frames: 100, createdAt: '2026-10-14T00:00:00.000Z' });
+  project.tracks.push(track); project.baseFrames = 100;
+  await f.controller.saveNow();
+  await f.controller.openProject(project.id);
+  assert.deepEqual(f.controller.state.recentRecording, { kind: 'loop', id: track.id });
+});
+
 test('real meter events forward their microphone peak, RMS and capture identity to the live input display', () => {
   const f = fixture(), forwarded = [];
   f.ui.updateLiveInput = data => forwarded.push(data);

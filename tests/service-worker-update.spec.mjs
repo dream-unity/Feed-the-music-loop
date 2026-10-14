@@ -83,6 +83,14 @@ async function originalRecording(page) {
   return digest(bytes);
 }
 
+const updateMessage = 'Studio update ready. Finish recording, then close every studio tab or app window and reopen. Your saved audio stays on this device.';
+async function expectUpdateNotice(page) {
+  const notice = page.locator('[data-ref="update-notice"]');
+  await expect(notice).toBeVisible();
+  await expect(notice).toHaveAttribute('role', 'status');
+  await expect(notice).toHaveText(updateMessage);
+}
+
 test('failed or mismatched shell updates preserve offline audio and a valid fresh update waits until the studio closes', async ({ page, context, request }, testInfo) => {
   test.setTimeout(180_000);
   // Runtime fixture writes affect only the compiled CI package. The HTTPS
@@ -217,15 +225,23 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     expect(await oldWorker.evaluate(async url => (await fetch(url, { cache: 'force-cache' })).text(), styleURL)).toBe(originalStyle);
     await writeFile(probePath, probeSource, { flag: 'wx' });
     probeCreated = true;
+    // Observe installation before exposing the new worker: app registration can
+    // discover it while the microphone is reconnecting, before beginUpdate runs.
+    const workerEvent = context.waitForEvent('serviceworker', { predicate: worker => worker.url() === WORKER_URL, timeout: 20_000 });
     await writeFile(workerPath, version(originalWorker, goodRevision, {
       addedAssets: ['./ci-update-probe.mjs'],
       integrityOverrides: { './ci-update-probe.mjs': integrity(probeSource), './style.css': integrity(updatedStyle) },
     }));
     await playSavedLoop(page);
-    const workerEvent = context.waitForEvent('serviceworker', { predicate: worker => worker.url() === WORKER_URL });
+    await page.getByTestId('sing').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
+    const recordingTimeBeforeUpdate = await page.locator('[data-ref="capture-time"]').textContent();
     await beginUpdate(page);
     const newWorker = await workerEvent;
     await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.ready).waiting?.state)).toBe('installed');
+    await expectUpdateNotice(page);
+    await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
+    await expect.poll(() => page.locator('[data-ref="capture-time"]').textContent()).not.toBe(recordingTimeBeforeUpdate);
     expect(await controllerUnchanged(page)).toBe(true);
     expect(await page.evaluate(key => caches.has(key), oldCache)).toBe(true);
     expect(await page.evaluate(key => caches.has(key), goodCache)).toBe(true);
@@ -236,14 +252,34 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     await expect.poll(() => page.locator('[data-ref="transport-time"]').textContent()).not.toBe(timeBefore);
     observations.waitingUpdate = await page.evaluate(() => ({ states: window.__fmlUpdateStates, controllerState: navigator.serviceWorker.controller?.state }));
 
-    // Observing the real Worker after the last controlled tab closes avoids
-    // opening another old-version client during the activation transition.
+    await page.getByTestId('finish').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'idle');
+    await expect(page.locator('[data-ref="save-state"]')).toHaveText('Saved on this device');
+    await expectUpdateNotice(page);
+    await page.getByTestId('stop').click();
+
+    // An already installed update must also be explained to a newly opened tab.
+    const secondTab = await context.newPage();
+    await secondTab.goto(APP);
+    await expect(secondTab.locator('.loop-card[data-track-id]')).toHaveCount(1);
+    await expectUpdateNotice(secondTab);
+    expect(await secondTab.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--fml-ci-package').trim())).toBe('');
+    await secondTab.reload();
+    await expect(secondTab.locator('.loop-card[data-track-id]')).toHaveCount(1);
+    await expectUpdateNotice(secondTab);
+    expect(await secondTab.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--fml-ci-package').trim())).toBe('');
+
     await page.close();
+    await expect.poll(() => secondTab.evaluate(async () => (await navigator.serviceWorker.ready).waiting?.state)).toBe('installed');
+    expect(await secondTab.evaluate(key => caches.has(key), oldCache)).toBe(true);
+    // Only closing the final controlled tab permits the new package to activate.
+    await secondTab.close();
     await expect.poll(() => newWorker.evaluate(() => self.registration.waiting === null && self.registration.active?.state === 'activated')).toBe(true);
     currentPage = await context.newPage();
     await currentPage.goto(APP);
     await expect(currentPage.getByTestId('add-loop')).toBeEnabled();
     await expect.poll(() => currentPage.evaluate(() => navigator.serviceWorker.controller?.state)).toBe('activated');
+    await expect(currentPage.locator('[data-ref="update-notice"]')).toBeHidden();
     await expect.poll(() => currentPage.evaluate(async namespace => (await caches.keys()).filter(key => key.startsWith(namespace)), prefix)).toEqual([goodCache]);
     expect(await currentPage.evaluate(key => caches.has(key), badCache)).toBe(false);
     expect(await currentPage.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--fml-ci-package').trim())).toBe(JSON.stringify(goodRevision));
@@ -273,7 +309,7 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     await writeFile(workerPath, originalWorker);
     await writeFile(stylePath, originalStyle);
     if (probeCreated) await rm(probePath, { force: true });
-    await context.setOffline(false);
+    await context.setOffline(false).catch(() => {});
     await testInfo.attach('service-worker-update-evidence', {
       body: JSON.stringify({ originalRevision, badRevision, mismatchRevision, goodRevision, observations, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',

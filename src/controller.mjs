@@ -4,6 +4,19 @@ import { exportWav, exportWavParts, exportProject, importProject } from './expor
 import { inspectProjectAudio } from './audio-integrity.mjs';
 
 const now = () => new Date().toISOString();
+// Reconstruct the latest saved recording from durable project records, including
+// projects created before the recorder panel existed. No audio is copied.
+function latestProjectRecording(project) {
+  let latest = null;
+  for (const [kind, recordings] of [['loop', project.tracks], ['performance', project.performances]]) {
+    for (const recording of recordings || []) {
+      if (recording.removed || !(recording.frames > 0)) continue;
+      const createdAt = Date.parse(recording.createdAt) || 0;
+      if (!latest || createdAt >= latest.createdAt) latest = { kind, id: recording.id, createdAt };
+    }
+  }
+  return latest ? { kind: latest.kind, id: latest.id } : null;
+}
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const isAbort = error => error?.name === 'AbortError';
 const jsonSafe = value => JSON.parse(JSON.stringify(value));
@@ -76,7 +89,7 @@ export class StudioController {
     const assets = await this.storage.listAssets(next.id); const used = new Set(referencedAssets({ ...next, pendingCapture: null }));
     this.state.readonly = readonly; this.state.readonlyReason = readonlyReason; this.state.recoveryRequired = recoveryRequired; this.state.deletionPending = deletionPending;
     this.state.project = next; this.state.sampleRate = next.sampleRate; this.state.selectedTrackId = next.tracks[0]?.id || null;
-    this.state.capture = null; this.state.recentRecording = null; this.state.audition = null; this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; next.input.monitor = false;
+    this.state.capture = null; this.state.recentRecording = latestProjectRecording(next); this.state.audition = null; this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; next.input.monitor = false;
     this.state.transportFrame = 0; this.state.activeSectionId = null; this.state.queuedSectionId = null; this.history.clear();
     this.state.recovered = assets.filter(a => a.frames > 0 && a.status !== 'cancelled' && !used.has(a.id)).map(a => ({ ...a, needsRecovery: a.status === 'recording' }));
     this.state.discarded = assets.filter(isDiscardedCapture);

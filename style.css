@@ -1027,3 +1027,9 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .performance-actions { flex-basis: 100%; justify-content: flex-end; }
   .performance-actions > .button { min-height: 48px; min-width: 48px; }
 }
+
+/* The recorder remains a stable landmark in every studio view. */
+.capture-panel[data-status="idle"] { border-color: var(--line); background: var(--panel); }
+.capture-panel[data-status="idle"] .capture-copy strong { color: var(--mint); }
+.update-notice { margin: 0 0 20px; padding: 16px 20px; border: 1px solid #637e6e; border-radius: 14px; background: #253b30; color: var(--mint); font-size: 13px; line-height: 1.6; }
+.studio-version { display: block; margin-top: 6px; font-size: 10px; color: var(--muted); font-style: normal; }
