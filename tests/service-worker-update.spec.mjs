@@ -225,6 +225,9 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     expect(await oldWorker.evaluate(async url => (await fetch(url, { cache: 'force-cache' })).text(), styleURL)).toBe(originalStyle);
     await writeFile(probePath, probeSource, { flag: 'wx' });
     probeCreated = true;
+    // Observe installation before exposing the new worker: app registration can
+    // discover it while the microphone is reconnecting, before beginUpdate runs.
+    const workerEvent = context.waitForEvent('serviceworker', { predicate: worker => worker.url() === WORKER_URL, timeout: 20_000 });
     await writeFile(workerPath, version(originalWorker, goodRevision, {
       addedAssets: ['./ci-update-probe.mjs'],
       integrityOverrides: { './ci-update-probe.mjs': integrity(probeSource), './style.css': integrity(updatedStyle) },
@@ -233,7 +236,6 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     await page.getByTestId('sing').click();
     await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
     const recordingTimeBeforeUpdate = await page.locator('[data-ref="capture-time"]').textContent();
-    const workerEvent = context.waitForEvent('serviceworker', { predicate: worker => worker.url() === WORKER_URL });
     await beginUpdate(page);
     const newWorker = await workerEvent;
     await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.ready).waiting?.state)).toBe('installed');
@@ -307,7 +309,7 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     await writeFile(workerPath, originalWorker);
     await writeFile(stylePath, originalStyle);
     if (probeCreated) await rm(probePath, { force: true });
-    await context.setOffline(false);
+    await context.setOffline(false).catch(() => {});
     await testInfo.attach('service-worker-update-evidence', {
       body: JSON.stringify({ originalRevision, badRevision, mismatchRevision, goodRevision, observations, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',
