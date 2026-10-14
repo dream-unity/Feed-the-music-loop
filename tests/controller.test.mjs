@@ -15,7 +15,7 @@ class FakeStorage extends EventTarget {
   async beginAsset(asset) { this.beginCalls.push(clone(asset)); if (this.beginHook) await this.beginHook(asset); this.assets.set(asset.id, { ...clone(asset), frames: 0, checkpointFrames: 0, status: 'recording' }); }
   async finishAsset(id, options = {}) { this.finishCalls.push({ id, ...options }); if (this.finishHook) await this.finishHook(id, options); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); Object.assign(asset, { ...options, status: options.status || 'complete', frames: asset.frames }); return clone(asset); }
   async putPage(id, index, buffer, frames) { const asset=this.assets.get(id); asset.frames+=frames; asset.checkpointFrames=asset.frames; }
-  async deleteAsset(id) { this.assets.delete(id); }
+  async deleteAsset(id) { if (this.deleteHook) await this.deleteHook(id); this.assets.delete(id); }
   async getAsset(id) { if (this.readHook) await this.readHook(id); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); return clone(asset); }
   async recover() { if (this.recoverError) throw this.recoverError; return []; }
   async releaseProject(id) { this.released.push(id); }
@@ -81,6 +81,127 @@ test('a failed audio processor is retired so the next user gesture can open a fr
   assert.ok(f.engine.commands.some(command=>command.type==='close'));
   assert.match(f.controller.state.error,/fresh audio session/);
   assert.equal(f.controller.state.storageFailed,undefined);
+});
+
+test('suspended playback exposes Play again, ignores stale meters, and resumes only on a user gesture', async () => {
+  const f = fixture();
+  f.engine.context = { state: 'suspended' }; f.controller.state.playing = true;
+  f.controller.state.monitor = true; f.controller.state.project.input.monitor = true;
+  f.controller.state.transportFrame = 731;
+  f.controller.audioEvent('context-state', { state: 'suspended' });
+  assert.equal(f.controller.engine, f.engine); assert.equal(f.controller.state.playing, false);
+  assert.equal(f.controller.state.monitor, false); assert.equal(f.controller.state.project.input.monitor, false);
+  assert.match(f.controller.state.status, /press Play or Record to resume/);
+  assert.ok(f.engine.commands.some(command => command.type === 'stop'));
+  f.controller.audioEvent('meter', { playing: true, transportFrame: 859, inputLevel: .7, outputLevel: .5 });
+  assert.equal(f.controller.state.playing, false); assert.equal(f.controller.state.transportFrame, 731);
+  f.engine.context.state = 'running'; f.controller.audioEvent('context-state', { state: 'running' });
+  assert.equal(f.controller.state.playing, false); assert.equal(f.engine.commands.some(command => command.type === 'play'), false);
+  await f.controller.handle({ type: 'play' });
+  assert.equal(f.engine.commands.filter(command => command.type === 'play').length, 1);
+  assert.equal(f.ui.notifications.length, 0);
+});
+
+test('normal audio closure and project switching do not display interruption errors', () => {
+  for (const flag of ['closed', 'suppressedStateChange', 'openingProject']) {
+    const f = fixture(), status = f.controller.state.status, generation = f.controller.generation;
+    if (flag === 'openingProject') f.controller.openingProject = true; else f.engine[flag] = true;
+    f.controller.audioEvent('context-state', { state: 'closed' });
+    assert.equal(f.controller.state.status, status); assert.equal(f.controller.generation, generation);
+    assert.equal(f.controller.audioRecovery, undefined); assert.equal(f.ui.notifications.length, 0); assert.equal(f.engine.commands.length, 0);
+  }
+});
+
+test('an unexpectedly closed idle context is retired and offers a fresh audio session', async () => {
+  const f = fixture(); f.engine.context = { state: 'closed' };
+  f.controller.audioEvent('context-state', { state: 'closed' });
+  await f.controller.audioRecovery; await tick();
+  assert.equal(f.controller.engine, null); assert.equal(f.controller.state.playing, false);
+  assert.equal(f.engine.commands.filter(command => command.type === 'close').length, 1);
+  assert.match(f.controller.state.error, /fresh audio session/);
+});
+
+test('device suspension during microphone permission cannot arm a delayed recording', async () => {
+  const f = fixture(), permission = deferred(); f.engine.micHook = () => permission.promise;
+  const starting = f.controller.startCapture('loop'); await tick();
+  assert.equal(f.controller.pending, null); assert.equal(f.controller.state.capture.status, 'arming');
+  f.engine.context = { state: 'interrupted' };
+  f.controller.audioEvent('context-state', { state: 'interrupted' });
+  await f.controller.audioRecovery; permission.resolve(); await starting;
+  assert.equal(f.engine.commands.some(command => command.type === 'arm'), false); assert.equal(f.storage.beginCalls.length, 0);
+  assert.equal(f.controller.state.capture, null); assert.equal(f.controller.state.busy, false); assert.equal(f.controller.engine, null);
+});
+
+test('suspension during asset preparation lets its owner cancel without sealing an asset before creation', async () => {
+  const f = fixture(), creation = deferred(); let count = 0;
+  f.storage.beginHook = () => ++count === 1 ? creation.promise : undefined;
+  const starting = f.controller.startCapture('vocal'); await tick();
+  assert.ok(f.controller.pending); assert.equal(f.storage.assets.size, 0);
+  f.engine.context = { state: 'suspended' }; f.controller.audioEvent('context-state', { state: 'suspended' });
+  const recovery = f.controller.audioRecovery;
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.equal(f.storage.finishCalls.length, 0); assert.ok(f.controller.pending);
+  creation.resolve(); await starting; await recovery;
+  assert.equal(f.engine.commands.some(command => command.type === 'arm'), false);
+  assert.equal(f.storage.assets.size, 2); assert.ok([...f.storage.assets.values()].every(asset => asset.status === 'cancelled'));
+  assert.equal(f.controller.pending, null); assert.equal(f.controller.state.project.pendingCapture, undefined);
+  assert.equal(f.controller.state.capture, null); assert.equal(f.controller.engine, null);
+});
+
+test('overlapping context and microphone interruption notifications seal each captured stream once', async () => {
+  const f = fixture(); finishedCapture(f, { rawStatus: 'recording', masterStatus: 'recording', masterFrames: 91 });
+  f.controller.pending.started = true; f.controller.pending.ended = false; delete f.controller.pending.end; f.controller.sealed.clear();
+  f.engine.context = { state: 'suspended' }; f.controller.state.playing = true;
+  f.controller.audioEvent('context-state', { state: 'suspended' });
+  f.controller.audioEvent('interrupted', { message: 'Microphone muted simultaneously' });
+  f.controller.audioEvent('device-lost', { message: 'Microphone disconnected simultaneously' });
+  await f.controller.audioRecovery; await tick();
+  assert.deepEqual(f.storage.finishCalls.map(call => call.id).sort(), ['master-1', 'raw-1']);
+  assert.equal(f.engine.commands.filter(command => command.type === 'interrupt').length, 1);
+  assert.equal(f.engine.commands.filter(command => command.type === 'close').length, 1);
+  assert.equal(f.controller.state.project.takes.length, 1); assert.equal(f.controller.state.project.performances.length, 1);
+  assert.equal(f.controller.state.project.takes[0].frames, 100); assert.equal(f.controller.state.project.performances[0].frames, 91);
+  assert.equal(f.controller.state.project.performances[0].status, 'interrupted');
+  assert.equal(f.controller.pending, null); assert.equal(f.controller.state.playing, false); assert.equal(f.controller.engine, null);
+  assert.equal(f.ui.notifications.filter(item => item.kind === 'error').length, 1);
+});
+
+test('a genuine capture end received during fallback sealing keeps its actual timing metadata', async () => {
+  const f = fixture(); finishedCapture(f, { rawStatus: 'recording', masterStatus: 'recording' });
+  const pending = f.controller.pending; pending.started = true; pending.ended = false; delete pending.end; f.controller.sealed.clear();
+  const reached = deferred(), released = deferred();
+  f.storage.finishHook = async id => { if (id === 'raw-1') { reached.resolve(); await released.promise; } };
+  const interruption = f.controller.interrupt('Temporary interruption'); await reached.promise;
+  const end = { captureId: pending.id, kind: 'vocal', status: 'complete', frames: 100, startFrame: 1000, endFrame: 1100, compensationFrames: 73 };
+  f.controller.audioEvent('capture-end', end); released.resolve(); await interruption;
+  assert.equal(pending.end, end); assert.equal(f.controller.state.project.performances[0].compensationFrames, 73);
+  assert.equal(f.controller.state.project.performances.length, 1);
+});
+
+test('a slow failed-engine close cannot overwrite a newly opened engine or another project', async () => {
+  for (const replacement of ['engine', 'project']) {
+    const f = fixture(), closing = deferred(); f.engine.close = async () => closing.promise;
+    const recovery = f.controller.recoverAudioEngine('Old processor failed'); await tick();
+    assert.equal(f.controller.engine, null); assert.equal(f.controller.state.playing, false);
+    if (replacement === 'engine') f.controller.engine = new FakeEngine(); else f.controller.state.project = createProject('New song');
+    f.controller.state.status = 'New session ready'; f.controller.state.playing = true;
+    closing.resolve(); await recovery;
+    assert.equal(f.controller.state.status, 'New session ready'); assert.equal(f.controller.state.playing, true);
+    assert.equal(f.ui.notifications.length, 0);
+  }
+});
+
+test('a fatal storage failure during audio interruption retains the storage recovery message and checkpoints', async () => {
+  const f = fixture(); finishedCapture(f, { rawStatus: 'recording', masterStatus: 'recording' });
+  f.controller.pending.started = true; f.controller.pending.ended = false; delete f.controller.pending.end; f.controller.sealed.clear();
+  f.engine.context = { state: 'suspended' };
+  f.controller.audioEvent('context-state', { state: 'suspended' });
+  const recovery = f.controller.audioRecovery;
+  await f.controller.storageFailed('Storage connection lost'); const banner = f.controller.state.error;
+  await recovery;
+  assert.equal(f.controller.state.error, banner); assert.match(banner, /Reopen the studio/);
+  assert.equal(f.storage.finishCalls.length, 0); assert.equal(f.storage.assets.get('raw-1').frames, 100);
+  assert.ok(f.controller.state.project.pendingCapture); assert.equal(f.controller.state.storageFailed, true);
 });
 test('canceling permanent project deletion leaves recordings and playback untouched', async () => {
   const f=fixture();f.storage.projects.set(f.controller.state.project.id,clone(f.controller.state.project));
@@ -466,4 +587,82 @@ test('recovery checks the layer limit before reading waveforms and immediately b
   f.controller.state.project.tracks.pop(); const gate = deferred(); f.controller.summarize = async () => { await gate.promise; return []; };
   const recovering = f.controller.recoverAsset('recover-1'); await tick(); f.controller.state.project.tracks.push(createTrack({ assetId: 'new-last', frames: 10 })); gate.resolve();
   await assert.rejects(recovering, /layer limit/); assert.equal(f.controller.state.project.tracks.length, MAX_TRACKS); assert.equal(f.storage.assets.get('recover-1').frames, 100);
+});
+
+function savedMix(f, overrides = {}) {
+  const asset = recoverable(f, { id: 'saved-mix', kind: 'mix', channels: 2, name: 'Evening song · edited mix', frames: 2000, status: 'complete', ...overrides });
+  f.ui.confirm = async () => true;
+  f.controller.removedDownloadAssets = [];
+  f.controller.removeDownloadAsset = id => f.controller.removedDownloadAssets.push(id);
+  return asset;
+}
+
+test('saved mix deletion confirms its exact name and PCM bytes, keeping every source recording', async () => {
+  const f = fixture(), mix = savedMix(f); recoverable(f, { id: 'loop-source' }); recoverable(f, { id: 'vocal-source', kind: 'vocal' });
+  let confirmation; f.ui.confirm = async options => { confirmation = options; return true; };
+  let estimated = false; f.storage.estimate = async () => { estimated = true; return { usage: 1234, quota: 9999 }; };
+  await f.controller.handle({ type: 'delete-saved-mix', id: mix.id });
+  assert.equal(confirmation.title, `Delete ${mix.name}?`); assert.match(confirmation.message, /16,000 bytes/); assert.match(confirmation.message, /backup/); assert.equal(confirmation.danger, true);
+  assert.deepEqual([...f.storage.assets.keys()], ['loop-source', 'vocal-source']);
+  assert.deepEqual(f.controller.state.recovered.map(asset => asset.id), ['loop-source', 'vocal-source']);
+  assert.deepEqual(f.controller.removedDownloadAssets, [mix.id]); assert.equal(estimated, true); assert.equal(f.controller.state.storage.usage, 1234);
+  assert.equal(f.controller.state.busy, false); assert.equal(f.controller.savedMixDeletion, null);
+});
+
+test('canceling saved mix deletion keeps its audio, recovery card and download links', async () => {
+  const f = fixture(), mix = savedMix(f); f.ui.confirm = async () => false;
+  await f.controller.deleteSavedMix(mix.id);
+  assert.ok(f.storage.assets.has(mix.id)); assert.ok(f.controller.state.recovered.some(asset => asset.id === mix.id)); assert.deepEqual(f.controller.removedDownloadAssets, []);
+  assert.equal(f.controller.state.busy, false); assert.equal(f.engine.commands.length, 0);
+});
+
+for (const source of ['project', 'pending', 'undo', 'redo']) {
+  test(`saved mix deletion rejects a ${source} reference before confirmation`, async () => {
+    const f = fixture(), mix = savedMix(f); const reference = { assetId: mix.id };
+    if (source === 'project') f.controller.state.project.tracks.push(createTrack({ assetId: mix.id, frames: mix.frames }));
+    if (source === 'pending') f.controller.state.project.pendingCapture = reference;
+    if (source === 'undo') f.controller.history.past.push({ tracks: [reference] });
+    if (source === 'redo') f.controller.history.future.push({ performances: [{ masterAssetId: mix.id }] });
+    f.ui.confirm = () => { throw new Error('must not offer destructive confirmation'); };
+    await assert.rejects(f.controller.deleteSavedMix(mix.id), /still used/);
+    assert.ok(f.storage.assets.has(mix.id)); assert.equal(f.controller.savedMixDeletion, null);
+  });
+}
+
+for (const badAsset of [{ projectId: 'another-project' }, { kind: 'loop' }, { kind: 'vocal' }, { kind: 'master' }, { status: 'recording' }]) {
+  test(`saved mix deletion rejects protected audio ${JSON.stringify(badAsset)}`, async () => {
+    const f = fixture(), mix = savedMix(f, badAsset); f.ui.confirm = () => { throw new Error('must not confirm'); };
+    await assert.rejects(f.controller.deleteSavedMix(mix.id), /Only generated|still being written/);
+    assert.ok(f.storage.assets.has(mix.id)); assert.equal(f.controller.state.recovered.length, 1);
+  });
+}
+
+test('saved mix confirmation is invalidated by project change or Stop', async () => {
+  for (const change of ['stop', 'project']) {
+    const f = fixture(), mix = savedMix(f), gate = deferred(); f.ui.confirm = () => gate.promise;
+    const deleting = f.controller.deleteSavedMix(mix.id); await tick();
+    await assert.rejects(f.controller.deleteSavedMix(mix.id), /current operation/);
+    if (change === 'stop') await f.controller.handle({ type: 'stop' });
+    else { const next = createProject('New selection'); f.storage.projects.set(next.id, next); await f.controller.openProject(next.id); }
+    gate.resolve(true); await deleting;
+    assert.ok(f.storage.assets.has(mix.id)); assert.deepEqual(f.controller.removedDownloadAssets, []); assert.equal(f.controller.savedMixDeletion, null);
+  }
+});
+
+test('saved mix deletion rechecks references and ongoing export after confirmation', async () => {
+  for (const change of ['reference', 'export']) {
+    const f = fixture(), mix = savedMix(f), gate = deferred(); f.ui.confirm = () => gate.promise;
+    const deleting = f.controller.deleteSavedMix(mix.id); await tick();
+    if (change === 'reference') f.controller.history.past.push({ assetId: mix.id }); else f.controller.state.exporting = true;
+    gate.resolve(true); await assert.rejects(deleting, /still used|current operation/);
+    assert.ok(f.storage.assets.has(mix.id)); assert.deepEqual(f.controller.removedDownloadAssets, []);
+  }
+});
+
+test('a disk failure while deleting a saved mix keeps its card and download links for retry', async () => {
+  const f = fixture(), mix = savedMix(f); f.storage.deleteHook = () => { throw new Error('Disk deletion failed'); };
+  await assert.rejects(f.controller.deleteSavedMix(mix.id), /Disk deletion failed/);
+  assert.ok(f.storage.assets.has(mix.id)); assert.ok(f.controller.state.recovered.some(asset => asset.id === mix.id)); assert.deepEqual(f.controller.removedDownloadAssets, []);
+  assert.equal(f.controller.state.busy, false); assert.equal(f.controller.savedMixDeletion, null);
+  f.storage.deleteHook = null; await f.controller.deleteSavedMix(mix.id); assert.equal(f.storage.assets.has(mix.id), false);
 });

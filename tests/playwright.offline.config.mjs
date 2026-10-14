@@ -7,7 +7,7 @@ const repository = fileURLToPath(new URL('..', import.meta.url));
 
 export default defineConfig({
   ...base,
-  testMatch: 'offline.spec.mjs',
+  testMatch: ['offline.spec.mjs', 'service-worker-update.spec.mjs'],
   reporter: [['list'], ['html', { outputFolder: resolve(repository, 'offline-report'), open: 'never' }]],
   outputDir: resolve(repository, 'test-results/offline'),
   use: {
@@ -28,6 +28,6 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
     reuseExistingServer: false,
     timeout: 15_000,
-    env: { ...process.env, PORT: '4174', FML_TEST_HTTPS: '1', FML_TEST_ROOT: '_site' },
+    env: { ...process.env, PORT: '4174', FML_TEST_HTTPS: '1', FML_TEST_ROOT: '_site', FML_TEST_CACHE_ASSETS: '1' },
   },
 });

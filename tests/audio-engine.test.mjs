@@ -223,3 +223,62 @@ test('existing loops use cycle alignment without adding an extra count-in',()=>{
 test('monitor click never enters captured raw audio or stereo master, including compensation history',()=>{
   const h=harness();h.engine.command({type:'configure',compensationFrames:160,metronome:{enabled:true,bpm:240,volume:.5}});h.arm({kind:'vocal',masterAssetId:'master'});const output=h.run(9000,()=>0);h.engine.command({type:'finish'});h.run(161,()=>0);assert(output.l.some(x=>Math.abs(x)>.1));assert(h.samples('raw').every(x=>x===0));assert(h.samples('master').every(x=>x===0));
 });
+
+for(const boundary of [2**31,2**32]){
+  test(`continuous compensated capture crosses frame ${boundary} with identical backing phase and master audio`,()=>{
+    const high=harness(),reference=harness(),compensation=160,warmup=compensation+37;
+    for(const h of [high,reference]){h.arm({lengthFrames:1003});h.run(1004,i=>Math.sin(i*.031)*.15);h.engine.command({type:'configure',compensationFrames:compensation});h.engine.resetDSP();}
+    const origin=boundary-173;
+    high.engine.frame=origin-warmup;high.engine.clock=origin-warmup;
+    reference.engine.frame=((origin-warmup)%1003+1003)%1003;reference.engine.clock=1000;
+    for(const h of [high,reference]){h.run(warmup);h.arm({id:'lead',assetId:'lead',masterAssetId:'master',kind:'vocal'});h.run(703,i=>Math.sin(i*.049)*.2,61);h.engine.command({type:'finish'});h.run(compensation+1,i=>Math.cos(i*.029)*.1,37);}
+    assert.deepEqual(high.samples('lead'),reference.samples('lead'));assert.deepEqual(high.samples('master'),reference.samples('master'));
+    const start=high.events.find(event=>event.type==='capture-start'&&event.captureId==='lead'),end=high.events.find(event=>event.type==='capture-end'&&event.captureId==='lead');
+    assert.equal(start.startFrame,origin);assert.equal(start.clockFrame,origin);assert.equal(end.frames,703);assert.equal(end.endFrame,origin+703);assert.equal(end.clockFrame,origin+703+compensation);
+    assert.equal(high.engine.frame,origin+703+compensation+1);assert.equal(high.engine.clock,high.engine.frame);assert(!high.events.some(event=>event.type==='underrun'));
+  });
+
+  test(`quantized sections and multi-cycle loop offsets retain exact frames around ${boundary}`,()=>{
+    const h=harness(),cycle=4003,compensation=211,target=Math.floor(boundary/cycle)*cycle;
+    h.arm({lengthFrames:cycle});h.run(cycle+1,i=>Math.sin(i*.013)*.1);
+    h.engine.frame=target-128;h.engine.clock=boundary-128;h.engine.resetDSP();h.engine.command({type:'configure',compensationFrames:compensation});
+    h.engine.command({type:'section',section:{id:'new-section',tracks:{track:{muted:true,mix:{volume:.3}}}}});
+    h.arm({id:'long-cycle',assetId:'long-cycle',kind:'loop',quantized:true,lengthFrames:cycle*2,track:{id:'long-cycle',mix:{volume:.6}}});
+    h.run(128+cycle*2+compensation+1,(_,clock)=>(clock-(boundary-128))/100000,237);
+    const section=h.events.find(event=>event.type==='section'&&event.id==='new-section'),start=h.events.find(event=>event.type==='capture-start'&&event.captureId==='long-cycle'),end=h.events.find(event=>event.type==='capture-end'&&event.captureId==='long-cycle');
+    assert.equal(section.projectFrame,target);assert.equal(section.clockFrame,boundary);assert.equal(start.startFrame,target);assert.equal(start.initialState.tracks[0].muted,true);assert.equal(start.initialState.tracks[0].mix.volume,.3);
+    assert.equal(end.frames,cycle*2);assert.equal(end.endFrame,target+cycle*2);assert.equal(end.clockFrame,boundary+cycle*2+compensation);assert.equal(end.track.offsetFrames,target%(cycle*2));assert.equal(h.samples('long-cycle').length,cycle*2);
+    assert(Math.abs(h.samples('long-cycle')[0]-(128+compensation)/100000)<1e-8);assert(!h.events.some(event=>event.type==='underrun'));
+  });
+}
+
+test('count-in crosses an unsigned 32-bit audio clock while preserving beat numbers and zero musical origin',()=>{
+  const h=harness(),origin=2**32-4000;
+  h.engine.clock=origin;h.engine.frame=2**32-123;h.engine.command({type:'configure',compensationFrames:200,metronome:{bpm:240,countInBeats:4}});h.arm();
+  h.run(8000);assert.equal(h.engine.frame,0);assert.deepEqual(h.events.filter(event=>event.type==='count-in').map(event=>[event.beat,event.clockFrame]),[1,2,3,4].map((beat,index)=>[beat,origin+index*2000]));
+  h.run(657,i=>i/10000);h.engine.command({type:'finish'});h.run(201,i=>(i+657)/10000);
+  const start=h.events.find(event=>event.type==='capture-start'),end=h.events.find(event=>event.type==='capture-end');assert.equal(start.startFrame,0);assert.equal(start.clockFrame,origin+8000);assert.equal(end.frames,657);assert.equal(end.endFrame,657);assert.equal(end.clockFrame,origin+8000+657+200);assert.equal(h.samples('raw').length,657);
+});
+
+test('page tags and writer totals preserve values beyond unsigned 32-bit frames and page indexes',()=>{
+  const pageFrames=256,cache=new PageCache(pageFrames),largePage=2**32+7;
+  cache.put(largePage,new Float32Array(pageFrames).fill(.25).buffer,pageFrames,1);
+  cache.put(7,new Float32Array(pageFrames).fill(.5).buffer,pageFrames,1);
+  assert.equal(cache.sample(largePage*pageFrames+17),.25);assert.equal(cache.sample(7*pageFrames+17),.5);
+  for(const frame of [2**31+17,2**32+17]){cache.write(frame,.75);assert.equal(cache.sample(frame),.75);assert(cache.has(Math.floor(frame/pageFrames)));}
+
+  // Seed already-written history rather than allocating hours of PCM. Only the
+  // final page and endpoint transition execute, using normal writer methods.
+  for(const prefix of [2**32-55,2**32*pageFrames-55]){
+  const events=[],writes=[],sealed=[],engine=new LoopEngine({sampleRate:8000,pageFrames,post:event=>events.push(event)});
+  engine.command({type:'storage-port',port:{postMessage(message){if(message.type==='write'){writes.push({assetId:message.assetId,index:message.index,frames:message.frames,channels:message.channels});engine.storageMessage({type:'recycle',buffer:structuredClone(message.buffer,{transfer:[message.buffer]})});}else if(message.type==='end')sealed.push(message);}}});
+  engine.command({type:'pool',buffers:Array.from({length:4},()=>new ArrayBuffer(pageFrames*8))});
+  engine.command({type:'arm',capture:{id:'long-vocal',assetId:'raw',masterAssetId:'master',kind:'vocal'}});
+  engine.process(new Float32Array(1),new Float32Array(1),new Float32Array(1));
+  const capture=engine.capture;engine.clock=prefix;engine.frame=prefix;
+  for(const writer of [capture.raw,capture.master]){writer.frames=prefix;writer.index=Math.floor(prefix/pageFrames);writer.offset=prefix%pageFrames;writer.buffer.fill(0);}
+  engine.process(new Float32Array(211).fill(.2),new Float32Array(211),new Float32Array(211));engine.command({type:'finish'});engine.process(new Float32Array(1),new Float32Array(1),new Float32Array(1));
+  assert.equal(engine.capture,null);assert.equal(events.find(event=>event.type==='capture-end').frames,prefix+211);assert.equal(events.find(event=>event.type==='capture-end').endFrame,prefix+211);
+  for(const id of ['raw','master']){assert.deepEqual(writes.filter(write=>write.assetId===id).map(write=>[write.index,write.frames]),[[Math.floor(prefix/pageFrames),256],[Math.floor(prefix/pageFrames)+1,156]]);assert.equal(sealed.find(item=>item.assetId===id).frames,prefix+211);}
+  }
+});

@@ -28,7 +28,7 @@ The built-in demo creates a few synthetic layers locally, so you can try the stu
 - Individual layer mute, solo, naming, color, timing adjustment and reversible role presets.
 - Per-layer and vocal processing, shared room/echo effects and a master safety soft ceiling.
 - Project undo/redo, saved sections, audio import, local projects and autosave.
-- Per-project storage usage and explicit permanent project deletion to free device space.
+- Per-project storage usage, deletion of saved edited mixes, and explicit permanent project deletion to free device space.
 - Chunked audio storage, crash recovery, incomplete-take recovery and protection against two tabs editing the same project.
 - Lossless 32-bit float WAV exports and portable checksummed `.fml` project archives.
 - Edited-song rendering in a worker, with progress and cancellation.
@@ -56,6 +56,8 @@ On supported browsers, audio pages are written into the Origin Private File Syst
 Browser storage is not a substitute for a backup. Clearing site data, removing a browser profile, private browsing, operating-system pressure or quota exhaustion can remove or interrupt local projects. Request persistent storage in the app and download `.fml` backups. Backup import validates the archive and audio checksums before publishing a new project; it does not overwrite the current project.
 
 **Manage storage** shows each project's audio footprint. Deleting a project requires confirmation, pauses playback, refuses another tab's active project lock and removes only that project's recordings. A partial deletion can be retried. Back up a song before permanently deleting it.
+
+Saved edited mixes can also be deleted individually after confirmation. The app refuses to remove audio still referenced by the project or undo history; the original loops, vocal takes and captured performances remain available.
 
 Recording duration is limited by device storage, CPU and browser behavior, rather than an arbitrary short timer. The live engine reads bounded page windows rather than loading an entire recording into an `AudioBuffer`. More simultaneous layers still require more memory and processing. The project format guards against excessive metadata and permits up to 512 loop tracks; that is a format ceiling, not a claim that every device can play 512 effects-heavy tracks.
 

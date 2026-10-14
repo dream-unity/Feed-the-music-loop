@@ -237,6 +237,67 @@ test('demo, mix controls, sections, portable backup and invalid-import preservat
   expect(restoredStem.bytes).toEqual(stem.bytes);
 });
 
+test('a saved edited mix can be deleted without its source loops or backup audio', async ({ page }, testInfo) => {
+  await boot(page);
+  await page.getByTestId('demo').click();
+  await expect(tracks(page)).toHaveCount(3);
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await page.getByTestId('stop').click();
+  await action(page, 'export-menu').click();
+  await page.locator('[data-export-duration]').fill('2');
+  const edited = await download(page, () => action(page, 'export-mix').click());
+  expect(inspectWav(edited.bytes).peak).toBeGreaterThan(0.005);
+  const remove = page.locator('[data-action="delete-saved-mix"]');
+  await expect(remove).toHaveCount(1);
+  await expect(remove).toBeEnabled();
+  const mixId = await remove.getAttribute('data-id');
+  const readyLink = page.locator('.ready-download');
+  await expect(readyLink).toHaveCount(1);
+  const mixURL = await readyLink.getAttribute('href');
+  await remove.click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('Your source loops and vocal recordings will be kept.');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(remove).toHaveCount(1);
+  await expect(readyLink).toHaveAttribute('href', mixURL);
+
+  await remove.click();
+  await dialog.getByRole('button', { name: 'Delete saved mix', exact: true }).click();
+  await expect(remove).toHaveCount(0);
+  await expect(page.locator('.recovery-card')).toHaveCount(0);
+  await expect(readyLink).toHaveCount(0);
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await view(page, 'build');
+  await expect(tracks(page)).toHaveCount(3);
+  await page.getByTestId('play').click();
+  await playing(page, true);
+  await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
+  await page.getByTestId('stop').click();
+  const backup = await download(page, () => action(page, 'export-project').click());
+  expect(backup.bytes.subarray(0, 8).toString()).toBe('FMLPACK\n');
+  const manifestLength = Number(backup.bytes.readBigUInt64LE(16));
+  const manifest = JSON.parse(backup.bytes.subarray(64, 64 + manifestLength).toString());
+  expect(manifest.project.tracks).toHaveLength(3);
+  expect(manifest.assets).toHaveLength(3);
+  expect(manifest.assets.map(asset => asset.id)).not.toContain(mixId);
+  for (const track of manifest.project.tracks) {
+    const source = manifest.assets.find(asset => asset.id === track.assetId);
+    expect(source).toBeDefined();
+    expect(source.frames).toBeGreaterThan(0);
+    expect(source.sha256).toMatch(/^[a-f0-9]{64}$/);
+  }
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect(tracks(page)).toHaveCount(3);
+  await expect(page.locator('[data-action="delete-saved-mix"]')).toHaveCount(0);
+  await expect(page.locator('.recovery-card')).toHaveCount(0);
+  await page.getByTestId('play').click();
+  await playing(page, true);
+  await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
+  await reviewScreenshot(page, testInfo, 'source-loops-after-saved-mix-deletion');
+});
+
 test('stop while microphone permission is pending cancels the late stream', async ({ page }) => {
   await page.addInitScript(() => {
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);

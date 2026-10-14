@@ -26,7 +26,10 @@ async function firstLoop(page) {
 
 async function screenshot(page, testInfo, name) {
   const path = testInfo.outputPath(`review-${name}.png`);
-  await page.screenshot({ path, fullPage: true, animations: 'disabled' });
+  // Native dialogs and their backdrops are viewport overlays. Capturing the
+  // entire scrolled document would stitch the fixed overlay into the page.
+  const fullPage = !await page.getByRole('dialog').isVisible();
+  await page.screenshot({ path, fullPage, animations: 'disabled' });
   await testInfo.attach(name, { path, contentType: 'image/png' });
 }
 

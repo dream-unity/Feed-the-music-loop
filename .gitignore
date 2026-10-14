@@ -1,6 +1,9 @@
 node_modules/
 test-results/
 playwright-report/
+cross-browser-report/
+offline-report/
+live-report/
 *.log
 .DS_Store
 coverage/

@@ -130,6 +130,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .recovery-card > div > span { display: block; margin-top: 5px; font-size: 9px; color: #b3ae90; }
 .recovery-card > .button { font-size: 10px; min-height: 40px; }
 .recovery-card > .button .icon { width: 15px; height: 15px; }
+.recovery-card > .delete-saved-mix { color: var(--coral); flex: 0 0 48px; min-height: 48px; }
 .transport-panel { display: flex; gap: 27px; align-items: center; padding: 21px 24px; border: 1px solid var(--line); background: linear-gradient(115deg, #202c29, #182225 76%); border-radius: var(--radius); }
 .transport-time { flex: 0 0 130px; }
 .transport-time .eyebrow { color: #95aba2; font-size: 8px; }
@@ -332,11 +333,12 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .advanced-settings .button { font-size: 9px; margin-top: 13px; }
 .advanced-settings .button .icon { width: 13px; height: 13px; }
 .microphone-picker { padding-bottom: 15px; margin-bottom: 15px; border-bottom: 1px solid var(--line-soft); }
-.microphone-device-label { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #b3c0b6; margin-bottom: 9px; }
-.microphone-device-label select { font-size: 12px; width: 100%; }
+.microphone-device-label { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 12px; color: #b3c0b6; margin-bottom: 9px; }
+.microphone-device-label select { font-size: 12px; width: 100%; min-width: 0; max-width: 100%; text-overflow: ellipsis; }
 .number-field { display: flex; flex-direction: column; gap: 7px; font-size: 10px; margin: 15px 0 10px; color: #b3c0b6; }
 .number-field > span { display: flex; align-items: center; gap: 8px; color: var(--dim); }
 .number-field input { width: 85px; font-size: 12px; }
+.number-field.metronome-tempo input { width: 112px; flex: 0 0 112px; min-width: 0; font-variant-numeric: tabular-nums; }
 .metronome-controls { border-top: 1px solid var(--line-soft); margin-top: 19px; padding-top: 18px; }
 .metronome-controls h3 { font-size: 13px; font-weight: 550; margin-bottom: 10px; }
 .metronome-controls .toggle-row > span:first-child { font-size: 12px; }
@@ -861,6 +863,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .status-banner { flex-wrap: wrap; gap: 8px; }
   .status-banner > [data-action="reload-studio"] { flex-basis: 100%; }
   .preview-loading { order: 3; flex-basis: 100%; max-width: none; }
+  .recovery-card > .delete-saved-mix { flex: 0 0 48px; }
   .loop-grid, .side-column, .mixer-grid { grid-template-columns: minmax(0,1fr); }
   .input-card { grid-row: auto; }
   .input-card, .master-card, .session-card { padding: 21px; }

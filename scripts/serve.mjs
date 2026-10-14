@@ -43,10 +43,14 @@ export async function handle(request, response) {
       return;
     }
     const body = await readFile(path);
+    // The HTTPS update regression deliberately keeps a real app asset fresh
+    // in the browser HTTP cache while its on-disk package changes. A service
+    // worker upgrade must fetch the new bytes, not inherit that stale entry.
+    const cacheableAsset = process.env.FML_TEST_CACHE_ASSETS === '1' && path === resolve(root, 'style.css');
     response.writeHead(200, {
       'Content-Type': types[extname(path)] || 'application/octet-stream',
       'Content-Length': body.length,
-      'Cache-Control': 'no-store',
+      'Cache-Control': cacheableAsset ? 'private, max-age=3600, immutable' : 'no-store',
       'X-Content-Type-Options': 'nosniff',
     });
     response.end(request.method === 'HEAD' ? undefined : body);

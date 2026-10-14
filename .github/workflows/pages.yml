@@ -25,27 +25,55 @@ jobs:
     timeout-minutes: 10
     outputs:
       sw_sha256: ${{ steps.package.outputs.sw_sha256 }}
+      deploy_allowed: ${{ steps.source-guard.outputs.deploy_allowed }}
     steps:
+      - name: Skip superseded automatic releases
+        id: source-guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FML_REPOSITORY: ${{ github.repository }}
+          FML_EVENT: ${{ github.event_name }}
+          FML_EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [ "$FML_EVENT" = workflow_dispatch ]; then
+            echo "deploy_allowed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          current_sha="$(gh api "repos/$FML_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current_sha" = "$FML_EXPECTED_SHA" ]; then
+            echo "deploy_allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_allowed=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping automatic release: its verified commit is no longer the main branch head."
+          fi
       - uses: actions/checkout@v6
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: actions/setup-node@v6
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
         with:
           node-version: '22'
       - run: npm run check
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
       - run: npm test
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
       - name: Package verified studio and fingerprint its service worker
         id: package
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
         run: |
           npm run build
           build_hash="$(sha256sum _site/sw.js)"
           echo "sw_sha256=${build_hash%% *}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-pages-artifact@v3
+        if: steps.source-guard.outputs.deploy_allowed == 'true'
         with:
           path: _site
   deploy:
     needs: package
+    if: needs.package.outputs.deploy_allowed == 'true'
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -53,13 +81,36 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      deploy_allowed: ${{ steps.publish-guard.outputs.deploy_allowed }}
     steps:
       - uses: actions/configure-pages@v5
+      - name: Recheck the branch immediately before publishing
+        id: publish-guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FML_REPOSITORY: ${{ github.repository }}
+          FML_EVENT: ${{ github.event_name }}
+          FML_EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [ "$FML_EVENT" = workflow_dispatch ]; then
+            echo "deploy_allowed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          current_sha="$(gh api "repos/$FML_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [ "$current_sha" = "$FML_EXPECTED_SHA" ]; then
+            echo "deploy_allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_allowed=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping automatic publication: main advanced after this studio was verified."
+          fi
       - name: Publish verified studio
         id: deployment
+        if: steps.publish-guard.outputs.deploy_allowed == 'true'
         uses: actions/deploy-pages@v4
   live-verification:
     needs: [package, deploy]
+    if: needs.deploy.outputs.deploy_allowed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

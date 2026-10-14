@@ -38,3 +38,11 @@ Measured in the development Linux container, Node v24.19.0, with the command abo
 | Frames per completed recording | 2,880,000 | 2,880,000 |
 
 The benchmark exposed a real correctness defect before these measurements: page-number modulo slots allowed a wrapped read-ahead page to replace the currently playing final page for some loop lengths. A bounded least-recently-used rolling cache now retains the active reader; the four opening pages remain pinned, and twelve rolling pages remain preallocated. A deterministic asynchronous regression covers 53-page and 65-page loops through three complete wraps. The post-fix audio and renderer suites passed all 56 tests. No speculative DSP optimization or flaky timing gate was added.
+
+## Long-session arithmetic
+
+Additional deterministic engine tests start the transport and audio clock near 2³¹ and 2³² frames instead of allocating or playing hours of PCM. At 48 kHz these boundaries occur after approximately 12.4 and 24.9 hours. Continuous captures cross both boundaries with raw vocal and stereo master samples identical to a short-session reference at the same loop phase. Quantized section launches, multi-cycle recording endpoints, compensation, event timestamps and new loop offsets retain their exact frame values. A count-in crosses the 2³² audio-clock boundary while still establishing musical frame zero.
+
+Separate seeded writer and page-cache tests verify capture totals beyond 2³² frames, writer page-index rollover across 2³², and distinct page tags beyond 2³² page indexes. Transport, clock, writer totals, page indexes and cache tags use JavaScript Numbers or Float64 storage, without bitwise 32-bit conversions. Uint32 cache lengths contain only a single page's frame count. All 49 engine tests pass after this addition.
+
+These tests establish arithmetic behavior, not a day-long browser endurance result. Recording still depends on available device storage, continuing microphone permission, and the browser keeping its audio context running. Playback buffers, history rings, pending-page maps and queued vocal-control changes have fixed bounds; a further accelerated run was not needed to resolve a remaining memory-growth risk identified by inspection.

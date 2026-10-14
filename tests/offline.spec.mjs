@@ -34,6 +34,21 @@ test('packaged HTTPS app reopens offline with its saved audio and only caches th
   expect(shellBefore.length).toBeGreaterThan(10);
   expect(shellBefore).toContain(`${APP}index.html`);
   expect(shellBefore).toContain(`${APP}src/audio/loop-worklet.mjs`);
+  const installedIcons = await page.evaluate(async () => {
+    const manifestURL = document.querySelector('link[rel="manifest"]').href;
+    const manifest = await (await fetch(manifestURL)).json();
+    return {
+      icons: manifest.icons.map(icon => ({ ...icon, url: new URL(icon.src, manifestURL).href })),
+      apple: document.querySelector('link[rel="apple-touch-icon"]').href,
+    };
+  });
+  for (const size of ['192x192', '512x512']) {
+    const icon = installedIcons.icons.find(icon => icon.type === 'image/png' && icon.sizes === size && icon.purpose === 'any');
+    expect(icon).toBeDefined();
+    expect(shellBefore).toContain(icon.url);
+  }
+  expect(shellBefore).toContain(installedIcons.apple);
+  expect(installedIcons.apple).toMatch(/\.png$/);
 
   // First activation intentionally does not claim an already running studio.
   // A fresh navigation takes control without replacing its current audio graph.
@@ -75,7 +90,7 @@ test('packaged HTTPS app reopens offline with its saved audio and only caches th
 
   const shellAfter = await cachedURLs(reopened);
   expect(shellAfter).toEqual(shellBefore);
-  expect(shellAfter.every(url => /(?:\.(?:html|css|svg|mjs|webmanifest)|\/\.nojekyll)$/.test(url))).toBe(true);
+  expect(shellAfter.every(url => /(?:\.(?:html|css|svg|png|mjs|webmanifest)|\/\.nojekyll)$/.test(url))).toBe(true);
   expect(shellAfter.some(url => /(?:\.(?:wav|pcm|fml)|^blob:)/.test(url))).toBe(false);
   expect(errors).toEqual([]);
   expect(externalRequests).toEqual([]);
