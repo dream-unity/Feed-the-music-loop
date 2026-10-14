@@ -173,8 +173,13 @@ test('failed or mismatched shell updates preserve offline audio and a valid fres
     // worker-originated fetch bypasses the controlling worker's fetch handler,
     // proving the old bytes remain in the browser HTTP cache after disk changes.
     await context.setOffline(false);
+    // Prime from the same worker that will inspect the HTTP cache, so this
+    // precondition does not depend on the earlier installation requests.
+    expect(await oldWorker.evaluate(async url => (await fetch(url, { cache: 'reload' })).text(), styleURL)).toBe(originalStyle);
     await writeFile(stylePath, updatedStyle);
-    const physicalStyle = await request.get(styleURL, { headers: { 'Cache-Control': 'no-cache' } });
+    // This independent Node HTTP client does not share Chromium's scoped
+    // certificate verifier or its HTTP cache.
+    const physicalStyle = await request.get(styleURL, { headers: { 'Cache-Control': 'no-cache' }, ignoreHTTPSErrors: true });
     expect(physicalStyle.status()).toBe(200);
     expect(await physicalStyle.text()).toBe(updatedStyle);
     expect(physicalStyle.headers()['cache-control']).toContain('max-age=3600');
