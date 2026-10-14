@@ -2,6 +2,7 @@
 export const SCHEMA_VERSION = 1;
 export const PAGE_FRAMES = 16384;
 export const MAX_TRACKS = 512;
+export const DEFAULT_METRONOME = Object.freeze({ enabled: false, bpm: 100, beatsPerCycle: 4, countInBeats: 0, volume: 0.25 });
 export const ROLES = ['beat', 'bass', 'harmony', 'lead', 'texture'];
 export const COLORS = { beat: '#fa987e', bass: '#dfbc6e', harmony: '#94cbb7', lead: '#d5a2d9', texture: '#85b7df' };
 export const DEFAULT_MIX = Object.freeze({ volume: 0.8, pan: 0, low: 0, mid: 0, high: 0, highpass: 40, compression: 0.25, reverb: 0.08, delay: 0 });
@@ -30,7 +31,7 @@ export function createProject(name = 'Untitled session', sampleRate = 48000) {
   return {
     schemaVersion: SCHEMA_VERSION, id: id('project-'), name: cleanName(name, 'Untitled session'),
     createdAt: now, updatedAt: now, sampleRate, baseFrames: 0, tracks: [], takes: [], sections: [], performances: [],
-    selectedTakeId: null, master: { volume: 0.8 }, input: { gain: 1, monitor: false, compensationMs: 0 }, events: [], revision: 0,
+    selectedTakeId: null, master: { volume: 0.8 }, input: { gain: 1, monitor: false, compensationMs: 0 }, metronome: { ...DEFAULT_METRONOME }, events: [], revision: 0,
   };
 }
 export function createTrack({ assetId, name, role = 'beat', frames = 0, offsetFrames = 0, ...rest } = {}) {
@@ -146,6 +147,14 @@ export function validateProject(input, { strict = true } = {}) {
   object(p.input, 'input'); p.input.gain = number(p.input.gain, 'input gain', 0, 4); p.input.monitor = bool(p.input.monitor, 'monitor');
   p.input.compensationMs = number(p.input.compensationMs, 'latency compensation', 0, 1000);
   if (p.input.mix !== undefined) p.input.mix = checkMix(p.input.mix, 'input mix', strict);
+  if (p.metronome !== undefined) {
+    object(p.metronome, 'metronome');
+    p.metronome.enabled = bool(p.metronome.enabled, 'click enabled');
+    number(p.metronome.bpm, 'click tempo', 40, 240);
+    number(p.metronome.beatsPerCycle, 'beats per cycle', 1, 16, true);
+    if (![0, 4, 8].includes(p.metronome.countInBeats)) fail('Count-in must be off, four beats or eight beats.');
+    number(p.metronome.volume, 'click volume', 0, 1);
+  }
   checkEvents(p.events ?? [], 'events'); p.events ??= [];
   return p;
 }

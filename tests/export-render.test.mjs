@@ -251,8 +251,89 @@ test('long rendering of six independently phased consumers shares audio without 
     assert.equal(written, SR * 60 + Math.round(.031 * SR)); assert.equal(result.frames, written);
     assert.ok(reads > 100, 'must advance through many cache windows');
     assert.ok(largestRead <= PAGE * 4); assert.ok(largestWrite <= PAGE * 8);
-    assert.ok(maxConcurrentReads <= 60, `unbounded pending reads: ${maxConcurrentReads}`);
+    assert.ok(maxConcurrentReads <= 32, `unbounded pending reads: ${maxConcurrentReads}`);
     return hash.digest('hex');
   };
   assert.equal(await run(true), await run(false), 'reusing an asset at different phases must match independent immutable copies');
+});
+
+async function withFakeWorker(behavior, action) {
+  const previous = globalThis.Worker, instances = [];
+  globalThis.Worker = class {
+    constructor() { this.terminated = false; instances.push(this); }
+    postMessage(message) { behavior.call(this, message); }
+    terminate() { this.terminated = true; }
+    emit(message) { queueMicrotask(() => { if (!this.terminated) this.onmessage?.({ data: message }); }); }
+  };
+  try { return await action(instances); }
+  finally { if (previous) globalThis.Worker = previous; else delete globalThis.Worker; }
+}
+
+test('worker startup and response transport failures terminate the worker and remove only its new render', async () => {
+  for (const stage of ['startup', 'response']) {
+    await withFakeWorker(function (message) {
+      if (stage === 'startup' || message.type === 'rpc-result') throw new Error('Simulated transport failure');
+      this.emit({ type: 'rpc', requestId: 1, method: 'readPage', args: ['loop-audio', 0] });
+    }, async instances => {
+      const { storage, project } = await fixture(), originals = [...storage.assets.keys()];
+      await assert.rejects(renderEditedMix(storage, project, { tailSeconds: 0, prerollSeconds: 0, workerIdleTimeoutMs: 500 }), /transport failure/);
+      assert.equal(instances.length, 1); assert.ok(instances[0].terminated); assert.deepEqual([...storage.assets.keys()], originals);
+    });
+  }
+});
+
+test('a silent render worker times out without leaving an output asset or a running worker', async () => {
+  await withFakeWorker(function () {}, async instances => {
+    const { storage, project } = await fixture(), originals = [...storage.assets.keys()];
+    await assert.rejects(renderEditedMix(storage, project, { workerIdleTimeoutMs: 15 }), { code: 'RENDER_TIMEOUT' });
+    assert.ok(instances[0].terminated); assert.deepEqual([...storage.assets.keys()], originals);
+  });
+});
+
+test('cancellation does not wait for a stuck read of an immutable source recording', async () => {
+  await withFakeWorker(function (message) {
+    if (message.type === 'render') this.emit({ type: 'rpc', requestId: 1, method: 'readPage', args: ['loop-audio', 0] });
+  }, async instances => {
+    const { storage, project } = await fixture(), originals = [...storage.assets.keys()], controller = new AbortController();
+    storage.readPage = async () => { controller.abort(); return new Promise(() => {}); };
+    await assert.rejects(renderEditedMix(storage, project, { signal: controller.signal, workerIdleTimeoutMs: 500 }), { name: 'AbortError' });
+    assert.ok(instances[0].terminated); assert.deepEqual([...storage.assets.keys()], originals);
+  });
+});
+
+test('invalid renderer requests and incomplete completion are rejected before accepting output', async () => {
+  const messages = [
+    null,
+    { type: 'rpc', requestId: 1, method: 'readPage', args: ['unrelated-project-audio', 0] },
+    { type: 'rpc', requestId: 1, method: 'readPage', args: ['loop-audio', 2] },
+    { type: 'rpc', requestId: 1, method: 'putPage', args: [1, new ArrayBuffer(PAGE * 8), PAGE, 2] },
+    { type: 'rpc', requestId: 1, method: 'putPage', args: [0, new ArrayBuffer(4), PAGE, 2] },
+    { type: 'rpc', requestId: 1, method: 'deleteAsset', args: ['loop-audio'] },
+    { type: 'complete', result: { frames: 40001, bodyFrames: 40001, tailFrames: 0, sampleRate: SR, channels: 2 } },
+  ];
+  for (const message of messages) await withFakeWorker(function (command) {
+    if (command.type === 'render') this.emit(message);
+  }, async instances => {
+    const { storage, project } = await fixture(), originals = [...storage.assets.keys()];
+    await assert.rejects(renderEditedMix(storage, project, { tailSeconds: 0, prerollSeconds: 0, workerIdleTimeoutMs: 500 }), { code: 'RENDER_PROTOCOL' });
+    assert.ok(instances[0].terminated); assert.deepEqual(storage.writes, []); assert.deepEqual([...storage.assets.keys()], originals);
+  });
+});
+
+test('renderer refuses truncated or incorrectly labelled source pages instead of exporting silence', async () => {
+  for (const change of [page => ({ ...page, channels: 2 }), page => ({ ...page, frames: page.frames - 1 }), page => ({ ...page, buffer: page.buffer.slice(0, -4) })]) {
+    const { storage, project } = await fixture(), originals = [...storage.assets.keys()], read = storage.readPage.bind(storage);
+    storage.readPage = async (...args) => change(await read(...args));
+    await assert.rejects(renderEditedMix(storage, project, { useWorker: false, tailSeconds: 0, prerollSeconds: 0 }), /inconsistent saved length or channel count/);
+    assert.deepEqual([...storage.assets.keys()], originals);
+  }
+});
+
+test('cancellation during output creation does not start a render worker', async () => {
+  await withFakeWorker(function () { throw new Error('Worker should not start'); }, async instances => {
+    const { storage, project } = await fixture(), controller = new AbortController(), originals = [...storage.assets.keys()], begin = storage.beginAsset.bind(storage);
+    storage.beginAsset = async (...args) => { await begin(...args); controller.abort(); };
+    await assert.rejects(renderEditedMix(storage, project, { signal: controller.signal }), { name: 'AbortError' });
+    assert.equal(instances.length, 0); assert.deepEqual([...storage.assets.keys()], originals);
+  });
 });

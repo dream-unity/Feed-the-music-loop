@@ -65,6 +65,26 @@ test('long recorded loops play from bounded cache through wrap and reclaimed pag
   const h=harness({pageFrames:256});h.arm({lengthFrames:12007});h.run(12008,i=>Math.sin(i*.02)*.1,93);assert.equal(h.engine.caches.get('raw').slots.length,16);h.run(40000,()=>0,93);assert(!h.events.some(e=>e.type==='underrun'));assert.equal(h.engine.caches.get('raw').slots.length,16);assert.equal(h.engine.missing.size,0);
 });
 
+test('asynchronous read-ahead across wrap cannot evict the page currently playing',()=>{
+  // These lengths made the final page alias page 4 in the old modulo cache.
+  for(const pages of [53,65]){
+    const pageFrames=256,frames=(pages-1)*pageFrames+223,events=[],pending=[];
+    const engine=new LoopEngine({sampleRate:8000,pageFrames,post:event=>events.push(event)});
+    engine.command({type:'storage-port',port:{postMessage(message){if(message.type==='read')pending.push({...message,due:engine.clock+128});}}});
+    engine.command({type:'track',track:{id:'wrap',assetId:'wrap',frames,channels:1,offsetFrames:1000,mix:{volume:1,highpass:0,compression:0,reverb:0,delay:0}}});
+    const input=new Float32Array(64),left=new Float32Array(64),right=new Float32Array(64);
+    function block(){
+      for(let index=pending.length-1;index>=0;index--)if(pending[index].due<=engine.clock){const message=pending.splice(index,1)[0],length=Math.min(pageFrames,frames-message.index*pageFrames),pcm=new Float32Array(length);for(let i=0;i<length;i++)pcm[i]=Math.sin((message.index*pageFrames+i)*.07)*.2;engine.storageMessage({type:'page',assetId:'wrap',index:message.index,frames:length,channels:1,buffer:pcm.buffer});}
+      engine.process(input,left,right);
+    }
+    while(!events.some(event=>event.type==='track-ready')){block();assert(engine.clock<8000);}
+    engine.command({type:'play'});
+    while(engine.frame<frames*3)block();
+    assert.deepEqual(events.filter(event=>event.type==='underrun'),[],`${pages}-page wrap produced a gap`);
+    const cache=engine.tracks.get('wrap').cache;assert.equal(cache.slots.length,16);assert(cache.pageSlots.size<=12);assert(cache.pending.size<=32);
+  }
+});
+
 test('missing pages are reported with unchanged timeline and retry rate is bounded',()=>{
   const h=harness();h.engine.command({type:'track',track:{id:'missing',assetId:'missing',frames:80000,channels:1,mix:{}}});h.engine.tracks.get('missing').ready=true;h.engine.command({type:'play'});h.run(16000);assert.equal(h.engine.frame,16000);assert(h.events.some(e=>e.type==='underrun'));assert.equal(h.engine.missing.size,1);assert(h.reads.length<300);h.engine.command({type:'remove-track',id:'missing'});assert.equal(h.engine.missing.size,0);
 });
@@ -178,4 +198,28 @@ test('cancel and Stop drain clear queued vocal-control changes before a subseque
 
 test('section membership never inherits object prototype names from imported track identifiers',()=>{
   const h=harness();h.engine.command({type:'track',track:{id:'constructor',assetId:'raw',frames:1000,channels:1,mix:{}}});h.engine.applySection({id:'empty',tracks:{}});assert.equal(h.engine.tracks.get('constructor').track.muted,true);assert.equal(h.engine.tracks.get('constructor').track.solo,false);
+});
+
+test('metronome ticks use exact rounded frame origins without cumulative tempo drift',()=>{
+  const h=harness();h.engine.command({type:'configure',metronome:{enabled:true,bpm:137,beatsPerCycle:4}});h.engine.command({type:'play'});const audio=h.run(80000,()=>0,193),ticks=h.events.filter(e=>e.type==='click');assert(ticks.length>20);for(let i=0;i<ticks.length;i++)assert.equal(ticks[i].projectFrame,Math.round(i*8000*60/137));assert(audio.l.some(x=>Math.abs(x)>.1));h.engine.command({type:'stop'});assert(h.run(1000).l.every(x=>x===0));
+});
+
+test('with a base loop the click follows cycle divisions instead of the prior BPM',()=>{
+  const h=harness();h.engine.command({type:'configure',baseFrames:10007,metronome:{enabled:true,bpm:200,beatsPerCycle:7}});h.engine.command({type:'play'});h.run(30022,()=>0,237);const ticks=h.events.filter(e=>e.type==='click');for(let i=0;i<ticks.length;i++){assert.equal(ticks[i].projectFrame,Math.round(i*10007/7));assert.equal(ticks[i].accent,i%7===0);}assert.equal(ticks[7].projectFrame,10007);assert.equal(ticks[14].projectFrame,20014);
+});
+
+test('count-in holds the empty musical origin and starts compensated capture at frame zero',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:100,metronome:{enabled:false,bpm:137,countInBeats:4}});h.arm();const duration=Math.round(4*8000*60/137);assert.equal(h.engine.capture.status,'counting');const countAudio=h.run(duration,(_,clock)=>clock/100000,213);assert.equal(h.engine.frame,0);assert.equal(h.engine.capture.raw.frames,0);assert(countAudio.l.some(x=>Math.abs(x)>.01));const counts=h.events.filter(e=>e.type==='count-in');assert.equal(counts.length,4);for(let i=0;i<4;i++)assert.equal(counts[i].clockFrame,Math.round(i*8000*60/137));h.run(1003,(_,clock)=>clock/100000,213);assert.equal(h.events.find(e=>e.type==='capture-start').clockFrame,duration);assert.equal(h.events.find(e=>e.type==='capture-start').startFrame,0);h.engine.command({type:'finish'});h.run(101,(_,clock)=>clock/100000);const raw=h.samples('raw');assert.equal(raw.length,1003);assert(Math.abs(raw[0]-(duration+100)/100000)<1e-7);assert.equal(h.engine.baseFrames,1003);
+});
+
+test('cancel, Finish, Stop and input interruption during count-in cannot later start a recording',()=>{
+  for(const command of ['cancel','finish','stop','interrupt']){const h=harness();h.engine.command({type:'configure',metronome:{enabled:true,bpm:240,countInBeats:4}});h.arm();h.run(500);h.engine.command({type:command});const output=h.run(9000);assert.equal(h.engine.capture,null,command);assert.equal(h.engine.baseFrames,0,command);assert.equal(h.engine.playing,false,command);assert(output.l.every(x=>x===0),command);assert(!h.events.some(e=>e.type==='capture-start'),command);assert.equal(h.samples('raw').length,0,command);}
+});
+
+test('existing loops use cycle alignment without adding an extra count-in',()=>{
+  const h=harness();h.engine.command({type:'configure',baseFrames:1000,metronome:{enabled:true,bpm:100,countInBeats:8}});h.engine.command({type:'play'});h.run(333);h.arm({quantized:true,lengthFrames:1000});assert.equal(h.engine.capture.status,'arming');h.run(668);assert.equal(h.events.find(e=>e.type==='capture-start').startFrame,1000);assert(!h.events.some(e=>e.type==='count-in'));
+});
+
+test('monitor click never enters captured raw audio or stereo master, including compensation history',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:160,metronome:{enabled:true,bpm:240,volume:.5}});h.arm({kind:'vocal',masterAssetId:'master'});const output=h.run(9000,()=>0);h.engine.command({type:'finish'});h.run(161,()=>0);assert(output.l.some(x=>Math.abs(x)>.1));assert(h.samples('raw').every(x=>x===0));assert(h.samples('master').every(x=>x===0));
 });

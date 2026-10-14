@@ -34,7 +34,10 @@ function fakeBrowser(t, options = {}) {
       } };
       contexts.push(this);
     }
-    async resume() { this.resumeCount++; this.state = 'running'; }
+    async resume() {
+      this.resumeCount++; await options.resumeGate?.promise;
+      if (this.state !== 'closed') this.state = 'running';
+    }
     async close() { this.closeCount++; this.state = 'closed'; this.onstatechange?.(); }
     createMediaStreamSource(stream) {
       if (options.sourceError) throw options.sourceError;
@@ -64,7 +67,7 @@ function fakeBrowser(t, options = {}) {
     if (options.storageError) throw options.storageError;
     this.port = port;
   } };
-  const engine = new AudioEngine(storage);
+  const engine = new AudioEngine(storage, { resumeTimeoutMs: options.resumeTimeoutMs });
   t.after(async () => {
     await engine.close();
     for (const [name, descriptor] of originals) {
@@ -101,6 +104,26 @@ test('a sample-rate mismatch closes the rejected context before any node or micr
   const h = fakeBrowser(t, { sampleRate: 44100 });
   await assert.rejects(h.init(), /48000 Hz/);
   assert.equal(h.contexts[0].state, 'closed'); assert.equal(h.nodes.length, 0); assert.equal(h.requests.length, 0);
+});
+
+test('an audio context that never resumes times out with guidance and closes before opening a worklet', { timeout: 1000 }, async t => {
+  const resumeGate = deferred(), h = fakeBrowser(t, { resumeGate, resumeTimeoutMs: 20 });
+  await assert.rejects(h.init(), error => {
+    assert.match(error.message, /audio|sound/i);
+    assert.match(error.message, /try|tap|click|allow|reopen|check/i);
+    return true;
+  });
+  assert.equal(h.contexts[0].state, 'closed'); assert.equal(h.nodes.length, 0); assert.equal(h.requests.length, 0);
+});
+
+test('a late resume completion cannot revive an expired audio initialization or replace a successful retry', { timeout: 1000 }, async t => {
+  const resumeGate = deferred(), options = { resumeGate, resumeTimeoutMs: 20 }, h = fakeBrowser(t, options);
+  await assert.rejects(h.init()); const expired = h.contexts[0];
+  options.resumeGate = null; await h.init(); const current = h.contexts[1];
+  assert.equal(h.nodes.length, 1); assert.equal(current.state, 'running');
+  resumeGate.resolve(); await turn();
+  assert.equal(expired.state, 'closed'); assert.equal(h.nodes.length, 1); assert.equal(h.engine.context, current);
+  assert.equal(h.nodes[0].connected, true);
 });
 
 test('closing while the worklet module loads rejects initialization without reviving audio', async t => {

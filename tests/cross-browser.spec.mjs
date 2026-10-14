@@ -114,8 +114,9 @@ async function screenshot(page, testInfo, name) {
 }
 
 test('generated loops play, mixer edits render, and exact recordings survive reload and backup restore', async ({ page, context, baseURL }, testInfo) => {
-  const errors = [], remoteRequests = [], uploadRequests = [], workerURLs = [], moduleRequests = new Set();
+  const errors = [], consoleMessages = [], remoteRequests = [], uploadRequests = [], workerURLs = [], moduleRequests = new Set();
   page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (['warning', 'error'].includes(message.type())) consoleMessages.push({ type: message.type(), text: message.text() }); });
   page.on('worker', worker => workerURLs.push(worker.url()));
   context.on('request', request => {
     const url = new URL(request.url());
@@ -123,6 +124,28 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     if (url.origin !== new URL(baseURL).origin) remoteRequests.push(request.url());
     if (!['GET', 'HEAD'].includes(request.method())) uploadRequests.push(`${request.method()} ${request.url()}`);
     if (url.pathname.endsWith('.mjs')) moduleRequests.add(url.pathname);
+  });
+
+  // Observe native contexts without replacing their methods, output, promises
+  // or audio clocks. This distinguishes a missing CI audio sink from a module
+  // or storage failure if a browser cannot finish opening the studio.
+  await page.addInitScript(() => {
+    const contexts = [], events = [];
+    window.__fmlAudioDiagnostics = { contexts, events };
+    for (const name of ['AudioContext', 'webkitAudioContext']) {
+      const NativeContext = window[name];
+      if (typeof NativeContext !== 'function') continue;
+      window[name] = new Proxy(NativeContext, {
+        construct(target, args, newTarget) {
+          const context = Reflect.construct(target, args, newTarget);
+          const index = contexts.push(context) - 1;
+          const observe = type => events.push({ type, index, at: performance.now(), state: context.state, currentTime: context.currentTime, activeGesture: navigator.userActivation?.isActive ?? null });
+          observe('created');
+          context.addEventListener('statechange', () => observe('statechange'));
+          return context;
+        },
+      });
+    }
   });
 
   try {
@@ -210,8 +233,16 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
       contentType: 'application/json',
     });
   } finally {
+    const audioDiagnostics = await page.evaluate(() => ({
+      contexts: (window.__fmlAudioDiagnostics?.contexts || []).map(context => ({
+        state: context.state, currentTime: context.currentTime, sampleRate: context.sampleRate,
+        baseLatency: context.baseLatency ?? null, outputLatency: context.outputLatency ?? null,
+        audioWorklet: Boolean(context.audioWorklet),
+      })),
+      events: window.__fmlAudioDiagnostics?.events || [],
+    })).catch(error => ({ unavailable: error.message }));
     await testInfo.attach('runtime-observations', {
-      body: JSON.stringify({ errors, remoteRequests, uploadRequests, workerURLs, moduleRequests: [...moduleRequests] }, null, 2),
+      body: JSON.stringify({ errors, consoleMessages, audioDiagnostics, remoteRequests, uploadRequests, workerURLs, moduleRequests: [...moduleRequests] }, null, 2),
       contentType: 'application/json',
     });
   }

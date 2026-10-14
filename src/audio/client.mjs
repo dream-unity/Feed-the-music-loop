@@ -5,12 +5,13 @@ const event = (type, detail) => new CustomEvent(type, { detail });
 
 /** Main-thread device lifecycle. Sample scheduling and mixing belong to the worklet. */
 export class AudioEngine extends EventTarget {
-  constructor(storage) {
+  constructor(storage, { resumeTimeoutMs = 10000 } = {}) {
     super(); this.storage = storage; this.context = null; this.node = null; this.stream = null; this.source = null;
     this.micGeneration = 0; this.initPromise = null; this.tracks = new Map(); this.playing = false; this.frame = 0;
     this.capture = null; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
     this.suppressedStateChange = false;
     this.readyTracks = new Set(); this.readyWaiters = new Set(); this.trackAssets = new Map(); this.readinessGeneration = 0;
+    this.resumeTimeoutMs = resumeTimeoutMs;
   }
   async init(project) {
     if (this.closed) throw new Error('This audio session has closed. Reopen the project.');
@@ -25,7 +26,7 @@ export class AudioEngine extends EventTarget {
       throw new Error(`This device could not open the project's ${project.sampleRate} Hz audio rate. Your saved audio is unchanged.`);
     }
     if (!this.context.audioWorklet) { await this.context.close(); this.context = null; throw new Error('AudioWorklet is unavailable. Use the HTTPS website in a supported browser.'); }
-    const resumed = this.context.resume();
+    const resumed = this.resume();
     this.initPromise = (async () => {
       await resumed;
       await this.context.audioWorklet.addModule(new URL('./loop-worklet.mjs', import.meta.url));
@@ -55,7 +56,19 @@ export class AudioEngine extends EventTarget {
     try { return await this.initPromise; }
     catch (error) { this.initPromise = null; this.node?.disconnect(); this.node = null; await this.context?.close().catch(() => {}); this.context = null; throw this.closed ? abortError() : error; }
   }
-  async resume() { if (this.context && this.context.state !== 'running') await this.context.resume(); }
+  async resume() {
+    if (this.closed) throw abortError();
+    if (!this.context || this.context.state === 'running') return;
+    let timer;
+    // Some devices and browser audio policies leave resume pending indefinitely.
+    // Start it inside the user gesture, but keep the interface recoverable.
+    const starting = this.context.resume();
+    try {
+      await Promise.race([starting, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Audio could not start. Check your audio output and browser sound permission, then press Play or Record to retry.')), this.resumeTimeoutMs);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
   onMessage(message) {
     if (!message || typeof message.type !== 'string') return;
     if (message.type === 'meter' || message.type === 'state') {
@@ -71,7 +84,7 @@ export class AudioEngine extends EventTarget {
   }
   configure(project) {
     this.send('configure', { baseFrames: project.baseFrames, compensationFrames: Math.round(project.input.compensationMs * project.sampleRate / 1000), inputGain: project.input.gain,
-      monitor: project.input.monitor, masterVolume: project.master.volume, inputMix: project.input.mix || roleMix('lead') });
+      monitor: project.input.monitor, masterVolume: project.master.volume, inputMix: project.input.mix || roleMix('lead'), metronome: project.metronome });
   }
   syncTracks(tracks) {
     const ids = new Set(tracks.map(t => t.id));

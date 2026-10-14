@@ -20,6 +20,8 @@ async function fixture() {
     async getPage(id, index) { return structuredClone(this.pages.get(`${id}:${index}`)); }
     async readData(asset, page) { return this.pages.get(`${asset.id}:${page.index}`).buffer.slice(0); }
     async finishAsset(asset) { if (this.failSeal) throw Object.assign(new Error('Disk full'), { name: 'QuotaExceededError' }); this.assets.set(asset.id, structuredClone(asset)); }
+    closeHandle() {}
+    async releaseProject() { this.released = true; }
   }
   const messages = [], pending = new Map(); let id = 0;
   const self = { postMessage(data, transfer = []) {
@@ -78,4 +80,19 @@ test('a future page is a retryable miss, not a fatal recording error', async () 
   send({ type: 'read', assetId: 'asset-1', index: 0 });
   await until(() => port.messages.length > 0);
   assert.deepEqual(port.messages[0], { type: 'page-missing', assetId: 'asset-1', index: 0, retryable: true });
+});
+
+test('queued old-project reads cannot reopen a file after releaseProject', async () => {
+  const { send, port, rpc, backend } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array(17).buffer, 17, 1]);
+  await rpc('finishAsset', ['asset-1', { frames: 17 }]);
+  let unblock; const gate = new Promise(resolve => { unblock = resolve; });
+  const read = backend.readData.bind(backend); let calls = 0, readsAfterRelease = 0;
+  backend.readData = async (...args) => { if (backend.released) readsAfterRelease++; if (++calls === 1) await gate; return read(...args); };
+  for (let i = 0; i < 6; i++) send({ type: 'read', assetId: 'asset-1', index: 0 });
+  const released = rpc('releaseProject', ['project-1']); unblock(); await released;
+  await until(() => port.messages.filter(message => ['page', 'page-missing'].includes(message.type)).length === 6);
+  assert.equal(readsAfterRelease, 0);
+  assert.ok(port.messages.some(message => message.type === 'page-missing' && message.retryable === false));
+  await assert.rejects(rpc('readPage', ['asset-1', 0]), { code: 'PROJECT_RELEASED' });
 });

@@ -288,12 +288,15 @@ test('browser storage keeps exact PCM and prevents competing recovery during rec
       await first.putPage(interruptedId, 0, new Float32Array(700).fill(0.125).buffer, 700, 1);
       let competingError = null;
       try { await second.recover(project.id); } catch (error) { competingError = error.code; }
+      let competingPurgeError = null, recordingPurgeError = null;
+      try { await second.purgeProject(project.id); } catch (error) { competingPurgeError = error.code; }
+      try { await first.purgeProject(project.id); } catch (error) { recordingPurgeError = error.code; }
       const activeStatus = (await first.getAsset(interruptedId)).status;
       await first.dispose();
       const recovered = await second.recover(project.id);
       const reopened = await second.loadProject(project.id);
       const prefix = await second.readPage(interruptedId, 0);
-      return {
+      const recovery = {
         backend: capabilities.backend,
         locking: capabilities.locking,
         exact: JSON.stringify([...stored]) === JSON.stringify(expected),
@@ -306,6 +309,36 @@ test('browser storage keeps exact PCM and prevents competing recovery during rec
         prefixCorrect: [...new Float32Array(prefix.buffer)].every(value => value === 0.125),
         reopenedName: reopened.name,
       };
+      const neighbor = createProject('Keep this other project');
+      await second.saveProject(neighbor);
+      const neighborAssetId = `ci_neighbor_${crypto.randomUUID()}`;
+      await second.beginAsset({ id: neighborAssetId, projectId: neighbor.id, sampleRate: 48000, channels: 1, kind: 'loop', name: 'Untouched PCM' });
+      await second.putPage(neighborAssetId, 0, new Float32Array(64).fill(0.25).buffer, 64, 1);
+      await second.finishAsset(neighborAssetId, { frames: 64 });
+      const usage = await second.projectUsage(project.id);
+      const purged = await second.purgeProject(project.id);
+      const remainingAssets = await second.listAssets(project.id);
+      const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle('feed-the-music-loop-v1');
+      const pcmFiles = [];
+      for await (const name of directory.keys()) pcmFiles.push(name);
+      const neighborAudio = new Float32Array(await (await second.getAssetFile(neighborAssetId)).arrayBuffer());
+      const repeated = await second.purgeProject(project.id);
+      const neighborPreserved = (await second.loadProject(neighbor.id)).name === neighbor.name && neighborAudio.length === 64 && neighborAudio.every(value => value === 0.25);
+      // Switching projects must release both the writer lock and exclusive
+      // file handles, so another tab can manage the former project's audio.
+      await second.readPage(neighborAssetId, 0);
+      await second.releaseProject(neighbor.id);
+      const handoff = new StorageClient();
+      let handoffDeletedAssets;
+      try { await handoff.init(); handoffDeletedAssets = (await handoff.purgeProject(neighbor.id)).deletedAssets; }
+      finally { await handoff.dispose(); }
+      return { ...recovery,
+        competingPurgeError, recordingPurgeError,
+        audioBytes: usage.audioBytes, deletedAssets: purged.deletedAssets,
+        projectRemoved: !(await second.loadProject(project.id)), assetMetadataRemoved: remainingAssets.length === 0,
+        pcmRemoved: !pcmFiles.includes(`${assetId}.pcm`) && !pcmFiles.includes(`${interruptedId}.pcm`),
+        neighborPreserved, handoffDeletedAssets, repeatDeletedAssets: repeated.deletedAssets,
+      };
     } finally {
       await first.dispose();
       await second.dispose();
@@ -315,6 +348,9 @@ test('browser storage keeps exact PCM and prevents competing recovery during rec
     backend: 'opfs', locking: true, exact: true, concurrentReadExact: true, finishedStatus: 'complete',
     competingError: 'PROJECT_BUSY', activeStatus: 'recording', recoveredFrames: 700,
     recoveredStatus: 'interrupted', prefixCorrect: true, reopenedName: 'Storage integrity check',
+    competingPurgeError: 'PROJECT_BUSY', recordingPurgeError: 'RECORDING_ACTIVE',
+    audioBytes: (512 + 700) * 4, deletedAssets: 2, projectRemoved: true,
+    assetMetadataRemoved: true, pcmRemoved: true, neighborPreserved: true, handoffDeletedAssets: 1, repeatDeletedAssets: 0,
   });
 });
 

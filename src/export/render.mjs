@@ -93,21 +93,35 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
     baseFrames: initial?.baseFrames || project.baseFrames,
     masterVolume: mode === 'performance' ? initial.master?.volume ?? project.master.volume : project.master.volume,
     spotlight: !!initial?.spotlight, vocalMix, assetIds: [...assets.keys()],
+    sourceAssets: [...assets.values()].map(({ id, frames, channels }) => ({ id, frames, channels })),
   };
 }
 
-function runWorker(storage, plan, outputId, { signal, onProgress } = {}) {
+function runWorker(storage, plan, outputId, { signal, onProgress, workerIdleTimeoutMs = 60000 } = {}) {
   const worker = new Worker(new URL('./render-worker.mjs', import.meta.url), { type: 'module', name: 'fml-song-render' });
-  const allowed = new Set(plan.assetIds), tasks = new Set();
-  let closed = false;
+  const allowed = new Map(plan.sourceAssets.map(asset => [asset.id, asset])), writes = new Set();
+  const totalFrames = plan.bodyFrames + plan.tailFrames;
+  const timeoutMs = Number.isFinite(workerIdleTimeoutMs) && workerIdleTimeoutMs > 0 ? workerIdleTimeoutMs : 60000;
+  let closed = false, watchdog = null, lastRequestId = 0, nextOutputPage = 0, writtenFrames = 0;
   return new Promise((resolve, reject) => {
     const finish = async (error, result) => {
       if (closed) return;
-      closed = true; signal?.removeEventListener('abort', aborted); worker.terminate();
-      // Await any writes already handed to storage before cleanup can delete
-      // the output asset, avoiding an orphan produced by a late write.
-      await Promise.allSettled([...tasks]);
-      if (error) reject(error); else resolve(result);
+      closed = true; clearTimeout(watchdog); signal?.removeEventListener('abort', aborted);
+      try { worker.terminate(); } catch { /* transport is already unavailable */ }
+      // Writes must settle before cleanup can delete the new output asset.
+      // Source reads do not modify it and must not prevent cancellation.
+      await Promise.allSettled([...writes]);
+      if (error) reject(error instanceof Error ? error : new Error(String(error))); else resolve(result);
+    };
+    const protocolError = message => new ExportError('RENDER_PROTOCOL', message);
+    const resetWatchdog = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => finish(new ExportError('RENDER_TIMEOUT', 'The song renderer stopped responding. Your original recordings are unchanged; try exporting again.')), timeoutMs);
+    };
+    const send = (message, transfer = []) => {
+      if (closed) return false;
+      try { worker.postMessage(message, transfer); return true; }
+      catch (error) { finish(error); return false; }
     };
     const aborted = () => finish(signal.reason instanceof Error ? signal.reason : new DOMException('Rendering was cancelled.', 'AbortError'));
     signal?.addEventListener('abort', aborted, { once: true });
@@ -115,26 +129,47 @@ function runWorker(storage, plan, outputId, { signal, onProgress } = {}) {
     worker.onmessageerror = () => finish(new Error('The song renderer could not transfer its audio data.'));
     worker.onmessage = ({ data: message }) => {
       if (closed) return;
+      if (!message || typeof message !== 'object') { finish(protocolError('The song renderer sent an invalid message.')); return; }
+      resetWatchdog();
       if (message.type === 'progress') { try { onProgress?.(message.progress); } catch (error) { finish(error); } return; }
-      if (message.type === 'error') { finish(new Error(message.message)); return; }
-      if (message.type === 'complete') { finish(null, message.result); return; }
-      if (message.type !== 'rpc') return;
-      // Register the promise before starting IO; even a synchronous abort raised
-      // inside an adapter must wait for that write before cleanup begins.
+      if (message.type === 'error') { finish(new Error(message.message || 'The song renderer failed.')); return; }
+      if (message.type === 'complete') {
+        const result = message.result;
+        if (!result || result.frames !== totalFrames || result.bodyFrames !== plan.bodyFrames || result.tailFrames !== plan.tailFrames || result.sampleRate !== plan.sampleRate || result.channels !== 2 || writtenFrames !== totalFrames || writes.size) finish(protocolError('The song renderer returned an incomplete recording.'));
+        else finish(null, result);
+        return;
+      }
+      if (message.type !== 'rpc' || !Number.isSafeInteger(message.requestId) || message.requestId <= lastRequestId || !Array.isArray(message.args)) { finish(protocolError('The song renderer sent an invalid storage request.')); return; }
+      lastRequestId = message.requestId;
+      const args = message.args, write = message.method === 'putPage';
+      if (message.method === 'readPage') {
+        const asset = allowed.get(args[0]), index = args[1];
+        if (args.length !== 2 || !asset || !Number.isSafeInteger(index) || index < 0 || index >= Math.ceil(asset.frames / 16384)) { finish(protocolError('The song renderer requested audio outside the current song.')); return; }
+      } else if (write) {
+        const [index, buffer, frames, channels] = args, expected = Math.min(16384, totalFrames - nextOutputPage * 16384);
+        if (args.length !== 4 || index !== nextOutputPage || expected < 1 || frames !== expected || channels !== 2 || !(buffer instanceof ArrayBuffer) || buffer.byteLength !== 16384 * 8) { finish(protocolError('The song renderer returned an invalid output page.')); return; }
+        nextOutputPage++;
+      } else { finish(protocolError('The song renderer requested an unsupported storage operation.')); return; }
+      // Register writes before starting IO. Even an abort raised synchronously
+      // inside a storage adapter cannot race deletion against an active write.
       const task = Promise.resolve().then(async () => {
+        if (closed) return;
         try {
           let result, transfer = [];
-          if (message.method === 'readPage' && allowed.has(message.args?.[0])) {
-            result = await storage.readPage(...message.args); transfer = [result.buffer];
-          } else if (message.method === 'putPage') {
-            await storage.putPage(outputId, ...message.args); result = null;
-          } else throw new Error('Invalid renderer storage request.');
-          if (!closed) worker.postMessage({ type: 'rpc-result', requestId: message.requestId, result }, transfer);
-        } catch (error) { if (!closed) worker.postMessage({ type: 'rpc-result', requestId: message.requestId, error: error.message || String(error) }); }
+          if (write) {
+            await storage.putPage(outputId, ...args); writtenFrames += args[2]; result = null;
+          } else {
+            result = await storage.readPage(...args);
+            if (!result || !(result.buffer instanceof ArrayBuffer)) throw new Error('A saved audio page could not be read.');
+            transfer = [result.buffer];
+          }
+          send({ type: 'rpc-result', requestId: message.requestId, result }, transfer);
+        } catch (error) { send({ type: 'rpc-result', requestId: message.requestId, error: error.message || String(error) }); }
       });
-      tasks.add(task); task.finally(() => tasks.delete(task));
+      if (write) { writes.add(task); task.then(() => writes.delete(task), error => { writes.delete(task); finish(error); }); }
+      else task.catch(error => finish(error));
     };
-    if (signal?.aborted) aborted(); else worker.postMessage({ type: 'render', plan });
+    if (signal?.aborted) aborted(); else { resetWatchdog(); send({ type: 'render', plan }); }
   });
 }
 
@@ -155,6 +190,7 @@ export async function renderEditedMix(storage, project, options = {}) {
   const assetId = `render-${crypto.randomUUID()}`;
   try {
     await storage.beginAsset({ id: assetId, projectId: project.id, sampleRate: plan.sampleRate, channels: 2, kind: 'mix', name: plan.name, sourcePerformanceId: plan.sourcePerformanceId, renderMode: plan.mode });
+    options.signal?.throwIfAborted();
     const result = options.useWorker !== false && typeof Worker !== 'undefined'
       ? await runWorker(storage, plan, assetId, options)
       : await renderMixFrames(plan, { readPage: (id, index) => storage.readPage(id, index), writePage: (index, buffer, frames, channels) => storage.putPage(assetId, index, buffer, frames, channels), onProgress: options.onProgress, signal: options.signal });

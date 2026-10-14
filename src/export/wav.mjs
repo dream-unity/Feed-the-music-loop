@@ -38,17 +38,20 @@ export function wavHeader({ frames, channels, sampleRate }) {
   return header;
 }
 
-async function source(storage, assetId) {
+async function source(storage, assetId, signal) {
+  signal?.throwIfAborted();
   const asset = await storage.getAsset(assetId);
+  signal?.throwIfAborted();
   const bytes = validateAudioMetadata(asset);
   if (!['complete', 'interrupted', 'recovered'].includes(asset.status)) throw new ExportError('RECORDING_NOT_READY', 'Finish and save this recording before exporting it.');
   const file = await storage.getAssetFile(assetId);
+  signal?.throwIfAborted();
   if (!(file instanceof Blob) || file.size !== bytes) throw new ExportError('AUDIO_SIZE_MISMATCH', 'The saved audio length does not match its metadata.');
   return { asset, file };
 }
 
 export async function exportWav(storage, assetId, options = {}) {
-  const { asset, file } = await source(storage, assetId);
+  const { asset, file } = await source(storage, assetId, options.signal);
   const maxFrames = Math.floor(MAX_RIFF_DATA_BYTES / (asset.channels * 4));
   if (asset.frames > maxFrames) throw new ExportError('WAV_SPLIT_REQUIRED', 'This recording exceeds the WAV size limit. Export numbered WAV parts.', { partCount: Math.ceil(asset.frames / maxFrames), maxFrames });
   options.signal?.throwIfAborted();
@@ -56,7 +59,7 @@ export async function exportWav(storage, assetId, options = {}) {
 }
 
 export async function* exportWavParts(storage, assetId, { signal, maxDataBytes = MAX_RIFF_DATA_BYTES, name } = {}) {
-  const { asset, file } = await source(storage, assetId);
+  const { asset, file } = await source(storage, assetId, signal);
   if (!Number.isSafeInteger(maxDataBytes) || maxDataBytes < asset.channels * 4 || maxDataBytes > MAX_RIFF_DATA_BYTES) throw new RangeError('Invalid WAV part size.');
   const maxFrames = Math.floor(maxDataBytes / (asset.channels * 4));
   const count = Math.max(1, Math.ceil(asset.frames / maxFrames));

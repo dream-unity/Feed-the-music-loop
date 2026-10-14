@@ -8,13 +8,21 @@ export class PageCache {
   constructor(pageFrames,channels=1,headPages=4,rollingPages=12) {
     this.pageFrames=pageFrames;this.channels=channels;this.headPages=headPages;this.rollingPages=rollingPages;
     this.slots=Array.from({length:headPages+rollingPages},()=>new Float32Array(pageFrames*channels));
-    this.tags=new Float64Array(this.slots.length);this.tags.fill(-1);this.lengths=new Uint32Array(this.slots.length);this.pending=new Map();this.totalFrames=0;
+    this.tags=new Float64Array(this.slots.length);this.tags.fill(-1);this.lengths=new Uint32Array(this.slots.length);this.lastUsed=new Float64Array(this.slots.length);this.pageSlots=new Map();this.pending=new Map();this.totalFrames=0;this.sequence=0;this.readIndex=-1;this.readSlot=-1;this.writeIndex=-1;this.writeSlot=-1;
   }
-  slot(index){return index<this.headPages?index:this.headPages+(index-this.headPages)%this.rollingPages;}
-  has(index){return this.tags[this.slot(index)]===index;}
-  put(index,buffer,frames,channels){if(channels!==this.channels)return false;const s=this.slot(index);this.slots[s].set(new Float32Array(buffer,0,frames*channels));this.tags[s]=index;this.lengths[s]=frames;this.pending.delete(index);return true;}
-  write(frame,x){const index=Math.floor(frame/this.pageFrames),s=this.slot(index),offset=frame%this.pageFrames;if(this.tags[s]!==index){this.tags[s]=index;this.lengths[s]=0;}this.slots[s][offset]=x;this.lengths[s]=offset+1;}
-  sample(frame,channel=0){const index=Math.floor(frame/this.pageFrames),s=this.slot(index),offset=frame%this.pageFrames;return this.tags[s]===index&&offset<this.lengths[s]?this.slots[s][offset*this.channels+channel]:NaN;}
+  slot(index){return index<this.headPages?index:this.pageSlots.get(index)??-1;}
+  has(index){const slot=this.slot(index);return slot>=0&&this.tags[slot]===index;}
+  claim(index){
+    let slot=this.slot(index);if(slot>=0&&this.tags[slot]===index)return slot;
+    if(index>=this.headPages){slot=this.headPages;for(let i=this.headPages;i<this.slots.length;i++){if(this.tags[i]<0){slot=i;break;}if(this.lastUsed[i]<this.lastUsed[slot])slot=i;}if(this.tags[slot]>=this.headPages)this.pageSlots.delete(this.tags[slot]);this.pageSlots.set(index,slot);}
+    // Modulo-by-page-number is unsafe at loop wrap: e.g. pages 52 and 4
+    // collide while page 52 is still playing. Bounded LRU retains the reader.
+    if(this.readSlot===slot||this.readIndex===index)this.readIndex=-1;if(this.writeSlot===slot||this.writeIndex===index)this.writeIndex=-1;
+    this.tags[slot]=index;this.lengths[slot]=0;this.lastUsed[slot]=++this.sequence;return slot;
+  }
+  put(index,buffer,frames,channels){if(channels!==this.channels)return false;const s=this.claim(index);this.slots[s].set(new Float32Array(buffer,0,frames*channels));this.lengths[s]=frames;this.lastUsed[s]=++this.sequence;this.pending.delete(index);return true;}
+  write(frame,x){const index=Math.floor(frame/this.pageFrames),offset=frame%this.pageFrames;if(this.writeIndex!==index){this.writeSlot=this.claim(index);this.writeIndex=index;}const s=this.writeSlot;this.slots[s][offset]=x;this.lengths[s]=offset+1;this.lastUsed[s]=++this.sequence;}
+  sample(frame,channel=0){const index=Math.floor(frame/this.pageFrames),offset=frame%this.pageFrames;if(this.readIndex!==index){this.readIndex=index;this.readSlot=this.slot(index);}const s=this.readSlot;if(s<0||this.tags[s]!==index||offset>=this.lengths[s])return NaN;this.lastUsed[s]=++this.sequence;return this.slots[s][offset*this.channels+channel];}
 }
 
 class CaptureWriter {
@@ -32,12 +40,14 @@ export class LoopEngine {
     this.inputGain=1;this.monitor=false;this.compensationFrames=0;this.masterVolume=.8;this.masterCurrent=.8;this.masterSmooth=1-Math.exp(-1/(.005*sampleRate));this.spotlight=false;this.spotlightGain=1;
     this.backingFX=new SharedFX(sampleRate);this.vocalFX=new SharedFX(sampleRate);this.vocalDSP=new TrackDSP(sampleRate,{volume:.85,highpass:65,compression:.3,reverb:.12});
     this.inputMixTarget={...this.vocalDSP.mix};this.inputMixQueue=[];
+    this.metronome={enabled:false,bpm:100,beatsPerCycle:4,countInBeats:0,volume:.25};this.clickPhase=0;this.clickEnvelope=0;this.clickStep=0;this.clickDecay=Math.exp(-1/(.003*sampleRate));this.clickRemaining=0;this.lastClickClock=-Infinity;
     this.historyLength=Math.ceil(sampleRate)+2;this.backingL=new Float32Array(this.historyLength);this.backingR=new Float32Array(this.historyLength);this.masterHistory=new Float32Array(this.historyLength);this.masterHistory.fill(.8);
     this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;this.meterInterval=Math.max(1,Math.round(sampleRate/20));this.missing=new Map();this.preview=null;this.audition=null;this.resetAfterCapture=false;
   }
   emit(type,detail={}){this.post({...detail,type,projectFrame:this.frame,transportFrame:this.frame,clockFrame:this.clock});}
   auditionState(){const a=this.audition;return a?{id:a.id,status:a.status,startFrame:a.startFrame,endFrame:a.endFrame,tailFrames:a.tailFrames}:null;}
-  state(){const c=this.capture;this.emit('state',{playing:this.playing,baseFrames:this.baseFrames,audition:this.auditionState(),capture:c?{id:c.id,captureId:c.id,kind:c.kind,status:c.status,startFrame:c.startFrame,elapsedFrames:Math.max(0,this.clock-(c.startClock??this.clock)-c.compensation),targetFrames:c.lengthFrames||0}:null});}
+  captureState(){const c=this.capture;return c?{id:c.id,captureId:c.id,kind:c.kind,status:c.status,startFrame:c.startFrame,elapsedFrames:c.raw.frames,targetFrames:c.lengthFrames||0,countInBeat:c.status==='counting'?Math.min(c.countInBeats,Math.floor((this.clock-c.countInStartClock)/c.countBeatFrames)+1):0,countInBeats:c.countInBeats||0,remainingFrames:c.status==='counting'?Math.max(0,c.startAtClock-this.clock):0}:null;}
+  state(){this.emit('state',{playing:this.playing,baseFrames:this.baseFrames,metronome:{...this.metronome},audition:this.auditionState(),capture:this.captureState()});}
   command(message) {
     try {
       const m=message||{};
@@ -52,11 +62,12 @@ export class LoopEngine {
         if(typeof m.monitor==='boolean')this.monitor=m.monitor;
         if(Number.isFinite(m.masterVolume))this.masterVolume=clamp(m.masterVolume,0,2,.8);
         if(m.inputMix)this.setInputMix(m.inputMix);
+        if(m.metronome){const next=m.metronome;this.metronome={enabled:typeof next.enabled==='boolean'?next.enabled:this.metronome.enabled,bpm:clamp(next.bpm,40,240,this.metronome.bpm),beatsPerCycle:integer(next.beatsPerCycle??this.metronome.beatsPerCycle,1,16),countInBeats:[0,4,8].includes(next.countInBeats)?next.countInBeats:this.metronome.countInBeats,volume:clamp(next.volume,0,1,this.metronome.volume)};if(!this.metronome.enabled&&this.capture?.status!=='counting')this.clickRemaining=0;}
       } else if(m.type==='track')this.addTrack(m.track);
       else if(m.type==='remove-track'){this.tracks.delete(m.id);this.trackList=Array.from(this.tracks.values());this.missing.delete(m.id);this.dropUnusedCaches();}
       else if(m.type==='mix'){const t=this.tracks.get(m.id);if(t){if(m.mix){t.track.mix={...t.track.mix,...m.mix};t.dsp.setMix(t.track.mix);}if(typeof m.muted==='boolean')t.track.muted=m.muted;if(typeof m.solo==='boolean')t.track.solo=m.solo;this.emit('automation',{action:'mix',id:m.id,mix:m.mix,muted:m.muted,solo:m.solo});}else if(this.audition?.id===m.id&&m.mix){this.audition.mix={...this.audition.mix,...m.mix};this.vocalDSP.setMix(this.audition.mix);}}
       else if(m.type==='play'){this.resetAfterCapture=false;if(this.audition?.status==='loading')this.refreshAudition();else this.playing=true;this.prefetch();}
-      else if(m.type==='stop'){this.finishCapture(true);this.endAudition('stopped');this.playing=false;this.preview=null;this.monitor=false;if(this.capture)this.resetAfterCapture=true;else this.resetDSP();this.dropUnusedCaches();}
+      else if(m.type==='stop'){this.finishCapture(true);this.endAudition('stopped');this.playing=false;this.preview=null;this.monitor=false;this.clickRemaining=0;if(this.capture)this.resetAfterCapture=true;else this.resetDSP();this.dropUnusedCaches();}
       else if(m.type==='clear'){this.cancelCapture();this.endAudition('cleared');this.tracks.clear();this.trackList=[];this.caches.clear();this.cacheGroups.clear();this.missing.clear();this.baseFrames=0;this.frame=0;this.playing=false;this.pendingSection=null;this.preview=null;this.sourceEndFrame=Infinity;this.resetDSP();}
       else if(m.type==='seek'){if(this.capture)throw new Error('Finish or cancel the recording before returning to the start.');this.endAudition('seek');this.frame=0;this.preview=null;this.resetDSP();this.prefetch();}
       else if(m.type==='section'){const section=m.section;if(!section||typeof section.tracks!=='object')throw new Error('Invalid section.');if(this.playing&&this.baseFrames)this.pendingSection={section,frame:this.nextBoundary()};else this.applySection(section);}
@@ -103,6 +114,21 @@ export class LoopEngine {
     const t={track:{...track,offsetFrames:integer(track.offsetFrames??0,-Number.MAX_SAFE_INTEGER),mix:{...track.mix}},cache:c,dsp:new TrackDSP(this.sampleRate,track.mix),ready:false};this.tracks.set(track.id,t);this.trackList.push(t);this.prefetchTrack(t);this.refreshReady(t);
   }
   nextBoundary(){return this.baseFrames?(Math.floor(this.frame/this.baseFrames)+1)*this.baseFrames:this.frame;}
+  clickSample(){
+    const c=this.capture,counting=c?.status==='counting';
+    if(!this.playing){this.clickRemaining=0;return 0;}
+    if(counting||this.metronome.enabled){
+      const elapsed=counting?this.clock-c.countInStartClock:this.frame,period=counting?c.countBeatFrames:this.baseFrames?this.baseFrames/this.metronome.beatsPerCycle:this.sampleRate*60/this.metronome.bpm;
+      const beat=Math.floor((elapsed+.5)/period);
+      // Never accumulate rounded intervals: every tick is derived from the
+      // common origin. Extremely short loops cannot create a high-rate click storm.
+      if(elapsed===Math.round(beat*period)&&this.clock-this.lastClickClock>=this.sampleRate*.05){
+        const accent=beat%(counting?4:this.metronome.beatsPerCycle)===0;this.lastClickClock=this.clock;this.clickPhase=0;this.clickStep=2*Math.PI*(accent?1400:1000)/this.sampleRate;this.clickEnvelope=this.metronome.volume*(accent?1:.65);this.clickRemaining=Math.round(this.sampleRate*.018);
+        this.emit(counting?'count-in':'click',{beat:beat+1,accent,monitorOnly:true,...(counting?{captureId:c.id,countInBeats:c.countInBeats,remainingFrames:c.startAtClock-this.clock}:{beatsPerCycle:this.metronome.beatsPerCycle})});
+      }
+    }
+    if(!this.clickRemaining)return 0;const value=Math.sin(this.clickPhase)*this.clickEnvelope;this.clickPhase+=this.clickStep;this.clickEnvelope*=this.clickDecay;this.clickRemaining--;return value;
+  }
   setInputMix(mix){
     const next=cleanMix({...this.inputMixTarget,...mix});let changed=false;for(const key of Object.keys(next))if(next[key]!==this.inputMixTarget[key]){changed=true;break;}if(!changed)return;
     if(this.audition){this.inputMixTarget=next;this.audition.restoreMix={...next};return;}
@@ -143,12 +169,15 @@ export class LoopEngine {
     if(this.pool.length<(capture.masterAssetId?2:1))throw new Error('Audio storage buffers are not ready.');
     const compensation=this.compensationFrames,minFrames=compensation+128+1,lengthFrames=integer(capture.lengthFrames||0);
     if(lengthFrames&&lengthFrames<minFrames)throw new Error(`This loop must be longer than ${Math.ceil(minFrames/this.sampleRate*1000)} ms for the selected alignment.`);
+    const firstFreeLoop=capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size&&!lengthFrames;
     if(capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size)this.frame=0;
     const targetFrame=capture.quantized&&this.baseFrames&&this.playing?this.nextBoundary():this.frame;
     const cache=this.ensureCache(capture.assetId,1);
     // All capture-time memory and the future loop's DSP are reserved before process().
     const preparedTrack={track:{...capture.track,id:capture.track?.id||capture.id,assetId:capture.assetId,kind:'loop',channels:1,frames:1,offsetFrames:0,mix:{...capture.track?.mix}},cache,dsp:new TrackDSP(this.sampleRate,capture.track?.mix),ready:true};
-    this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:'arming',startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
+    const countInBeats=firstFreeLoop?this.metronome.countInBeats:0,countBeatFrames=this.sampleRate*60/this.metronome.bpm;
+    this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:countInBeats?'counting':'arming',countInBeats,countBeatFrames,countInStartClock:this.clock,startAtClock:this.clock+Math.round(countInBeats*countBeatFrames),startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
+    if(countInBeats){this.clickRemaining=0;this.lastClickClock=-Infinity;}
     if(capture.kind==='vocal'&&capture.track?.mix)this.setInputMix(capture.track.mix);
     this.playing=true;this.prefetch();
   }
@@ -158,7 +187,7 @@ export class LoopEngine {
     this.emit('capture-start',{captureId:c.id,kind:c.kind,startFrame:c.startFrame,assetId:c.assetId,masterAssetId:c.masterAssetId,compensationFrames:c.compensation,initialState});
   }
   finishCapture(stopping=false){
-    const c=this.capture;if(!c)return;if(c.status==='arming'){this.cancelCapture();return;}if(c.status==='finishing')return;
+    const c=this.capture;if(!c)return;if(c.status==='arming'||c.status==='counting'){this.cancelCapture();return;}if(c.status==='finishing')return;
     if(stopping){this.endMusicalCapture(c,this.frame);return;}
     if(c.lengthFrames){c.targetEndFrame=c.startFrame+c.lengthFrames;return;}
     if(c.kind==='loop'&&this.baseFrames&&c.quantized)c.targetEndFrame=Math.max(this.nextBoundary(),c.startFrame+c.minFrames);
@@ -175,13 +204,13 @@ export class LoopEngine {
     if(c.kind==='loop'&&track){const t=this.tracks.get(track.id);if(t){t.track.frames=frames;t.cache.totalFrames=frames;}}
     this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status,reason,assetId:c.assetId,masterAssetId:c.masterAssetId,frames,startFrame:c.startFrame,endFrame:c.startFrame+frames,track,compensationFrames:c.compensation});this.state();
   }
-  abortCapture(reason){const c=this.capture;if(!c)return;if(c.kind==='loop')this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;this.completeCapture('interrupted',reason);}
-  cancelCapture(){const c=this.capture;if(!c)return;this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
+  abortCapture(reason){const c=this.capture;if(!c)return;if(c.status==='counting'){this.playing=false;this.clickRemaining=0;}if(c.kind==='loop')this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;this.completeCapture('interrupted',reason);}
+  cancelCapture(){const c=this.capture;if(!c)return;if(c.status==='counting'){this.playing=false;this.clickRemaining=0;}this.tracks.delete(c.preparedTrack.track.id);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
   applySection(section){for(const t of this.tracks.values()){const state=Object.hasOwn(section.tracks,t.track.id)?section.tracks[t.track.id]:null;t.track.muted=state?!!state.muted:true;t.track.solo=state?!!state.solo:false;if(state?.mix){t.track.mix={...t.track.mix,...state.mix};t.dsp.setMix(t.track.mix);}}this.pendingSection=null;this.emit('section',{id:section.id,section});}
   requestPage(assetId,cache,index){if(!this.storage||index<0||cache.has(index))return;const last=cache.pending.get(index);if(last!==undefined&&this.clock-last<this.sampleRate)return;if(!cache.pending.has(index)&&cache.pending.size>=32)cache.pending.delete(cache.pending.keys().next().value);cache.pending.set(index,this.clock);this.storage.postMessage({type:'read',assetId,index});}
   prefetchTrack(t){const {track,cache}=t,total=Math.ceil(track.frames/this.pageFrames);for(let i=0;i<Math.min(cache.headPages,total);i++)this.requestPage(track.assetId,cache,i);const position=positiveModulo(this.frame-track.offsetFrames,track.frames),page=Math.floor(position/this.pageFrames);for(let i=0;i<6;i++)this.requestPage(track.assetId,cache,(page+i)%total);}
   prefetch(){if(this.frame<this.sourceEndFrame)for(const t of this.tracks.values())this.prefetchTrack(t);if(this.preview){const p=this.preview,c=p.cache,total=Math.ceil(p.frames/this.pageFrames);if(c&&total)for(let i=0;i<6;i++)this.requestPage(p.assetId,c,Math.min(total-1,Math.floor(p.position/this.pageFrames)+i));}if(this.audition){const a=this.audition,total=Math.ceil(a.frames/this.pageFrames),position=Math.max(0,this.frame-a.startFrame);for(let i=0;i<Math.min(4,total);i++)this.requestPage(a.assetId,a.cache,i);if(position<a.frames)for(let i=0;i<6;i++)this.requestPage(a.assetId,a.cache,Math.min(total-1,Math.floor(position/this.pageFrames)+i));}}
-  resetDSP(){this.backingFX.reset();this.vocalFX.reset();this.vocalDSP.reset();for(const t of this.tracks.values())t.dsp.reset();this.backingL.fill(0);this.backingR.fill(0);this.masterHistory.fill(this.masterVolume);this.masterCurrent=this.masterVolume;}
+  resetDSP(){this.backingFX.reset();this.vocalFX.reset();this.vocalDSP.reset();for(const t of this.tracks.values())t.dsp.reset();this.backingL.fill(0);this.backingR.fill(0);this.masterHistory.fill(this.masterVolume);this.masterCurrent=this.masterVolume;this.clickRemaining=0;}
   process(input,outputL,outputR){
     const size=outputL.length;this.prefetch();let anySolo=false;for(const t of this.tracks.values())if(t.track.solo)anySolo=true;
     for(let i=0;i<size;i++){
@@ -191,6 +220,7 @@ export class LoopEngine {
       while(this.inputMixQueue.length&&this.inputMixQueue[0].clock<=this.clock)this.vocalDSP.setMix(this.inputMixQueue.shift().mix);
       if(this.audition?.status==='playing'&&this.frame>=this.audition.endFrame+this.audition.tailFrames)this.endAudition();
       let c=this.capture;
+      if(c?.status==='counting'&&this.clock>=c.startAtClock){this.frame=0;c.status='arming';c.targetFrame=0;}
       // Sections and capture share one boundary. Snapshot the settings actually
       // used by the first sample, including a section queued for this boundary.
       if(this.pendingSection&&this.frame>=this.pendingSection.frame){this.applySection(this.pendingSection.section);anySolo=false;for(let ti=0;ti<this.trackList.length;ti++)if(this.trackList[ti].track.solo)anySolo=true;}
@@ -220,15 +250,16 @@ export class LoopEngine {
       this.vocalDSP.process(voiceInput,true);this.vocalFX.process(this.vocalDSP.left*this.vocalDSP.mix.reverb,this.vocalDSP.right*this.vocalDSP.mix.reverb,this.vocalDSP.left*this.vocalDSP.mix.delay,this.vocalDSP.right*this.vocalDSP.mix.delay);const voiceL=this.vocalDSP.left+this.vocalFX.left,voiceR=this.vocalDSP.right+this.vocalFX.right;
       let previewL=0,previewR=0;if(this.preview){const p=this.preview,cache=p.cache;if(p.position<p.frames){const value=cache?.sample(p.position);if(Number.isFinite(value)){previewL=value*.6;previewR=value*.6;}p.position++;}else{this.preview=null;this.dropUnusedCaches();this.emit('preview-end');}}
       const masterL=softCeiling((recordL+voiceL)*recordGain),masterR=softCeiling((recordR+voiceR)*recordGain);
-      const hearVoice=this.monitor||this.audition?.status==='playing';const l=softCeiling((dryL+(hearVoice?voiceL:0)+previewL)*this.masterCurrent),r=softCeiling((dryR+(hearVoice?voiceR:0)+previewR)*this.masterCurrent);outputL[i]=l;if(outputR)outputR[i]=r;this.outputPeak=Math.max(this.outputPeak,Math.abs(l),Math.abs(r));
+      // The dry click enters only the monitor branch, after the capture tap.
+      const click=this.clickSample(),hearVoice=this.monitor||this.audition?.status==='playing';const l=softCeiling((dryL+(hearVoice?voiceL:0)+previewL+click)*this.masterCurrent),r=softCeiling((dryR+(hearVoice?voiceR:0)+previewR+click)*this.masterCurrent);outputL[i]=l;if(outputR)outputR[i]=r;this.outputPeak=Math.max(this.outputPeak,Math.abs(l),Math.abs(r));
       c=this.capture;
       if(c&&c.startClock!==null&&this.clock>=c.startClock+c.compensation){
         if(c.endClock!==null&&this.clock>=c.endClock+c.compensation){this.completeCapture(c.endFrame-c.startFrame<c.minFrames?'interrupted':'complete');}
         else if(!c.raw.reserve()||(c.master&&!c.master.reserve())){this.emit('error',{message:'Recording stopped because storage could not keep up. The recorded prefix was retained.',captureId:c.id});this.abortCapture('write-buffer-exhausted');}
         else{c.cache.write(c.raw.frames,raw);c.raw.write(raw);c.master?.write(masterL,masterR);}
       }
-      if(this.playing)this.frame++;this.clock++;this.meterFrames++;
-      if(this.meterFrames>=this.meterInterval){const active=this.capture;this.emit('meter',{inputLevel:this.inputPeak,inputRms:Math.sqrt(this.inputSquares/this.meterFrames),outputLevel:this.outputPeak,playing:this.playing,baseFrames:this.baseFrames,audition:this.auditionState(),capture:active?{id:active.id,captureId:active.id,kind:active.kind,status:active.status,startFrame:active.startFrame,elapsedFrames:active.raw.frames,targetFrames:active.lengthFrames||0}:null});this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;}
+      if(this.playing&&this.capture?.status!=='counting')this.frame++;this.clock++;this.meterFrames++;
+      if(this.meterFrames>=this.meterInterval){this.emit('meter',{inputLevel:this.inputPeak,inputRms:Math.sqrt(this.inputSquares/this.meterFrames),outputLevel:this.outputPeak,playing:this.playing,baseFrames:this.baseFrames,audition:this.auditionState(),capture:this.captureState()});this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;}
     }
     return true;
   }

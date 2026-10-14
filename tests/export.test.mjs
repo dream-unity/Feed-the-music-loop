@@ -293,3 +293,18 @@ test('cancelling while the new project commits waits for the commit then removes
   await assert.rejects(importProject(storage, blob, { signal: controller.signal }), { name: 'AbortError' });
   assert.equal(storage.projects.size, 1); assert.equal(storage.assets.size, 4); assert.ok(storage.projects.has(project.id));
 });
+
+test('cancelled WAV preparation never starts a file read after cancellation', async () => {
+  for (const format of ['single', 'parts']) {
+    for (const stage of ['before', 'metadata']) {
+      const { storage } = await fixture(), controller = new AbortController(), get = storage.getAsset.bind(storage);
+      let metadataReads = 0, fileReads = 0;
+      if (stage === 'before') controller.abort();
+      storage.getAsset = async (...args) => { metadataReads++; const result = await get(...args); if (stage === 'metadata') controller.abort(); return result; };
+      storage.getAssetFile = async () => { fileReads++; throw new Error('File read should not start'); };
+      const operation = format === 'single' ? exportWav(storage, 'master-audio', { signal: controller.signal }) : exportWavParts(storage, 'master-audio', { signal: controller.signal }).next();
+      await assert.rejects(operation, { name: 'AbortError' });
+      assert.equal(fileReads, 0); assert.equal(metadataReads, stage === 'before' ? 0 : 1);
+    }
+  }
+});

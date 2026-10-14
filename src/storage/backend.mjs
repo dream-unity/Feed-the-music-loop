@@ -282,7 +282,14 @@ export class BrowserBackend {
     const project = await this.loadProject(projectId);
     // Keep an interrupted purge discoverable, with its metadata, until every
     // owned file and page transaction has succeeded.
-    if (project) await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() });
+    if (project) {
+      try { await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() }); }
+      catch (error) {
+        // Deletion must still free space when there is not even enough quota
+        // for this optional marker. Existing metadata remains the retry index.
+        if (error.name !== 'QuotaExceededError') throw error;
+      }
+    }
     let deletedAssets = 0, freedAudioBytes = 0;
     try {
       for (const asset of assets) {

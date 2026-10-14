@@ -5,6 +5,7 @@ const backend = new BrowserBackend();
 const journal = new AssetJournal(backend);
 const queue = new FairQueue();
 const ports = new Set();
+const releasedProjects = new Set();
 let initializing;
 let disposed = false;
 const initialize = () => initializing ||= backend.init();
@@ -13,6 +14,10 @@ const serializeError = (error) => error?.name === 'QuotaExceededError'
   : { name: error?.name || 'Error', code: error?.code || error?.name || 'STORAGE_ERROR', message: error?.message || String(error) };
 const notify = (event, detail) => self.postMessage({ type: 'event', event, detail });
 const progress = (asset, extra = {}) => notify('progress', { assetId: asset.id, projectId: asset.projectId, frames: asset.frames, checkpointFrames: asset.checkpointFrames, pageCount: asset.pageCount, status: asset.status, saved: asset.status !== 'recording', ...queue.stats, ...extra });
+async function assertReadable(id) {
+  const asset = await journal.get(id);
+  if (releasedProjects.has(asset.projectId)) throw storageError('PROJECT_RELEASED', 'This project was closed. Reopen it before reading its audio.');
+}
 
 async function seal(id, options) {
   const asset = await journal.finish(id, options);
@@ -38,11 +43,11 @@ const methods = {
       for (const [assetId, asset] of journal.assets) if (asset.projectId === id && asset.status !== 'recording') { journal.assets.delete(assetId); journal.failures.delete(assetId); }
     }
   },
-  beginAsset: ([metadata]) => journal.begin(metadata),
+  beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); return asset; },
   finishAsset: ([id, options]) => seal(id, options),
   getAsset: async ([id]) => ({ ...await journal.get(id) }),
   listAssets: ([projectId]) => backend.listAssets(projectId),
-  readPage: ([id, index]) => journal.read(id, index),
+  readPage: async ([id, index]) => { await assertReadable(id); return journal.read(id, index); },
   putPage: async ([id, index, buffer, frames, channels]) => {
     const result = await journal.write(id, index, buffer, frames, channels);
     progress(result.asset); return { ...result.page, checkpointFrames: result.asset.checkpointFrames };
@@ -53,6 +58,8 @@ const methods = {
   requestPersistence: async () => ({ persistent: await navigator.storage?.persist?.() || false, ...(await backend.estimate()) }),
   recover: async ([projectId, options = {}]) => {
     validId(projectId, 'Project');
+    // A failed writer lock still permits opening this project read only.
+    releasedProjects.delete(projectId);
     await backend.lockProject(projectId);
     const assets = await backend.listAssets(projectId), recovered = [];
     for (const asset of assets) {
@@ -68,11 +75,15 @@ const methods = {
     return recovered;
   },
   releaseProject: async ([projectId]) => {
-    for (const asset of journal.assets.values()) {
-      if (asset.projectId === projectId) {
-        if (asset.status === 'recording') throw storageError('RECORDING_ACTIVE', 'Finish recording before closing this project.');
-        backend.closeHandle(asset.id); journal.assets.delete(asset.id);
-      }
+    validId(projectId, 'Project');
+    const assets = [...journal.assets.values()].filter(asset => asset.projectId === projectId);
+    if (assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording before closing this project.');
+    // Fair scheduling may leave old worklet read messages behind this command.
+    // Fence them before closing handles so they cannot reopen an old file after
+    // another tab is allowed to acquire this project's writer lock.
+    releasedProjects.add(projectId);
+    for (const asset of assets) {
+      backend.closeHandle(asset.id); journal.assets.delete(asset.id);
     }
     return backend.releaseProject(projectId);
   },
@@ -96,6 +107,7 @@ function attachPort(port) {
         port.postMessage({ type: 'written', assetId: data.assetId, index: data.index, frames: data.frames, checkpointFrames: result.asset.checkpointFrames });
         progress(result.asset);
       } else if (type === 'read') {
+        await assertReadable(data.assetId);
         const result = await journal.read(data.assetId, data.index);
         if (result.missing) port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: result.retryable });
         else port.postMessage({ type: 'page', assetId: data.assetId, ...result }, [result.buffer]);
@@ -106,6 +118,7 @@ function attachPort(port) {
     };
     queue.add(run, { read: type === 'read', bytes: type === 'write' ? data.buffer?.byteLength || 0 : 0 })
       .catch(async (error) => {
+        if (type === 'read' && error.code === 'PROJECT_RELEASED') { port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: false }); return; }
         if (type !== 'read') journal.fail(data.assetId, error);
         const detail = { assetId: data.assetId, index: data.index, ...serializeError(error), operation: type };
         port.postMessage({ type: 'storage-error', ...detail });

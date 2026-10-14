@@ -9,7 +9,28 @@ const modulo = (value, divisor) => ((value % divisor) + divisor) % divisor;
  * No complete recording, offline AudioBuffer or full output is held in memory. */
 export async function renderMixFrames(plan, { readPage, writePage, onProgress, signal } = {}) {
   const reads = new Map();
+  const sources = new Map(plan.sourceAssets.map(asset => [asset.id, asset]));
+  const readQueue = [];
+  let activeReads = 0;
   let failure = null;
+  const checkedRead = async (id, index) => {
+    signal?.throwIfAborted();
+    const asset = sources.get(id), expectedFrames = asset && Math.min(PAGE_FRAMES, asset.frames - index * PAGE_FRAMES);
+    if (!asset || !Number.isSafeInteger(index) || index < 0 || expectedFrames < 1) throw new Error('The renderer requested an invalid audio page.');
+    const page = await readPage(id, index);
+    signal?.throwIfAborted();
+    if (!page || page.frames !== expectedFrames || page.channels !== asset.channels || !(page.buffer instanceof ArrayBuffer) || page.buffer.byteLength !== expectedFrames * asset.channels * 4) throw new Error('A recording page has an inconsistent saved length or channel count.');
+    return page;
+  };
+  // A large arrangement must not flood the storage worker's bounded queue.
+  // This caps actual IO even if many independent consumers prefetch together.
+  const pumpReads = () => {
+    while (activeReads < 32 && readQueue.length) {
+      const task = readQueue.shift(); activeReads++;
+      Promise.resolve().then(() => { if (failure) throw failure; return checkedRead(task.id, task.index); }).then(task.resolve, task.reject).finally(() => { activeReads--; pumpReads(); });
+    }
+  };
+  const queuedRead = (id, index) => new Promise((resolve, reject) => { readQueue.push({ id, index, resolve, reject }); pumpReads(); });
   const engine = new LoopEngine({ sampleRate: plan.sampleRate, pageFrames: PAGE_FRAMES, post: message => {
     if (message.type === 'error' || message.type === 'underrun') failure ??= new Error(message.message || `A recording page was unavailable at frame ${message.frame}.`);
   } });
@@ -17,8 +38,7 @@ export async function renderMixFrames(plan, { readPage, writePage, onProgress, s
     if (message.type !== 'read') return;
     const key = `${message.assetId}:${message.index}`;
     if (reads.has(key)) return;
-    const pending = Promise.resolve().then(() => readPage(message.assetId, message.index)).then(page => {
-      if (!page || !(page.buffer instanceof ArrayBuffer)) throw new Error('A recording page could not be read.');
+    const pending = queuedRead(message.assetId, message.index).then(page => {
       engine.receivePage({ ...page, type: 'page', assetId: message.assetId, index: message.index });
     }).catch(error => { failure ??= error; }).finally(() => reads.delete(key));
     reads.set(key, pending);
@@ -107,7 +127,7 @@ export async function renderMixFrames(plan, { readPage, writePage, onProgress, s
     if (plan.vocal && relative >= 0 && relative < Math.min(plan.vocal.frames, plan.bodyFrames)) {
       const index = Math.floor(relative / PAGE_FRAMES), offset = modulo(relative, PAGE_FRAMES);
       if (voicePageIndex !== index) {
-        const page = await readPage(plan.vocal.assetId, index);
+        const page = await checkedRead(plan.vocal.assetId, index);
         if (!page || page.channels !== 1 || !(page.buffer instanceof ArrayBuffer)) throw new Error('The dry vocal recording page is invalid.');
         voicePage = new Float32Array(page.buffer, 0, page.frames); voicePageIndex = index;
       }

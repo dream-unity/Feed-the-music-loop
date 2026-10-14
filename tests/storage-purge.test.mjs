@@ -102,6 +102,13 @@ test('unavailable OPFS never discards the only index of undeleted audio', async 
   assert.equal(disk.assets.has('loop-a'), true); assert.equal(disk.pages.has('loop-a'), true);
 });
 
+test('a full disk can still be purged when even the optional deletion marker cannot be saved', async () => {
+  const disk = new FakeDiskBackend(); disk.add('loop-a', 'project-a');
+  disk.put = async () => { throw Object.assign(new Error('Storage full'), { name: 'QuotaExceededError' }); };
+  const result = await disk.purgeProject('project-a');
+  assert.equal(result.purged, true); assert.equal(disk.assets.size, 0); assert.equal(disk.projects.size, 0);
+});
+
 test('projectUsage totals audio metadata without reading PCM and includes mixes', async () => {
   const disk = new FakeDiskBackend(); disk.add('loop-a', 'project-a', 'loop', 'opfs', 'complete', 100); disk.add('mix-a', 'project-a', 'mix', 'opfs', 'complete', 200); disk.add('take-a', 'project-a', 'vocal', 'indexeddb', 'recording', 50); disk.add('foreign', 'project-b', 'mix');
   disk.readData = () => assert.fail('Usage must not read audio'); disk.openHandle = () => assert.fail('Usage must not open audio files');

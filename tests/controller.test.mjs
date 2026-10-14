@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { StudioController } from '../src/controller.mjs';
-import { createProject, createTrack, clone } from '../src/project.mjs';
+import { createProject, createTrack, clone, MAX_TRACKS } from '../src/project.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -13,7 +13,9 @@ class FakeStorage extends EventTarget {
   async loadProject(id) { return clone(this.projects.get(id)); }
   async saveProject(project) { if (this.saveHook) await this.saveHook(project); this.saved.push(clone(project)); this.projects.set(project.id, clone(project)); return { saved: true }; }
   async beginAsset(asset) { this.beginCalls.push(clone(asset)); if (this.beginHook) await this.beginHook(asset); this.assets.set(asset.id, { ...clone(asset), frames: 0, checkpointFrames: 0, status: 'recording' }); }
-  async finishAsset(id, options = {}) { this.finishCalls.push({ id, ...options }); if (this.finishHook) await this.finishHook(id, options); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); Object.assign(asset, { ...options, frames: asset.frames }); return clone(asset); }
+  async finishAsset(id, options = {}) { this.finishCalls.push({ id, ...options }); if (this.finishHook) await this.finishHook(id, options); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); Object.assign(asset, { ...options, status: options.status || 'complete', frames: asset.frames }); return clone(asset); }
+  async putPage(id, index, buffer, frames) { const asset=this.assets.get(id); asset.frames+=frames; asset.checkpointFrames=asset.frames; }
+  async deleteAsset(id) { this.assets.delete(id); }
   async getAsset(id) { if (this.readHook) await this.readHook(id); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); return clone(asset); }
   async recover() { if (this.recoverError) throw this.recoverError; return []; }
   async releaseProject(id) { this.released.push(id); }
@@ -27,6 +29,7 @@ class FakeEngine {
   constructor() { this.commands = []; this.micHook = null; }
   async enableMic() { if (this.micHook) await this.micHook(); }
   configure(project) { this.commands.push({ type: 'configure', id: project.id }); }
+  syncTracks(tracks) { this.commands.push({ type: 'sync-tracks', ids: tracks.map(track => track.id) }); }
   arm(capture) { this.commands.push({ type: 'arm', capture }); }
   cancel() { this.commands.push({ type: 'cancel' }); }
   stop() { this.commands.push({ type: 'stop' }); }
@@ -57,6 +60,87 @@ function finishedCapture(f, { kind = 'vocal', rawStatus = 'complete', masterStat
   controller.state.capture = { kind, status: 'finishing' };
   return done;
 }
+test('a dead storage worker stops the microphone and transport without waiting forever for sealing', async () => {
+  const f=fixture(); const done=finishedCapture(f);
+  f.controller.state.playing=true; f.controller.state.micEnabled=true;
+  await f.controller.storageFailed('Storage worker crashed');
+  await done.promise;
+  assert.equal(f.controller.pending,null);assert.equal(f.controller.engine,null);
+  assert.equal(f.controller.state.capture,null);assert.equal(f.controller.state.playing,false);
+  assert.equal(f.controller.state.micEnabled,false);assert.equal(f.controller.state.storageFailed,true);
+  assert.ok(f.engine.commands.some(command=>command.type==='close'));
+  assert.equal(f.storage.assets.get('raw-1').frames,100);assert.equal(f.storage.saved.length,0);
+  assert.ok(f.controller.state.project.pendingCapture,'persisted intent remains available for recovery');
+  await assert.rejects(f.controller.handle({type:'add-loop'}),/Reopen the studio/);
+  await f.controller.handle({type:'dismiss-error'});assert.match(f.controller.state.error,/Reopen the studio/);
+});
+test('a failed audio processor is retired so the next user gesture can open a fresh engine', async () => {
+  const f=fixture(); f.controller.state.playing=true;f.controller.state.micEnabled=true;
+  await f.controller.recoverAudioEngine('Audio processor crashed');
+  assert.equal(f.controller.engine,null);assert.equal(f.controller.state.playing,false);assert.equal(f.controller.state.micEnabled,false);
+  assert.ok(f.engine.commands.some(command=>command.type==='close'));
+  assert.match(f.controller.state.error,/fresh audio session/);
+  assert.equal(f.controller.state.storageFailed,undefined);
+});
+test('canceling permanent project deletion leaves recordings and playback untouched', async () => {
+  const f=fixture();f.storage.projects.set(f.controller.state.project.id,clone(f.controller.state.project));
+  f.ui.confirm=async()=>false;f.storage.purgeProject=()=>{throw new Error('must not purge');};
+  await f.controller.deleteProject(f.controller.state.project.id);
+  assert.equal(f.engine.commands.length,0);assert.equal(f.storage.projects.size,1);
+});
+
+test('a failed recovery seal still closes the dead processor and preserves capture intent', async () => {
+  const f=fixture(); const done=finishedCapture(f); f.controller.pending.ended=false;
+  f.storage.finishHook=()=>{throw new Error('Seal unavailable');};
+  f.storage.readHook=()=>{throw new Error('Checkpoint temporarily unavailable');};
+  await f.controller.recoverAudioEngine('Audio processor crashed'); await done.promise;
+  assert.equal(f.controller.engine,null); assert.equal(f.controller.pending,null);
+  assert.equal(f.controller.state.capture,null); assert.equal(f.controller.state.busy,false);
+  assert.ok(f.engine.commands.some(command=>command.type==='close'));
+  assert.ok(f.controller.state.project.pendingCapture);
+  assert.match(f.controller.state.error,/Reopen this project/);
+  assert.equal(f.storage.assets.get('raw-1').frames,100);
+});
+
+test('concurrent project opening cannot let a slow earlier request replace a later selection', async () => {
+  const f=fixture(), load=deferred(), first=createProject('First'), second=createProject('Second');
+  f.storage.projects.set(first.id,first);f.storage.projects.set(second.id,second);
+  f.storage.loadProject=async id=>{if(id===first.id)await load.promise;return clone(f.storage.projects.get(id));};
+  const opening=f.controller.openProject(first.id); await tick();
+  await assert.rejects(f.controller.openProject(second.id),/still opening/);
+  load.resolve();await opening;
+  assert.equal(f.controller.state.project.id,first.id);
+  await f.controller.openProject(second.id);assert.equal(f.controller.state.project.id,second.id);
+});
+
+test('a completed older save does not change the timestamp or status of another project', async () => {
+  const f=fixture(), save=deferred();f.storage.saveHook=()=>save.promise;
+  const old=f.controller.state.project, saving=f.controller.saveNow();await tick();
+  const next=createProject('Different project');next.updatedAt='2000-01-01T00:00:00.000Z';
+  f.controller.state.project=next;f.controller.state.status='Opening different project';save.resolve();await saving;
+  assert.equal(f.storage.saved.at(-1).id,old.id);assert.equal(next.updatedAt,'2000-01-01T00:00:00.000Z');
+  assert.equal(f.controller.state.status,'Opening different project');
+});
+
+test('reopening exposes audio named by an unfinished capture intent for recovery', async () => {
+  const f=fixture(), project=createProject('Interrupted song');
+  project.pendingCapture={id:'capture-1',assetId:'raw-pending',masterAssetId:'master-pending'};
+  f.storage.projects.set(project.id,project);
+  for(const [id,channels] of [['raw-pending',1],['master-pending',2]]) f.storage.assets.set(id,{id,projectId:project.id,channels,sampleRate:48000,frames:128,status:'recovered'});
+  await f.controller.openProject(project.id);
+  assert.deepEqual(new Set(f.controller.state.recovered.map(asset=>asset.id)),new Set(['raw-pending','master-pending']));
+  assert.ok(f.ui.notifications.some(item=>/unfinished recording was recovered/i.test(item.message)));
+});
+
+test('Stop cancels recorded playback preparation without creating a late audio player', async () => {
+  const f=fixture(), read=deferred(), id='preview-raw';
+  f.storage.assets.set(id,{id,frames:128,channels:1,sampleRate:48000,status:'complete',name:'Take'});
+  f.storage.getAssetFile=async()=>{await read.promise;return new Blob([new Float32Array(128)]);};
+  const preparing=f.controller.previewRecordedAsset(id,'Take');await tick();
+  assert.equal(f.controller.state.previewPreparing.name,'Take');
+  await f.controller.handle({type:'stop'});assert.equal(f.controller.state.previewPreparing,null);
+  read.resolve();await preparing;assert.equal(f.controller.state.preview,null);assert.equal(f.controller.urls.size,0);
+});
 
 test('a performance commits only after both raw vocal and master seal', async () => {
   const f = fixture(); finishedCapture(f); const masterSeal = f.controller.sealed.get('master-1'); f.controller.sealed.delete('master-1');
@@ -209,11 +293,13 @@ test('export owns the UI before its pending save and prevents capture or a secon
 test('edited export delegates default performance duration and honors explicit durations', async () => {
   const f = fixture(); f.controller.state.project.takes.push({ id: 'take-x', assetId: 'raw-x', frames: 400, startFrame: 0, performanceId: 'perf-x' }); f.controller.state.project.selectedTakeId = 'take-x';
   const requests = [], downloads = [];
+  f.storage.assets.set('render-x',{id:'render-x',kind:'mix',name:'Edited mix',frames:100,channels:2,sampleRate:48000,status:'complete'});
   f.controller.renderMix = async (project, options) => { requests.push(options); return { assetId: 'render-x' }; };
   f.controller.offerAudioDownload = async (...args) => downloads.push(args);
   await f.controller.exportMix({}); await f.controller.exportMix({ durationSeconds: 3.5 });
   assert.equal(Object.hasOwn(requests[0], 'durationSeconds'), false); assert.equal(requests[0].performanceId, 'perf-x');
   assert.equal(requests[1].durationSeconds, 3.5); assert.equal(downloads[0][0], 'render-x');
+  assert.equal(f.controller.state.recovered.length,1,'saved mixes remain immediately reachable without duplicate cards');
   await assert.rejects(f.controller.exportMix({ durationSeconds: -2 }), /positive export duration/);
 });
 
@@ -231,4 +317,110 @@ test('live audition start/end and Stop expose truthful transport state', async (
   assert.equal(f.controller.state.audition, null); assert.equal(f.controller.state.playing, false);
   f.controller.state.project.input.monitor = true; f.controller.state.monitor = true;
   await f.controller.handle({ type: 'stop' }); assert.equal(f.controller.state.monitor, false);
+});
+
+function importedFile(f, frames = 24) {
+  const channels = [Float32Array.from({ length: frames }, (_, i) => i / frames)];
+  f.engine.context = { decodeAudioData: async () => ({ length: frames, numberOfChannels: 1, getChannelData: c => channels[c] }) };
+  return { name: 'voice.wav', size: frames * 4, arrayBuffer: async () => new ArrayBuffer(frames * 4) };
+}
+function recoverable(f, overrides = {}) {
+  const asset = { id: 'recover-1', projectId: f.controller.state.project.id, sampleRate: f.controller.state.project.sampleRate, channels: 1, kind: 'loop', status: 'interrupted', frames: 100, checkpointFrames: 100, ...overrides };
+  f.storage.assets.set(asset.id, asset); f.controller.state.recovered.push(clone(asset)); return asset;
+}
+
+test('import reserves its operation before audio readiness and Stop prevents a delayed import', async () => {
+  const f = fixture(), file = importedFile(f), ready = deferred(); f.controller.ensureAudio = () => ready.promise;
+  const importing = f.controller.importAudio(file);
+  assert.equal(f.controller.state.busy, true);
+  await assert.rejects(f.controller.importAudio(file), /current operation/);
+  await f.controller.handle({ type: 'stop' }); ready.resolve(f.engine); await importing;
+  assert.equal(f.storage.beginCalls.length, 0); assert.equal(f.controller.state.project.tracks.length, 0);
+  assert.equal(f.controller.state.busy, false); assert.equal(f.controller.importOperation, null);
+});
+
+for (const stage of ['decode', 'seal', 'summary']) {
+  test(`Stop during import ${stage} cannot attach late audio and cleans only the new asset`, async () => {
+    const f = fixture(), file = importedFile(f), gate = deferred(); recoverable(f);
+    if (stage === 'decode') { const decoded = await f.engine.context.decodeAudioData(); f.engine.context.decodeAudioData = async () => { await gate.promise; return decoded; }; }
+    if (stage === 'seal') { let first = true; f.storage.finishHook = async () => { if (first) { first = false; await gate.promise; } }; }
+    if (stage === 'summary') f.controller.summarize = async () => { await gate.promise; return []; };
+    const importing = f.controller.importAudio(file); await tick();
+    await f.controller.handle({ type: 'stop' }); gate.resolve(); await importing;
+    assert.equal(f.controller.state.project.tracks.length, 0);
+    assert.deepEqual([...f.storage.assets.keys()], ['recover-1']);
+    assert.equal(f.ui.notifications.some(item => item.kind === 'success'), false);
+    assert.equal(f.controller.state.busy, false);
+  });
+}
+
+test('project switching during import summary cannot attach to either project', async () => {
+  const f = fixture(), file = importedFile(f), gate = deferred(), original = f.controller.state.project, next = createProject('Next song');
+  f.storage.projects.set(next.id, clone(next)); f.controller.summarize = async () => { await gate.promise; return []; };
+  const importing = f.controller.importAudio(file); await tick(); await f.controller.openProject(next.id);
+  gate.resolve(); await importing;
+  assert.equal(f.controller.state.project.id, next.id); assert.equal(f.controller.state.project.tracks.length, 0);
+  assert.equal(original.tracks.length, 0); assert.equal(f.storage.assets.size, 0); assert.equal(f.controller.state.status, 'Saved on this device');
+});
+
+test('import metadata failure retains attached audio for a save retry', async () => {
+  const f = fixture(), file = importedFile(f); f.storage.saveHook = () => { throw new Error('Metadata disk full'); };
+  await assert.rejects(f.controller.importAudio(file), /Metadata disk full/);
+  assert.equal(f.controller.state.project.tracks.length, 1); assert.equal(f.storage.assets.size, 1);
+  assert.equal([...f.storage.assets.values()][0].status, 'complete'); assert.equal(f.controller.state.busy, false);
+  assert.equal(f.ui.notifications.some(item => item.kind === 'success'), false);
+});
+
+test('recovery validates project ownership before scanning or publishing audio', async () => {
+  const f = fixture(); recoverable(f, { projectId: 'foreign-project' });
+  f.storage.recover = () => { throw new Error('must not recover foreign assets'); };
+  await assert.rejects(f.controller.recoverAsset('recover-1'), /different project/);
+  assert.equal(f.controller.state.project.tracks.length, 0); assert.equal(f.storage.assets.size, 1); assert.equal(f.controller.state.busy, false);
+});
+
+test('recovery rejects duplicate in-flight requests and is idempotent after publication', async () => {
+  const f = fixture(), gate = deferred(); recoverable(f); f.controller.summarize = async () => { await gate.promise; return []; };
+  const recovering = f.controller.recoverAsset('recover-1'); await tick();
+  await assert.rejects(f.controller.recoverAsset('recover-1'), /current operation/);
+  gate.resolve(); await recovering; await f.controller.recoverAsset('recover-1');
+  assert.equal(f.controller.state.project.tracks.length, 1); assert.equal(f.storage.saved.length, 1);
+  assert.equal(f.controller.recoveryOperation, null); assert.equal(f.controller.state.busy, false);
+});
+
+test('Stop and project switching cancel recovery without deleting saved audio', async () => {
+  const f = fixture(), gate = deferred(), original = f.controller.state.project, next = createProject('Another song');
+  recoverable(f); f.storage.projects.set(next.id, clone(next)); f.controller.summarize = async () => { await gate.promise; return []; };
+  const recovering = f.controller.recoverAsset('recover-1'); await tick(); await f.controller.handle({ type: 'stop' }); await f.controller.openProject(next.id);
+  gate.resolve(); await recovering;
+  assert.equal(original.tracks.length, 0); assert.equal(f.controller.state.project.id, next.id); assert.equal(f.controller.state.project.tracks.length, 0);
+  assert.equal(f.storage.assets.get('recover-1').frames, 100); assert.equal(f.controller.state.busy, false); assert.equal(f.controller.state.status, 'Saved on this device');
+});
+
+test('recovering an older vocal preserves unrelated pending capture intent and automation', async () => {
+  const f = fixture(); recoverable(f, { kind: 'vocal', captureId: 'old-capture' }); recoverable(f, { id: 'old-master', kind: 'master', channels: 2, leadAssetId: 'recover-1', captureId: 'old-capture' });
+  recoverable(f, { id: 'new-raw', kind: 'vocal', captureId: 'new-capture' });
+  const pending = { id: 'new-capture', assetId: 'new-raw', startFrame: 800, sealedThroughFrame: 900, events: [{ type: 'gain', frame: 850 }], initialState: { frame: 800, sentinel: 'unrelated' } };
+  f.controller.state.project.pendingCapture = clone(pending);
+  await f.controller.recoverAsset('recover-1');
+  assert.deepEqual(f.controller.state.project.pendingCapture, pending);
+  assert.equal(f.controller.state.project.takes[0].startFrame, 0); assert.equal(f.controller.state.project.takes[0].role, 'lead');
+  assert.deepEqual(f.controller.state.project.performances[0].events, []); assert.equal(f.controller.state.project.performances[0].initialState.sentinel, undefined);
+  assert.deepEqual(f.controller.state.recovered.map(asset => asset.id), ['new-raw']);
+});
+
+test('recovery uses and clears only matching persisted capture intent', async () => {
+  const f = fixture(); recoverable(f, { kind: 'vocal' }); recoverable(f, { id: 'master', kind: 'master', channels: 2, leadAssetId: 'recover-1' });
+  f.controller.state.project.pendingCapture = { assetId: 'recover-1', startFrame: 200, sealedThroughFrame: 290, events: [{ type: 'mix', frame: 220 }], initialState: { frame: 200 } };
+  await f.controller.recoverAsset('recover-1');
+  assert.equal(f.controller.state.project.pendingCapture, undefined); assert.equal(f.controller.state.project.takes[0].startFrame, 200);
+  assert.equal(f.controller.state.project.performances[0].editableFrames, 90); assert.equal(f.controller.state.project.performances[0].events[0].frame, 220);
+});
+
+test('recovery checks the layer limit before reading waveforms and immediately before publishing', async () => {
+  const f = fixture(); recoverable(f); f.controller.state.project.tracks = Array.from({ length: MAX_TRACKS }, (_, i) => createTrack({ assetId: `used-${i}`, frames: 10 }));
+  f.controller.summarize = () => { throw new Error('must not summarize full project'); };
+  await assert.rejects(f.controller.recoverAsset('recover-1'), /layer limit/); assert.equal(f.controller.state.project.tracks.length, MAX_TRACKS);
+  f.controller.state.project.tracks.pop(); const gate = deferred(); f.controller.summarize = async () => { await gate.promise; return []; };
+  const recovering = f.controller.recoverAsset('recover-1'); await tick(); f.controller.state.project.tracks.push(createTrack({ assetId: 'new-last', frames: 10 })); gate.resolve();
+  await assert.rejects(recovering, /layer limit/); assert.equal(f.controller.state.project.tracks.length, MAX_TRACKS); assert.equal(f.storage.assets.get('recover-1').frames, 100);
 });

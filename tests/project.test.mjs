@@ -35,3 +35,13 @@ test('section membership cannot be inherited from an object prototype', () => {
   p.tracks[0].id='safe-track'; p.tracks[0].assetId='__proto__';
   assert.throws(()=>validateProject(p),/identifier/);
 });
+test('optional click settings preserve older backups and reject unsafe timing', () => {
+  const p=createProject();
+  assert.deepEqual(validateProject(p).metronome,p.metronome);
+  for (const [key,value] of [['bpm',0],['beatsPerCycle',1.5],['countInBeats',999],['volume',Infinity]]) {
+    const broken=structuredClone(p);broken.metronome[key]=value;
+    assert.throws(()=>validateProject(broken),/Invalid project/);
+  }
+  delete p.metronome;
+  assert.equal(validateProject(p).metronome,undefined);
+});

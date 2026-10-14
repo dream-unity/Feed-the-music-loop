@@ -64,11 +64,11 @@ export class StudioUI extends EventTarget {
       <div class="header-actions"><button class="button icon-button help-button" data-action="help" aria-label="Studio guide">${icon('help')}</button><button class="button quiet" data-action="projects" aria-label="Projects" aria-haspopup="dialog">${icon('folder')}<span>Projects</span></button><button class="button quiet" data-action="export-menu" aria-label="Export music and project" aria-haspopup="dialog">${icon('download')}<span>Export</span></button></div>
     </header>
     <main id="workspace" tabindex="-1">
-      <div class="status-banner" data-ref="banner" role="status" hidden><span data-ref="banner-text"></span><button class="button icon-button" data-action="dismiss-error" data-ref="banner-dismiss" aria-label="Dismiss error message" hidden>${icon('close')}</button></div>
+      <div class="status-banner" data-ref="banner" role="status" hidden><span data-ref="banner-text"></span><button class="button quiet" data-action="reload-studio" data-ref="banner-reload" hidden>Reopen studio</button><button class="button icon-button" data-action="dismiss-error" data-ref="banner-dismiss" aria-label="Dismiss error message" hidden>${icon('close')}</button></div>
       <section class="recovery-panel" data-ref="recovery" aria-label="Recovered recordings" hidden></section>
       <div class="workspace-top"><nav class="view-tabs" aria-label="Studio views"><button class="view-tab is-active" data-action="view" data-view="build" aria-current="page">${icon('layers')}<span>Build</span></button><button class="view-tab" data-action="view" data-view="song">${icon('song')}<span>Song</span></button><button class="view-tab" data-action="view" data-view="mix">${icon('sliders')}<span>Mix</span></button></nav><div class="studio-signals"><span class="local-badge" title="Recordings stay in this browser until you export them.">${icon('shield')}<span>Yours. On this device.</span></span><button class="mic-status" data-action="toggle-mic" data-testid="enable-mic"><span class="status-dot"></span><span data-ref="mic-label">Connect mic</span>${icon('mic')}</button></div></div>
       <section class="transport-panel" aria-label="Playback transport"><div class="transport-time"><span class="eyebrow" data-ref="transport-label">THE GROOVE</span><div class="time-display" data-ref="transport-time">0:00.0</div></div><div class="cycle-display"><div class="cycle-meta"><span data-ref="cycle-description">Your first loop sets the rhythm</span><span data-ref="cycle-position">FREE</span></div><div class="cycle-track"><div class="cycle-progress" data-ref="cycle-progress"></div><div class="cycle-ticks" aria-hidden="true"><i></i><i></i><i></i></div></div><div class="transport-caption"><span data-ref="track-count">No layers yet</span><span data-ref="sample-rate">LOCAL AUDIO STUDIO</span></div></div><div class="master-meter" aria-label="Master output level"><div class="meter-label">OUT</div><div class="meter-track"><div class="meter-fill" data-ref="output-meter"></div></div><span class="meter-value" data-ref="output-db">−∞</span></div><button class="button icon-button restart-button" data-action="seek-start" aria-label="Return to start" title="Return to start">${icon('rewind')}</button></section>
-      <section class="preview-panel" data-ref="preview-panel" aria-label="Recording preview" hidden><div class="preview-description">${icon('headphones')}<span><small>LISTEN BACK</small><strong data-ref="preview-name">Your performance</strong></span></div><audio id="performance-player" data-ref="preview-audio" controls preload="metadata"></audio><button class="button icon-button" data-action="close-preview" aria-label="Close recording preview">${icon('close')}</button></section>
+      <section class="preview-panel" data-ref="preview-panel" aria-label="Recording preview" hidden><div class="preview-description">${icon('headphones')}<span><small data-ref="preview-kind">LISTEN BACK</small><strong data-ref="preview-name">Your performance</strong></span></div><p class="preview-loading" data-ref="preview-loading" hidden>Preparing your recording. Stop cancels this.</p><audio id="performance-player" data-ref="preview-audio" controls preload="metadata"></audio><button class="button icon-button" data-action="close-preview" aria-label="Close recording preview">${icon('close')}</button></section>
       <section class="audition-panel" data-ref="audition-panel" aria-label="Live mix playback" hidden><div class="audition-symbol">${icon('headphones')}</div><div class="audition-copy"><span class="eyebrow">HEAR YOUR CHANGES</span><strong data-ref="audition-name">Live vocal mix</strong><div class="audition-progress-track"><div data-ref="audition-progress"></div></div></div><span class="audition-time" data-ref="audition-time">0:00.0</span><button class="button quiet" data-action="stop">${icon('stop')}Stop mix</button></section>
       <section class="downloads-panel" data-ref="downloads" aria-label="Ready downloads" hidden></section>
       <section class="export-progress-panel" data-ref="export-panel" aria-label="Export progress" hidden><div><strong data-ref="export-title">Preparing your audio…</strong><p data-ref="export-caption">Your recordings remain safe while this file is prepared.</p><div class="export-progress-track" role="progressbar" aria-label="Export completion" aria-valuemin="0" aria-valuemax="100" data-ref="export-progressbar"><div data-ref="export-progress"></div></div></div><button class="button quiet" data-action="cancel-export">${icon('close')}Cancel export</button></section>
@@ -85,13 +85,13 @@ export class StudioUI extends EventTarget {
           <section data-view-panel="song" class="view-panel" aria-label="Your song recordings" hidden><div class="section-heading"><div><span class="eyebrow">LET THE GROOVE CARRY YOU</span><h1>Make it a song<span class="heading-dot">.</span></h1></div></div><div class="song-hero"><div class="song-hero-icon">${icon('mic')}</div><div><h2>One continuous performance.</h2><p>Sing for as long as you need while your loops keep playing. Each take keeps your vocal and the complete song.</p></div><button class="button primary coral" data-action="sing">${icon('mic')}Sing over loops</button></div><div class="section-heading compact"><h2>Performances</h2><span class="quiet-label" data-ref="performance-count">0 recordings</span></div><div class="performance-list" data-ref="performances"></div><div class="section-heading compact takes-heading"><h2>Vocal takes</h2><span class="quiet-label">Your originals, kept separate</span></div><div class="take-list" data-ref="takes"></div></section>
           <section data-view-panel="mix" class="view-panel" aria-label="Mix your song" hidden><div class="section-heading"><div><span class="eyebrow">FIND YOUR SIGNATURE SOUND</span><h1>Shape the feeling<span class="heading-dot">.</span></h1></div></div><div class="mixer-channel-list" data-ref="mix-channels"></div><div class="mix-console" data-ref="mix-console"></div><section class="mix-guide"><h3>Make room for your voice.</h3><p>Start with the backing a little quieter than you expect. Place harmonies left and right, keep bass near the centre, and use a little shared space to bring the layers together.</p></section></section>
         </div>
-        <aside class="side-column" aria-label="Input and session controls"><section class="input-card"><div class="card-heading"><span class="eyebrow">YOUR INSTRUMENT</span>${icon('mic')}</div><h2>The human voice.</h2><div class="input-meter-row"><span>Mic level</span><div class="input-meter-track"><div data-ref="input-meter"></div></div><span data-ref="input-db">−∞</span></div><div data-ref="input-controls"></div><label class="toggle-row"><span>${icon('headphones')}Hear my mic</span><input type="checkbox" data-control="monitor" role="switch" aria-label="Hear my microphone through headphones"><span class="toggle" aria-hidden="true"></span></label><p class="help-copy">Use headphones for monitoring. Your voice is recorded even when monitoring is off.</p><div class="input-divider"></div><div class="loop-length"><label for="loop-length">New loop length</label><select id="loop-length" data-control="cycles"><option value="1">1 cycle · stay in sync</option><option value="2">2 cycles</option><option value="4">4 cycles</option><option value="custom">Custom cycles</option><option value="0">Free · finish when ready</option></select><label class="custom-cycles" data-ref="custom-cycles" hidden>Cycles<input type="number" min="1" max="64" value="3" data-control="custom-cycles" inputmode="numeric"></label><p class="help-copy" data-ref="length-help">Your first loop is free length. After that, new layers lock to your rhythm.</p></div></section><section class="master-card"><div class="card-heading"><span class="eyebrow">THE WHOLE PICTURE</span>${icon('sliders')}</div><div data-ref="master-controls"></div><button class="spotlight-button" data-action="spotlight" aria-pressed="false">${icon('spark')}<span>Spotlight<small>Hold to bring your voice forward</small></span></button></section><section class="session-card"><div class="card-heading"><span class="eyebrow">KEEP WHAT YOU CREATE</span>${icon('shield')}</div><p class="session-storage" data-ref="storage-label">Audio stays on this device.</p><div class="storage-bar"><div data-ref="storage-progress"></div></div><button class="text-button" data-action="export-project">Download project backup${icon('arrow')}</button><button class="text-button subtle" data-action="persist" data-ref="persist-button">Protect local storage${icon('arrow')}</button><details class="advanced-settings"><summary>Timing &amp; recording</summary><p class="help-copy">If your new layers sound late, adjust recording compensation. This depends on your headphones and microphone.</p><label class="number-field">Recording compensation<span><input type="number" min="0" max="1000" step="1" value="0" data-control="compensation" aria-label="Recording compensation in milliseconds">ms</span></label><p class="help-copy">Try small changes. Wired headphones usually make timing easier. A new audio device may need a different setting.</p><button class="button quiet full-width" data-action="mic-off">${icon('mic')}Disconnect microphone</button></details></section></aside>
+        <aside class="side-column" aria-label="Input and session controls"><section class="input-card"><div class="card-heading"><span class="eyebrow">YOUR INSTRUMENT</span>${icon('mic')}</div><h2>The human voice.</h2><div class="input-meter-row"><span>Mic level</span><div class="input-meter-track"><div data-ref="input-meter"></div></div><span data-ref="input-db">−∞</span></div><div data-ref="input-controls"></div><label class="toggle-row"><span>${icon('headphones')}Hear my mic</span><input type="checkbox" data-control="monitor" role="switch" aria-label="Hear my microphone through headphones"><span class="toggle" aria-hidden="true"></span></label><p class="help-copy">Use headphones for monitoring. Your voice is recorded even when monitoring is off.</p><div class="input-divider"></div><div class="loop-length"><label for="loop-length">New loop length</label><select id="loop-length" data-control="cycles"><option value="1">1 cycle · stay in sync</option><option value="2">2 cycles</option><option value="4">4 cycles</option><option value="custom">Custom cycles</option><option value="0">Free · finish when ready</option></select><label class="custom-cycles" data-ref="custom-cycles" hidden>Cycles<input type="number" min="1" max="64" value="3" data-control="custom-cycles" inputmode="numeric"></label><p class="help-copy" data-ref="length-help">Your first loop is free length. After that, new layers lock to your rhythm.</p></div></section><section class="master-card"><div class="card-heading"><span class="eyebrow">THE WHOLE PICTURE</span>${icon('sliders')}</div><div data-ref="master-controls"></div><button class="spotlight-button" data-action="spotlight" aria-pressed="false">${icon('spark')}<span>Spotlight<small>Hold to bring your voice forward</small></span></button></section><section class="session-card"><div class="card-heading"><span class="eyebrow">KEEP WHAT YOU CREATE</span>${icon('shield')}</div><p class="session-storage" data-ref="storage-label">Audio stays on this device.</p><div class="storage-bar"><div data-ref="storage-progress"></div></div><button class="text-button" data-action="export-project">Download project backup${icon('arrow')}</button><button class="text-button subtle" data-action="persist" data-ref="persist-button">Protect local storage${icon('arrow')}</button><button class="text-button subtle" data-action="manage-storage">Manage storage${icon('folder')}</button><details class="advanced-settings"><summary>Timing &amp; recording</summary><p class="help-copy">If your new layers sound late, adjust recording compensation. This depends on your headphones and microphone.</p><label class="number-field">Recording compensation<span><input type="number" min="0" max="1000" step="1" value="0" data-control="compensation" aria-label="Recording compensation in milliseconds">ms</span></label><p class="help-copy">Try small changes. Wired headphones usually make timing easier. A new audio device may need a different setting.</p><div class="metronome-controls" data-ref="metronome-controls"></div><button class="button quiet full-width" data-action="mic-off">${icon('mic')}Disconnect microphone</button></details></section></aside>
       </div>
       <div class="footnote"><span>Made of breath, rhythm &amp; possibility.</span><button class="text-button subtle" data-action="help">${icon('keyboard')}Studio guide &amp; shortcuts</button></div>
     </main>
     <div class="record-dock" aria-label="Recording controls"><div class="dock-status"><span class="dock-light" data-ref="dock-light"></span><div><strong data-ref="dock-label">Start with a sound.</strong><span data-ref="dock-caption">Your first loop is the beginning.</span></div></div><div class="dock-actions"><button class="button transport-button" data-action="play" data-testid="play" aria-label="Play loops">${icon('play')}</button><button class="button stop-button" data-action="stop" data-testid="stop" aria-label="Stop all audio" title="Stop all audio">${icon('stop')}</button><span class="dock-separator"></span><button class="button primary" data-action="add-loop" data-ref="dock-loop" data-testid="add-loop">${icon('plus')}<span>Add loop</span><kbd>R</kbd></button><button class="button primary coral" data-action="sing" data-ref="dock-sing" data-testid="sing">${icon('mic')}<span>Sing over loops</span><kbd>V</kbd></button><button class="button primary coral" data-action="finish" data-ref="dock-finish" data-testid="finish" hidden>${icon('check')}<span>Finish recording</span></button><button class="button quiet" data-action="cancel" data-ref="dock-cancel" data-testid="cancel" hidden>${icon('close')}<span>Cancel</span></button></div><div class="history-actions"><button class="button icon-button" data-action="undo" aria-label="Undo" title="Undo (Ctrl or ⌘ Z)">${icon('undo')}</button><button class="button icon-button" data-action="redo" aria-label="Redo" title="Redo (Ctrl or ⌘ Shift Z)">${icon('redo')}</button></div></div>
     <div class="toast-region" data-ref="toasts" aria-live="polite" aria-relevant="additions"></div>
-    <dialog class="studio-dialog" data-ref="dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-heading"><h2 id="dialog-title" data-ref="dialog-title"></h2><button type="button" class="button icon-button dialog-stop" data-action="stop" data-ref="dialog-stop" aria-label="Stop all audio" title="Stop all audio" hidden>${icon('stop')}</button><button class="button icon-button" value="cancel" formnovalidate aria-label="Close dialog">${icon('close')}</button></div><div data-ref="dialog-body"></div><div class="dialog-actions" data-ref="dialog-actions"></div></form></dialog>
+    <dialog class="studio-dialog" data-ref="dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-heading"><h2 id="dialog-title" data-ref="dialog-title" tabindex="-1"></h2><button type="button" class="button icon-button dialog-stop" data-action="stop" data-ref="dialog-stop" aria-label="Stop all audio" title="Stop all audio" hidden>${icon('stop')}</button><button type="button" class="button icon-button" data-dialog-close aria-label="Close dialog">${icon('close')}</button></div><div data-ref="dialog-body"></div><div class="dialog-actions" data-ref="dialog-actions"></div></form></dialog>
     <input type="file" data-ref="audio-file" accept="audio/*,.wav,.mp3,.ogg,.m4a,.webm,.flac" hidden><input type="file" data-ref="project-file" accept=".fml,application/octet-stream" hidden>
   `;}
 
@@ -102,28 +102,49 @@ export class StudioUI extends EventTarget {
     this.root.addEventListener('click',e=>this.onClick(e),{signal});
     this.root.addEventListener('input',e=>this.onInput(e),{signal});
     this.root.addEventListener('change',e=>this.onChange(e),{signal});
-    this.refs['audio-file'].addEventListener('change',e=>{if(e.target.files?.[0])this.emit('import-audio',{file:e.target.files[0]});e.target.value='';},{signal});
-    this.refs['project-file'].addEventListener('change',e=>{if(e.target.files?.[0])this.emit('import-project',{file:e.target.files[0]});e.target.value='';},{signal});
-    for(const type of ['play','pause','ended'])this.refs['preview-audio'].addEventListener(type,()=>{this.previewPlaying=!this.refs['preview-audio'].paused&&!this.refs['preview-audio'].ended;this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.previewPlaying);},{signal});
+    this.refs.dialog.addEventListener('submit',e=>{
+      if(!e.submitter&&!this.dialogRequest){e.preventDefault();this.refs.dialog.querySelector('[data-action="export-mix"]:not(:disabled)')?.click();return;}
+      this.settleDialog(e.submitter?.value||'confirm');
+    },{signal});
+    this.refs.dialog.addEventListener('cancel',()=>this.settleDialog('cancel'),{signal});
+    this.refs.dialog.addEventListener('close',()=>{
+      // A previous close event can arrive after this same dialog has reopened.
+      if(this.refs.dialog.open)return;
+      this.settleDialog(this.refs.dialog.returnValue);
+      const opener=this.dialogOpener;
+      if(opener?.isConnected&&!opener.disabled&&!opener.closest('[hidden]'))opener.focus({preventScroll:true});
+    },{signal});
+    this.refs['audio-file'].addEventListener('change',e=>{this.importFile(e.target.files?.[0],'import-audio');e.target.value='';},{signal});
+    this.refs['project-file'].addEventListener('change',e=>{this.importFile(e.target.files?.[0],'import-project');e.target.value='';},{signal});
+    for(const type of ['play','pause','ended'])this.refs['preview-audio'].addEventListener(type,()=>{this.previewPlaying=!this.refs['preview-audio'].paused&&!this.refs['preview-audio'].ended;this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.state.previewPreparing||this.previewPlaying);},{signal});
     document.addEventListener('keydown',e=>this.onKey(e),{signal});
     const spotlight = this.root.querySelector('[data-action="spotlight"]');
     const release=()=>{if(this.spotlight){this.spotlight=false;spotlight.setAttribute('aria-pressed','false');this.emit('spotlight',{active:false});}};
-    spotlight.addEventListener('pointerdown',e=>{if(e.button!==0)return;e.preventDefault();spotlight.setPointerCapture?.(e.pointerId);this.spotlight=true;spotlight.setAttribute('aria-pressed','true');this.emit('spotlight',{active:true});},{signal});
+    spotlight.addEventListener('pointerdown',e=>{if(e.button!==0||spotlight.disabled)return;e.preventDefault();spotlight.setPointerCapture?.(e.pointerId);this.spotlight=true;spotlight.setAttribute('aria-pressed','true');this.emit('spotlight',{active:true});},{signal});
     spotlight.addEventListener('pointerup',release,{signal});
     spotlight.addEventListener('pointercancel',release,{signal});
     spotlight.addEventListener('lostpointercapture',release,{signal});
-    spotlight.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat){e.preventDefault();this.spotlight=true;spotlight.setAttribute('aria-pressed','true');this.emit('spotlight',{active:true});}},{signal});
+    spotlight.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat&&!spotlight.disabled){e.preventDefault();this.spotlight=true;spotlight.setAttribute('aria-pressed','true');this.emit('spotlight',{active:true});}},{signal});
     spotlight.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();release();}},{signal});
     window.addEventListener('blur',release,{signal});
     this.root.addEventListener('dragover',e=>{if(e.dataTransfer?.types?.includes('Files')){e.preventDefault();this.root.classList.add('is-dragging');}},{signal});
     this.root.addEventListener('dragleave',e=>{if(!this.root.contains(e.relatedTarget))this.root.classList.remove('is-dragging');},{signal});
-    this.root.addEventListener('drop',e=>{e.preventDefault();this.root.classList.remove('is-dragging');const file=e.dataTransfer?.files?.[0];if(!file)return;if(this.state.capture||this.state.busy||this.state.exporting){this.notify('Finish the current recording or file operation before importing.','warning');return;}this.emit(file.name.toLowerCase().endsWith('.fml')?'import-project':'import-audio',{file});},{signal});
+    this.root.addEventListener('drop',e=>{e.preventDefault();this.root.classList.remove('is-dragging');const file=e.dataTransfer?.files?.[0];if(file)this.importFile(file,file.name.toLowerCase().endsWith('.fml')?'import-project':'import-audio');},{signal});
+  }
+
+  importFile(file,type) {
+    if(!file||this.state.storageFailed)return;
+    if(this.state.capture||this.state.busy||this.state.exporting){this.notify('Finish the current recording or file operation before importing.','warning');return;}
+    if(type==='import-audio'&&this.state.readonly){this.notify('This project is open in another tab. Close that tab before adding audio here.','warning');return;}
+    this.emit(type,{file});
   }
 
   async onClick(e) {
+    if(e.target.closest('[data-dialog-close]')){this.settleDialog('cancel');this.refs.dialog.close('cancel');return;}
     const button = e.target.closest('[data-action]');
     if(!button||button.disabled)return;
     const type=button.dataset.action,id=button.dataset.id;
+    if(this.state.storageFailed&&!['help','view','studio-home','reload-studio'].includes(type))return;
     if(type==='spotlight')return;
     if(type==='studio-home')return this.emit('view',{view:'build'});
     if(type==='view')return this.emit('view',{view:button.dataset.view});
@@ -143,6 +164,8 @@ export class StudioUI extends EventTarget {
     if(type==='save-section'){const name=await this.prompt({title:'Save this moment',message:'Keep the current combination of layers and their mix as a song section.',value:['Intro','Verse','Chorus','Bridge'][this.state.project?.sections?.length||0]||'New section',label:'Section name',confirmLabel:'Save section'});if(name)this.emit(type,{name});return;}
     if(type==='delete-section'||type==='delete-take'){const yes=await this.confirm({title:type==='delete-take'?'Remove this take?':'Remove this section?',message:type==='delete-take'?'This removes the take from your project. Your other performances remain.':'This removes the saved section. Your audio layers remain.',confirmLabel:'Remove',danger:true});if(yes)this.emit(type,{id});return;}
     if(type==='open-project'){this.refs.dialog.close();return this.emit(type,{id});}
+    if(type==='delete-project'){this.refs.dialog.close('cancel');return this.emit(type,{id});}
+    if(type==='manage-storage'){this.refs.dialog.close('cancel');return this.emit(type);}
     if(type==='export-project'){this.refs.dialog.close();return this.emit(type);}
     if(type==='export-master'){this.refs.dialog.close();return this.emit(type,{performanceId:button.dataset.performanceId||id});}
     if(type==='preview-performance')return this.emit(type,{performanceId:button.dataset.performanceId||id});
@@ -162,6 +185,7 @@ export class StudioUI extends EventTarget {
   }
 
   onInput(e) {
+    if(this.state.storageFailed)return;
     const el=e.target,control=el.dataset.control,key=el.dataset.key;
     if(el.hasAttribute('data-export-duration'))el.setCustomValidity('');
     if(!control)return;
@@ -169,9 +193,11 @@ export class StudioUI extends EventTarget {
     if(control==='mix'){this.displayRange(el);this.emit('mix',{id:el.dataset.id,mix:{[key]:value}});}
     if(control==='master'){this.displayRange(el);this.emit('set-master',{volume:value});}
     if(control==='input'){this.displayRange(el);this.emit('set-input',{gain:value});}
+    if(control==='metronome'){this.displayRange(el);this.emit('set-metronome',{[key]:value});}
   }
 
   onChange(e) {
+    if(this.state.storageFailed)return;
     const el=e.target,c=el.dataset.control;
     if(c==='monitor')this.emit('monitor',{enabled:el.checked,monitor:el.checked});
     if(c==='cycles'){this.cycles=el.value==='custom'?'custom':Number(el.value);this.refs['custom-cycles'].hidden=this.cycles!=='custom';}
@@ -180,31 +206,39 @@ export class StudioUI extends EventTarget {
     if(c==='role')this.emit('role',{id:el.dataset.id,role:el.value});
     if(c==='selected-track')this.emit('select-track',{id:el.value});
     if(c==='selected-take')this.emit('select-take',{id:el.checked?el.dataset.id:null});
+    if(c==='metronome-enabled')this.emit('set-metronome',{enabled:el.checked});
+    if(c==='metronome-bpm'){el.value=clamp(el.value,40,240);this.emit('set-metronome',{bpm:Number(el.value)});}
+    if(c==='metronome-beats')this.emit('set-metronome',{beatsPerCycle:Number(el.value)});
+    if(c==='metronome-count')this.emit('set-metronome',{countInBeats:Number(el.value)});
   }
 
   onKey(e) {
+    if(this.state.storageFailed)return;
     if(this.refs.dialog.open||e.target.closest('audio,video'))return;
     const editable=e.target.closest('input,textarea,select,[contenteditable="true"]');
-    if(e.key==='Escape'&&this.state.capture){e.preventDefault();this.emit('cancel');return;}
+    const enabled=type=>!!this.root.querySelector(`[data-action="${type}"]:not(:disabled)`);
+    if(e.key==='Escape'&&this.state.capture){e.preventDefault();if(!this.refs['dock-cancel'].disabled)this.emit('cancel');return;}
     if(editable||e.repeat||e.altKey)return;
-    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();this.emit(e.shiftKey?'redo':'undo');return;}
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();const type=e.shiftKey?'redo':'undo';if(enabled(type))this.emit(type);return;}
     if(e.ctrlKey||e.metaKey)return;
     if(e.target.closest('button,a,summary')&&(e.key===' '||e.key==='Enter'))return;
-    if(e.key===' '){e.preventDefault();this.emit(this.state.playing||this.state.capture||this.previewPlaying?'stop':'play');}
-    if(e.key.toLowerCase()==='r'&&!this.state.capture&&!this.state.busy&&!this.state.exporting)this.emit('add-loop',{cycles:this.state.project?.baseFrames?this.cycles:0,customCycles:this.customCycles});
-    if(e.key.toLowerCase()==='v'&&!this.state.capture&&!this.state.busy&&!this.state.exporting)this.emit('sing');
+    if(e.key===' '){e.preventDefault();const type=this.state.playing||this.state.capture||this.previewPlaying||this.state.previewPreparing?'stop':'play';if(enabled(type))this.emit(type);}
+    if(e.key.toLowerCase()==='r'&&enabled('add-loop'))this.emit('add-loop',{cycles:this.state.project?.baseFrames?this.cycles:0,customCycles:this.customCycles});
+    if(e.key.toLowerCase()==='v'&&enabled('sing'))this.emit('sing');
     if(e.key==='Enter'&&this.state.capture?.status==='recording')this.emit('finish');
   }
 
   render(state) {
     this.state=state;
+    const focusedBefore=document.activeElement;
     const p=state.project||{},tracks=p.tracks||[],rate=state.sampleRate||p.sampleRate||48000,capture=state.capture;
     const recording=!!capture,view=state.view||'build';
     const focusWasInOldView=this.renderedView&&this.renderedView!==view&&document.activeElement?.closest('[data-view-panel]');
     this.refs['project-name'].textContent=p.name||'Untitled session';
     this.root.dataset.captureState=capture?.status||'idle';
     this.root.dataset.playing=String(!!state.playing);
-    this.refs['save-state'].textContent=state.message||state.status||(state.busy?'Working…':'Ready');
+    const saveLabel=state.message||state.status||(state.busy?'Working…':'Ready');
+    if(this.refs['save-state'].textContent!==saveLabel)this.refs['save-state'].textContent=saveLabel;
     this.refs['save-state'].classList.toggle('is-error',!!state.error);
     this.refs['mic-label'].textContent=state.micEnabled?'Mic connected':'Connect mic';
     const mic=this.root.querySelector('[data-action="toggle-mic"]');mic.classList.toggle('is-connected',!!state.micEnabled);mic.setAttribute('aria-label',state.micEnabled?'Disconnect microphone':'Connect microphone');
@@ -221,6 +255,7 @@ export class StudioUI extends EventTarget {
     this.renderSong(p,rate);
     this.renderMixer(p,tracks);
     this.renderInput(p);
+    this.renderMetronome(p);
     this.renderPreview(state.preview);
     this.renderAudition(state.audition,state.transportFrame);
     this.renderDownloads(state.downloads||[]);
@@ -236,16 +271,17 @@ export class StudioUI extends EventTarget {
     this.refs['persist-button'].hidden=!!storage.persistent;
     this.refs['persist-button'].disabled=!!state.busy;
     let banner=state.error?(typeof state.error==='string'?state.error:state.error.message):state.readonly?'This project is open in another tab. Close that tab to continue editing here.':'';
-    if(state.capabilities?.secureContext===false)banner='Microphone recording needs HTTPS or localhost. Open the published studio to record.';
+    if(state.storageFailed)banner=banner||'Local storage stopped responding. Reopen the studio to recover your saved recordings.';
+    else if(state.capabilities?.secureContext===false)banner='Microphone recording needs HTTPS or localhost. Open the published studio to record.';
     else if(state.capabilities?.audio===false)banner='This browser cannot open the audio engine. Open the studio in a current browser with Web Audio support.';
     else if(state.capabilities?.microphone===false)banner='Microphone recording is unavailable here. Open the HTTPS studio in a current browser to connect your microphone.';
-    this.refs.banner.hidden=!banner;if(this.refs['banner-text'].textContent!==banner)this.refs['banner-text'].textContent=banner;this.refs['banner-dismiss'].hidden=!state.error;this.refs.banner.classList.toggle('is-error',!!state.error);
-    this.root.querySelectorAll('[data-action="undo"]').forEach(el=>el.disabled=!state.undoAvailable||recording||!!state.busy);
-    this.root.querySelectorAll('[data-action="redo"]').forEach(el=>el.disabled=!state.redoAvailable||recording||!!state.busy);
+    this.refs.banner.hidden=!banner;if(this.refs['banner-text'].textContent!==banner)this.refs['banner-text'].textContent=banner;this.refs['banner-dismiss'].hidden=!state.error||!!state.storageFailed;this.refs['banner-reload'].hidden=!state.storageFailed;this.refs.banner.classList.toggle('is-error',!!state.error);
+    this.root.querySelectorAll('[data-action="undo"]').forEach(el=>el.disabled=!state.undoAvailable||recording||!!state.busy||!!state.readonly);
+    this.root.querySelectorAll('[data-action="redo"]').forEach(el=>el.disabled=!state.redoAvailable||recording||!!state.busy||!!state.readonly);
     this.root.querySelectorAll('[data-action="add-loop"],[data-action="sing"],[data-action="demo"],[data-action="import-audio"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting||!!state.readonly||state.capabilities?.audio===false||(['add-loop','sing'].includes(el.dataset.action)&&state.capabilities?.microphone===false));
-    this.root.querySelectorAll('[data-action="projects"],[data-action="rename-project"],[data-action="export-menu"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
+    this.root.querySelectorAll('[data-action="projects"],[data-action="rename-project"],[data-action="export-menu"],[data-action="manage-storage"],[data-action="delete-project"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
     this.root.querySelectorAll('[data-action="save-section"]').forEach(el=>el.disabled=!tracks.length||!!state.readonly||!!state.busy||!!state.exporting);
-    this.root.querySelectorAll('[data-action="play"]').forEach(el=>{el.disabled=recording||!!state.playing||(!tracks.length&&!p.selectedTakeId)||!!state.busy;});
+    this.root.querySelectorAll('[data-action="play"]').forEach(el=>{el.disabled=recording||!!state.playing||(!tracks.length&&!p.selectedTakeId&&!p.metronome?.enabled)||!!state.busy;});
     this.root.querySelectorAll('[data-action="seek-start"]').forEach(el=>el.disabled=recording||!!state.busy||!tracks.length);
     this.root.querySelectorAll('[data-action="stop"]').forEach(el=>el.disabled=false);
     this.root.querySelectorAll('[data-action="export-project"]').forEach(el=>el.disabled=recording||!!state.exporting||!!state.busy);
@@ -255,10 +291,23 @@ export class StudioUI extends EventTarget {
     this.root.querySelector('[data-control="monitor"]').disabled=!!state.readonly||state.capabilities?.microphone===false||!!capture?.waitingForMic;
     mic.disabled=!state.micEnabled&&(state.capabilities?.microphone===false||!!capture?.waitingForMic||!!state.readonly);
     this.root.querySelectorAll('[data-action="export-track"],[data-action="export-master"],[data-action="export-recovered"],[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
+    this.root.querySelectorAll('[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>{if(state.previewPreparing)el.disabled=true;});
+    this.root.querySelectorAll('[data-action="export-recovered"]').forEach(el=>{if((state.recovered||[]).some(a=>a.id===el.dataset.id&&a.needsRecovery))el.disabled=true;});
+    this.root.querySelector('[data-action="spotlight"]').disabled=!!state.readonly||!!state.busy;
     this.root.querySelectorAll('[data-action="mute"],[data-action="solo"],[data-action="remove-track"],[data-action="rename-track"],[data-action="rename-take"],[data-action="delete-take"],[data-action="delete-section"],[data-action="launch-section"],[data-action="nudge"]').forEach(el=>el.disabled=!!state.readonly||!!state.busy);
     if(state.readonly)this.root.querySelector('[data-action="rename-project"]').disabled=true;
-    this.refs['dialog-stop'].hidden=!(state.playing||capture||(state.preview&&!this.refs['preview-audio'].paused));
+    if(state.storageFailed){
+      this.root.querySelectorAll('[data-action]').forEach(el=>{if(!['help','view','studio-home','reload-studio'].includes(el.dataset.action))el.disabled=true;});
+      this.root.querySelectorAll('input,select').forEach(el=>el.disabled=true);
+      if(!this.storageFailedShown&&this.refs.dialog.open)this.refs.dialog.close('cancel');
+    }
+    this.storageFailedShown=!!state.storageFailed;
+    this.refs['dialog-stop'].hidden=!(state.playing||capture||state.previewPreparing||(state.preview&&!this.refs['preview-audio'].paused));
     if(focusWasInOldView){const heading=this.root.querySelector(`[data-view-panel="${view}"] h1`);if(heading){heading.tabIndex=-1;heading.focus();}}
+    else if(!this.refs.dialog.open&&focusedBefore?.isConnected&&this.root.contains(focusedBefore)&&focusedBefore.closest('[hidden]')){
+      const target=capture?(capture.status==='recording'?this.refs['dock-finish']:this.refs['dock-cancel']):this.refs['dock-loop'];
+      if(!target.disabled&&!target.hidden)target.focus({preventScroll:true});
+    }
     this.renderedView=view;
   }
 
@@ -324,11 +373,26 @@ export class StudioUI extends EventTarget {
     this.patchInput(this.root.querySelector('[data-control="compensation"]'),p.input?.compensationMs??0);
   }
 
+  renderMetronome(p) {
+    const settings={enabled:false,bpm:100,beatsPerCycle:4,countInBeats:0,volume:.25,...p.metronome};
+    this.region('metronome-controls','metronome',`<h3>Click &amp; count-in</h3><label class="toggle-row"><span>Play a reference click</span><input type="checkbox" data-control="metronome-enabled" role="switch" aria-label="Play a reference click"><span class="toggle" aria-hidden="true"></span></label><label class="number-field metronome-tempo">Tempo<span><input type="number" min="40" max="240" step="0.1" value="100" data-control="metronome-bpm" aria-label="Metronome tempo in beats per minute">BPM</span></label><p class="help-copy" data-metronome-tempo-help></p><label class="metronome-select">Beats per cycle<select data-control="metronome-beats">${Array.from({length:16},(_,i)=>`<option value="${i+1}">${i+1} ${i?'beats':'beat'}</option>`).join('')}</select></label><label class="metronome-select">First-loop count-in<select data-control="metronome-count"><option value="0">Off · record immediately</option><option value="4">4 beats</option><option value="8">8 beats</option></select></label><p class="help-copy" data-metronome-count-help></p>${slider({label:'Click volume',key:'volume',scope:'metronome',value:.25,min:.025,max:1,step:.025,display:'−12 dB'})}<p class="help-copy metronome-note">Use headphones. The reference click stays out of your exported song.</p>`);
+    const target=this.refs['metronome-controls'],locked=!!this.state.readonly||!!this.state.busy||!!this.state.capture||!!this.state.exporting,hasCycle=finite(p.baseFrames)>0;
+    const enabled=target.querySelector('[data-control="metronome-enabled"]');enabled.checked=!!settings.enabled;enabled.disabled=locked||this.state.capabilities?.audio===false;
+    const tempo=target.querySelector('[data-control="metronome-bpm"]');this.patchInput(tempo,hasCycle?Number((60*(p.sampleRate||48000)*settings.beatsPerCycle/p.baseFrames).toFixed(2)):settings.bpm);tempo.readOnly=hasCycle;tempo.disabled=locked;tempo.setAttribute('aria-readonly',String(hasCycle));
+    const beats=target.querySelector('[data-control="metronome-beats"]');this.patchInput(beats,settings.beatsPerCycle);beats.disabled=locked;
+    const count=target.querySelector('[data-control="metronome-count"]');this.patchInput(count,settings.countInBeats);count.disabled=locked||hasCycle||(p.tracks?.length||0)>0;
+    const volume=target.querySelector('input[data-control="metronome"]');this.patchInput(volume,settings.volume);volume.disabled=locked;this.displayRange(volume);
+    target.querySelector('[data-metronome-tempo-help]').textContent=hasCycle?'Calculated from your loop length and beats per cycle. This does not change the speed of your recording.':'Set a tempo for the click before recording your first loop.';
+    target.querySelector('[data-metronome-count-help]').textContent=hasCycle?'Later layers start on the next cycle. Count-in is only for a project’s first free loop.':'Hear a short count-in before your first free loop starts. No count-in is added to the recording.';
+  }
+
   renderPreview(preview) {
-    const panel=this.refs['preview-panel'],audio=this.refs['preview-audio'];
-    panel.hidden=!preview?.url;
+    const panel=this.refs['preview-panel'],audio=this.refs['preview-audio'],preparing=this.state.previewPreparing;
+    panel.hidden=!preview?.url&&!preparing;panel.setAttribute('aria-busy',String(!!preparing));
+    this.refs['preview-kind'].textContent=preparing?'PREPARING AUDIO':'LISTEN BACK';
+    this.refs['preview-loading'].hidden=!preparing;audio.hidden=!!preparing;
+    this.refs['preview-name'].textContent=preparing?.name||preview?.name||'Your performance';
     if(!preview?.url){if(audio.hasAttribute('src')){audio.pause();audio.removeAttribute('src');audio.load();}return;}
-    this.refs['preview-name'].textContent=preview.name||'Your performance';
     if(audio.getAttribute('src')!==preview.url){audio.src=preview.url;audio.load();panel.scrollIntoView({block:'nearest'});}
   }
 
@@ -348,7 +412,8 @@ export class StudioUI extends EventTarget {
 
   renderRecovery(assets,rate) {
     this.refs.recovery.hidden=!assets.length;
-    this.region('recovery',JSON.stringify(assets.map(a=>[a.id,a.name,a.kind,a.frames,a.status])),assets.length?`<div class="recovery-heading">${icon('shield')}<div><h2>There’s still music here.</h2><p>These saved recordings are available to bring back into your project or download.</p></div></div><div class="recovery-list">${assets.map(a=>`<article class="recovery-card"><div><strong>${html(a.name||'Recovered recording')}</strong><span>${duration(a.frames,rate)} · ${a.channels===2?'stereo':'mono'} · ${html(a.kind||'audio')}</span></div><button class="button quiet" data-action="export-recovered" data-id="${html(a.id)}" aria-label="Download recovered ${html(a.name||'recording')}">${icon('download')}<span>WAV</span></button><button class="button primary" data-action="recover-asset" data-id="${html(a.id)}">${icon('plus')}<span>Keep in project</span></button></article>`).join('')}</div>`:'');
+    const allMixes=assets.length&&assets.every(a=>a.kind==='mix');
+    this.region('recovery',JSON.stringify(assets.map(a=>[a.id,a.name,a.kind,a.frames,a.channels,a.status,a.needsRecovery])),assets.length?`<div class="recovery-heading">${icon('shield')}<div><h2>${allMixes?'Your saved mixes.':'There’s still music here.'}</h2><p>${allMixes?'Your edited mixes are saved on this device. Download a WAV, or keep a mix in your performance library.':'These saved recordings can be brought back into your project or downloaded. Recover unfinished audio before exporting.'}</p></div></div><div class="recovery-list">${assets.map(a=>`<article class="recovery-card"><div><strong>${html(a.name||'Saved recording')}</strong><span>${a.kind==='mix'?'Saved edited mix':a.needsRecovery?'Audio retained · recovery required':'Saved recording'} · ${duration(a.frames,rate)} · ${a.channels===2?'stereo':'mono'}</span></div><button class="button quiet" data-action="export-recovered" data-id="${html(a.id)}" aria-label="Download ${html(a.name||'saved recording')}" ${a.needsRecovery?'disabled':''}>${icon('download')}<span>WAV</span></button><button class="button primary" data-action="recover-asset" data-id="${html(a.id)}">${icon('plus')}<span>${a.needsRecovery?'Recover audio':'Keep in project'}</span></button></article>`).join('')}</div>`:'');
   }
 
   updateExportProgress(progress={}) {
@@ -370,9 +435,12 @@ export class StudioUI extends EventTarget {
     this.root.classList.toggle('is-recording',status==='recording');
     let label='Start with a sound.',caption='Your first loop is the beginning.';
     if(tracks.length){label=this.state.playing?'Your world is playing.':'The groove is ready.';caption='Add a layer, or sing something new.';}
+    if(!tracks.length&&this.state.playing&&this.state.project?.metronome?.enabled){label='Find your rhythm.';caption='The reference click is playing. Add a loop when you are ready.';}
     if(this.previewPlaying&&!capture){label='Listening to your performance.';caption='Your original recording, just as you made it.';}
+    if(this.state.previewPreparing&&!capture){label='Preparing your recording.';caption='Your original performance will play shortly. Stop cancels this.';}
     if(this.state.audition&&!capture){label=this.state.audition.status==='loading'?'Preparing your live mix.':'Hear the feeling take shape.';caption='Selected vocal + current layers. Adjust the mixer as it plays.';}
     if(status==='arming'){label=capture.kind==='vocal'?'Your vocal is queued.':'Your next layer is queued.';caption='Starting on the next loop boundary. Cancel anytime.';}
+    if(status==='counting'){label=`Count in · ${Math.max(1,finite(capture.countInBeat,1))} of ${finite(capture.countInBeats,4)}`;caption='Get ready. Your first loop starts after the count.';}
     if(capture?.waitingForMic){label='Waiting for your microphone.';caption='Allow microphone access in your browser. Stop cancels this request.';}
     if(status==='recording'){label=capture.kind==='vocal'?'This is your moment.':'A new layer is taking shape.';caption=`Recording ${time(capture.elapsedFrames,rate)}${capture.targetFrames?` / ${time(capture.targetFrames,rate)}`:' · finish when you are ready'}`;}
     if(status==='finishing'){label='Keeping your recording safe.';caption='Finishing the audio and saving your take…';}
@@ -385,7 +453,16 @@ export class StudioUI extends EventTarget {
     this.refs['capture-title'].textContent=capture?.waitingForMic?'Let your browser hear you':status==='arming'?'Ready for the next cycle':status==='finishing'?'Saving your sound':capture?.kind==='vocal'?'Recording your performance':tracks.length?'Recording a new layer':'Recording your first loop';
     this.refs['capture-hint'].textContent=capture?.waitingForMic?'Choose Allow in the microphone permission prompt. You can cancel here at any time.':status==='arming'?'Your groove keeps moving. Your recording starts at the next boundary.':status==='finishing'?'Keeping the original audio and your project together.':capture?.kind==='vocal'?(tracks.length?'Keep singing. Your loops are carrying the song underneath.':'Let the vocal run. Finish whenever you are ready.'):capture?.targetFrames?'This layer finishes automatically at the end of its chosen cycles.':'Make your sound. Finish whenever it feels right.';
     this.refs['capture-time'].textContent=time(capture?.elapsedFrames,rate);
+    this.refs['capture-time'].setAttribute('aria-label','Recording duration');
     this.refs['capture-progress'].style.width=capture?.targetFrames?`${clamp(capture.elapsedFrames/capture.targetFrames*100,0,100)}%`:'0%';
+    if(status==='counting'){
+      const beat=Math.max(1,finite(capture.countInBeat,1)),total=Math.max(1,finite(capture.countInBeats,4)),remaining=Math.max(0,finite(capture.remainingFrames)/rate);
+      this.refs['capture-title'].textContent='Feel the rhythm. Then make it yours.';
+      this.refs['capture-hint'].textContent=`Beat ${beat} of ${total} · recording starts in ${remaining.toFixed(1)} seconds. Cancel or Stop at any time.`;
+      this.refs['capture-time'].textContent=`${beat} / ${total}`;
+      this.refs['capture-time'].setAttribute('aria-label',`Count-in beat ${beat} of ${total}`);
+      this.refs['capture-progress'].style.width=`${clamp(beat/total*100,0,100)}%`;
+    }
   }
 
   updateMeters(data={}) {
@@ -407,7 +484,7 @@ export class StudioUI extends EventTarget {
     this.refs['cycle-position'].textContent=base?`CYCLE ${Math.floor(frame/base)+1}`:'FREE';
     const markers=new Map([...this.refs.tracks.querySelectorAll('[data-position]')].map(el=>[el.dataset.position,el]));
     for(const t of p.tracks||[]){const marker=markers.get(t.id);if(marker)marker.style.left=`${t.frames?((frame-finite(t.offsetFrames))%t.frames+t.frames)%t.frames/t.frames*100:0}%`;}
-    if(this.state.capture?.status==='recording'&&data.capture){this.state.capture={...this.state.capture,...data.capture};this.renderDock(this.state.capture,p.tracks||[],rate);}
+    if(this.state.capture&&data.capture){this.state.capture={...this.state.capture,...data.capture};this.renderDock(this.state.capture,p.tracks||[],rate);}
   }
 
   patchInput(input,value) {if(input&&input!==document.activeElement)input.value=value;}
@@ -425,20 +502,33 @@ export class StudioUI extends EventTarget {
   }
 
   showDialog(title,body,actions='') {
-    const d=this.refs.dialog;if(d.open)d.close('cancel');d.returnValue='cancel';this.refs['dialog-title'].textContent=title;this.refs['dialog-body'].innerHTML=body;this.refs['dialog-actions'].innerHTML=actions;this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||(this.state.preview&&!this.refs['preview-audio'].paused));d.showModal();return d;
+    const d=this.refs.dialog;
+    this.settleDialog('cancel');
+    if(!d.contains(document.activeElement))this.dialogOpener=document.activeElement;
+    if(d.open)d.close('cancel');
+    d.returnValue='cancel';this.refs['dialog-title'].textContent=title;this.refs['dialog-body'].innerHTML=body;this.refs['dialog-actions'].innerHTML=actions;this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.state.previewPreparing||(this.state.preview&&!this.refs['preview-audio'].paused));d.showModal();d.scrollTop=0;this.refs['dialog-title'].focus();return d;
   }
 
+  settleDialog(value) {const pending=this.dialogRequest;this.dialogRequest=null;pending?.(value);}
+
   confirm(options={}) {
-    return new Promise(resolve=>{const d=this.showDialog(options.title||'Are you sure?',`<p class="dialog-copy">${html(options.message||'')}</p>`,`<button class="button quiet" value="cancel">Cancel</button><button class="button ${options.danger?'danger':'primary'}" value="confirm">${html(options.confirmLabel||'Continue')}</button>`);d.addEventListener('close',()=>resolve(d.returnValue==='confirm'),{once:true});});
+    return new Promise(resolve=>{const d=this.showDialog(options.title||'Are you sure?',`<p class="dialog-copy">${html(options.message||'')}</p>`,`<button type="button" class="button quiet" data-dialog-close>Cancel</button><button class="button ${options.danger?'danger':'primary'}" value="confirm">${html(options.confirmLabel||'Continue')}</button>`);this.dialogRequest=value=>resolve(value==='confirm');d.querySelector('.dialog-actions [data-dialog-close]').focus();});
   }
 
   prompt(options={}) {
-    return new Promise(resolve=>{const d=this.showDialog(options.title||'Give it a name',`${options.message?`<p class="dialog-copy">${html(options.message)}</p>`:''}<label class="dialog-field">${html(options.label||'Name')}<input type="text" name="prompt-value" maxlength="120" value="${html(options.value||'')}" autocomplete="off" required autofocus></label>`,`<button class="button quiet" value="cancel" formnovalidate>Cancel</button><button class="button primary" value="confirm">${html(options.confirmLabel||'Save')}</button>`);const input=d.querySelector('input');input.focus();input.select();d.addEventListener('close',()=>resolve(d.returnValue==='confirm'?input.value.trim().slice(0,120)||null:null),{once:true});});
+    return new Promise(resolve=>{const d=this.showDialog(options.title||'Give it a name',`${options.message?`<p class="dialog-copy">${html(options.message)}</p>`:''}<label class="dialog-field">${html(options.label||'Name')}<input type="text" name="prompt-value" maxlength="120" value="${html(options.value||'')}" autocomplete="off" required autofocus></label>`,`<button type="button" class="button quiet" data-dialog-close>Cancel</button><button class="button primary" value="confirm">${html(options.confirmLabel||'Save')}</button>`);const input=d.querySelector('input');input.focus();input.select();this.dialogRequest=value=>resolve(value==='confirm'?input.value.trim().slice(0,120)||null:null);});
   }
 
   showProjects() {
     const p=this.state.project,projects=(this.state.projects||[]).map(x=>x.id===p?.id?{...x,...p}:x);
     this.showDialog('Your projects',`<p class="dialog-copy">Projects are saved in this browser. Download a backup to keep a copy elsewhere.</p><div class="project-list">${projects.length?projects.map(x=>`<button type="button" class="project-row ${x.id===p?.id?'is-current':''}" data-action="open-project" data-id="${html(x.id)}">${icon('folder')}<span><strong>${html(x.name||'Untitled session')}</strong><small>${this.date(x.updatedAt||x.createdAt)}${x.id===p?.id?' · Current project':''}</small></span>${icon('arrow')}</button>`).join(''):'<p class="help-copy">Your current session is your first project.</p>'}</div>`,`<button type="button" class="button quiet" data-action="import-project">${icon('upload')}Restore backup</button><button type="button" class="button primary" data-action="new-project">${icon('plus')}New project</button>`);
+  }
+
+  showStorageManager(rows=[],storage={}) {
+    const currentId=this.state.project?.id,locked=!!this.state.capture||!!this.state.busy||!!this.state.exporting;
+    const audioBytes=rows.reduce((total,row)=>total+finite(row.audioBytes),0);
+    const summary=storage.quota?`${bytes(storage.usage||0)} used · ${bytes(Math.max(0,storage.quota-(storage.usage||0)))} available`:`${bytes(audioBytes)} of project audio on this device`;
+    this.showDialog('Make room for your next song',`<p class="dialog-copy">See which projects use space on this device. Download a project backup before permanently deleting recordings you want to keep.</p><div class="storage-summary">${icon('shield')}<span><strong>${html(summary)}</strong><small>${rows.length} ${rows.length===1?'project':'projects'} · ${bytes(audioBytes)} of recorded audio</small></span></div><div class="storage-project-list">${rows.length?rows.map(row=>`<article class="storage-project ${row.id===currentId?'is-current':''}"><div class="storage-project-copy"><h3>${html(row.name||'Untitled session')}</h3><p>${bytes(finite(row.audioBytes))} · ${finite(row.assetCount)} audio ${row.assetCount===1?'file':'files'}${row.id===currentId?' · Current project':''}</p><small>${row.purgePending?'Deletion was interrupted. Finish deletion to reclaim the remaining space.':row.recordingAssets?'Includes audio retained from an unfinished recording.':`Last saved ${this.date(row.updatedAt)||'recently'}`}</small></div><button type="button" class="button quiet storage-delete" data-action="delete-project" data-id="${html(row.id)}" aria-label="${row.purgePending?'Finish deleting':'Delete'} ${html(row.name||'Untitled session')}" ${locked?'disabled':''}>${icon('trash')}<span>${row.purgePending?'Finish deletion':'Delete'}</span></button></article>`).join(''):'<p class="help-copy">No saved projects are using space yet.</p>'}</div><p class="storage-footnote">Project sizes count recorded audio. Browser usage also includes project information, app files and storage overhead. Deleting a project cannot be undone.</p>`,`<button type="button" class="button quiet" data-action="export-project" ${locked?'disabled':''}>${icon('download')}Backup current project</button><button class="button primary" value="close">Done</button>`);
   }
 
   showExport() {
