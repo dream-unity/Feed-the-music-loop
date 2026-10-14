@@ -214,7 +214,7 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     await screenshot(page, testInfo, 'build');
 
     await view(page, 'mix');
-    const original = await download(page, () => action(page, 'export-track').click());
+    const original = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
     expect(inspectWav(original.bytes).channels).toBe(1);
     const baseline = await renderMix(page);
     const nativeWavPlayback = await playRenderedWav(page, baseline);
@@ -255,7 +255,7 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     await view(page, 'mix');
     await expect(warmth).toHaveValue('18');
     await expect(pan).toHaveValue('1');
-    const restoredOriginal = await download(page, () => action(page, 'export-track').click());
+    const restoredOriginal = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
     expect(restoredOriginal.bytes).toEqual(original.bytes);
     const restored = inspectBackup((await download(page, () => action(page, 'export-project').click())).bytes);
     expect(restored.projectId).not.toBe(saved.projectId);

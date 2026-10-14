@@ -223,7 +223,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   expect(Math.floor(masterAudio.frames / 16_384)).toBeGreaterThanOrEqual(35);
   expect(masterAudio.peak).toBeGreaterThan(0.005);
   await takes(page).first().locator('[data-action="select-track"]').click();
-  const longRaw = await download(page, () => action(page, 'export-track').click());
+  const longRaw = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   const rawAudio = inspectWav(longRaw.bytes);
   expect(rawAudio.channels).toBe(1);
   expect(rawAudio.frames).toBe(masterAudio.frames);
@@ -274,7 +274,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   expect(inspectWav(reopenedMaster.bytes).peak).toBeGreaterThan(0.005);
   expect(reopenedMaster.bytes).toEqual(master.bytes);
   await page.locator(`.take-card[data-take-id="${longTakeId}"] [data-action="select-track"]`).click();
-  const reopenedRaw = await download(page, () => action(page, 'export-track').click());
+  const reopenedRaw = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   expect(reopenedRaw.bytes).toEqual(longRaw.bytes);
   await view(page, 'song');
   // Byte-correct WAV export alone does not prove native media playback. Use
@@ -317,7 +317,7 @@ test('demo, mix controls, sections, portable backup and invalid-import preservat
   await warmth.press('End');
   await expect(warmth).toHaveValue('18');
   await reviewScreenshot(page, testInfo, 'desktop-mix');
-  const stem = await download(page, () => action(page, 'export-track').click());
+  const stem = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   expect(inspectWav(stem.bytes).peak).toBeGreaterThan(0.005);
 
   await page.getByTestId('stop').click();
@@ -340,7 +340,7 @@ test('demo, mix controls, sections, portable backup and invalid-import preservat
   await expect(page.locator('.section-pad')).toHaveCount(sectionCount + 1);
   await view(page, 'mix');
   await expect(page.getByRole('slider', { name: 'Warmth · low EQ', exact: true })).toHaveValue('18');
-  const restoredStem = await download(page, () => action(page, 'export-track').click());
+  const restoredStem = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   expect(restoredStem.bytes).toEqual(stem.bytes);
 });
 
@@ -413,7 +413,7 @@ test('cancel discards persisted loop and vocal capture pages while preserving th
   const projectId = await dialog.locator('.project-row.is-current').getAttribute('data-id');
   await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await view(page, 'mix');
-  const originalWav = await download(page, () => action(page, 'export-track').click());
+  const originalWav = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   await view(page, 'build');
   await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('0');
 
@@ -465,7 +465,7 @@ test('cancel discards persisted loop and vocal capture pages while preserving th
   await playing(page, true);
   await expect.poll(() => page.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
   await view(page, 'mix');
-  const reopenedWav = await download(page, () => action(page, 'export-track').click());
+  const reopenedWav = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   expect(reopenedWav.bytes).toEqual(originalWav.bytes);
 });
 
