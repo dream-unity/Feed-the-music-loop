@@ -42,7 +42,7 @@ export class LoopEngine {
     this.inputMixTarget={...this.vocalDSP.mix};this.inputMixQueue=[];
     this.metronome={enabled:false,bpm:100,beatsPerCycle:4,countInBeats:0,volume:.25};this.clickPhase=0;this.clickEnvelope=0;this.clickStep=0;this.clickDecay=Math.exp(-1/(.003*sampleRate));this.clickRemaining=0;this.lastClickClock=-Infinity;
     this.historyLength=Math.ceil(sampleRate)+2;this.backingL=new Float32Array(this.historyLength);this.backingR=new Float32Array(this.historyLength);this.masterHistory=new Float32Array(this.historyLength);this.masterHistory.fill(.8);
-    this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;this.meterInterval=Math.max(1,Math.round(sampleRate/20));this.missing=new Map();this.preview=null;this.audition=null;this.resetAfterCapture=false;
+    this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.capturePeak=0;this.captureSquares=0;this.meterFrames=0;this.meterInterval=Math.max(1,Math.round(sampleRate/20));this.missing=new Map();this.preview=null;this.audition=null;this.resetAfterCapture=false;
     this.provisionalLoops=new Map();
   }
   emit(type,detail={}){this.post({...detail,type,projectFrame:this.frame,transportFrame:this.frame,clockFrame:this.clock});}
@@ -210,16 +210,18 @@ export class LoopEngine {
   arm(capture){
     if(this.audition)throw new Error('Stop the take audition before starting a recording.');if(this.capture)throw new Error('A recording is already in progress.');if(!this.storage)throw new Error('Audio storage is not connected.');if(!capture?.assetId||!capture.id)throw new Error('A recording needs an audio asset.');
     if(this.pool.length<(capture.masterAssetId?2:1))throw new Error('Audio storage buffers are not ready.');
-    const compensation=this.compensationFrames,minFrames=compensation+128+1,lengthFrames=integer(capture.lengthFrames||0);
+    const loopsOnly=capture.kind==='mix',compensation=loopsOnly?0:this.compensationFrames,minFrames=compensation+128+1,lengthFrames=integer(capture.lengthFrames||0);
+    if(loopsOnly&&capture.masterAssetId)throw new Error('Loop-only capture uses one stereo asset.');
     if(lengthFrames&&lengthFrames<minFrames)throw new Error(`This loop must be longer than ${Math.ceil(minFrames/this.sampleRate*1000)} ms for the selected alignment.`);
     const firstFreeLoop=capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size&&!lengthFrames;
     if(capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size)this.frame=0;
     const targetFrame=capture.quantized&&this.baseFrames&&this.playing?this.nextBoundary():this.frame;
-    const cache=this.ensureCache(capture.assetId,1);
+    // Stereo captures go directly to storage; only future mono loops need a live cache.
+    const cache=loopsOnly?null:this.ensureCache(capture.assetId,1);
     // All capture-time memory and the future loop's DSP are reserved before process().
-    const preparedTrack={track:{...capture.track,id:capture.track?.id||capture.id,assetId:capture.assetId,kind:'loop',channels:1,frames:1,offsetFrames:0,mix:{...capture.track?.mix}},cache,dsp:new TrackDSP(this.sampleRate,capture.track?.mix),ready:true};
+    const preparedTrack=loopsOnly?null:{track:{...capture.track,id:capture.track?.id||capture.id,assetId:capture.assetId,kind:'loop',channels:1,frames:1,offsetFrames:0,mix:{...capture.track?.mix}},cache,dsp:new TrackDSP(this.sampleRate,capture.track?.mix),ready:true};
     const countInBeats=firstFreeLoop?this.metronome.countInBeats:0,countBeatFrames=this.sampleRate*60/this.metronome.bpm;
-    this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:countInBeats?'counting':'arming',countInBeats,countBeatFrames,countInStartClock:this.clock,startAtClock:this.clock+Math.round(countInBeats*countBeatFrames),startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
+    this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:countInBeats?'counting':'arming',countInBeats,countBeatFrames,countInStartClock:this.clock,startAtClock:this.clock+Math.round(countInBeats*countBeatFrames),startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,loopsOnly?2:1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
     if(countInBeats){this.clickRemaining=0;this.lastClickClock=-Infinity;}
     if(capture.kind==='vocal'&&capture.track?.mix)this.setInputMix(capture.track.mix);
     this.playing=true;this.prefetch();
@@ -252,7 +254,7 @@ export class LoopEngine {
     this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status,reason,assetId:c.assetId,masterAssetId:c.masterAssetId,frames,startFrame:c.startFrame,endFrame:c.startFrame+frames,track,compensationFrames:c.compensation});this.state();
   }
   abortCapture(reason){const c=this.capture;if(!c)return;if(c.status==='counting'){this.playing=false;this.clickRemaining=0;}if(c.kind==='loop')this.tracks.delete(c.preparedTrack.track.id);this.provisionalLoops.delete(c.assetId);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;this.completeCapture('interrupted',reason);}
-  cancelCapture(){const c=this.capture;if(!c)return;if(c.status==='counting'){this.playing=false;this.clickRemaining=0;}this.tracks.delete(c.preparedTrack.track.id);this.provisionalLoops.delete(c.assetId);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
+  cancelCapture(){const c=this.capture;if(!c)return;if(c.status==='counting'){this.playing=false;this.clickRemaining=0;}if(c.kind==='loop')this.tracks.delete(c.preparedTrack.track.id);this.provisionalLoops.delete(c.assetId);this.trackList=Array.from(this.tracks.values());if(c.createdBase&&!this.tracks.size)this.baseFrames=0;c.raw.end('cancelled');c.master?.end('cancelled');this.capture=null;this.flushInputMix();if(this.resetAfterCapture){this.resetAfterCapture=false;this.resetDSP();}this.dropUnusedCaches();this.emit('capture-end',{captureId:c.id,kind:c.kind,status:'cancelled',assetId:c.assetId,masterAssetId:c.masterAssetId,frames:c.raw.frames,startFrame:c.startFrame,endFrame:c.startFrame+c.raw.frames});this.state();}
   applySection(section){for(const t of this.tracks.values()){const state=Object.hasOwn(section.tracks,t.track.id)?section.tracks[t.track.id]:null;t.track.muted=state?!!state.muted:true;t.track.solo=state?!!state.solo:false;if(state?.mix){t.track.mix={...t.track.mix,...state.mix};t.dsp.setMix(t.track.mix);}}this.pendingSection=null;this.emit('section',{id:section.id,section});}
   requestPage(assetId,cache,index){if(!this.storage||index<0||cache.has(index))return;const last=cache.pending.get(index);if(last!==undefined&&this.clock-last<this.sampleRate)return;if(!cache.pending.has(index)&&cache.pending.size>=32)cache.pending.delete(cache.pending.keys().next().value);cache.pending.set(index,this.clock);this.storage.postMessage({type:'read',assetId,index});}
   prefetchTrack(t){const {track,cache}=t,total=Math.ceil(track.frames/this.pageFrames);for(let i=0;i<Math.min(cache.headPages,total);i++)this.requestPage(track.assetId,cache,i);const position=positiveModulo(this.frame-track.offsetFrames,track.frames),page=Math.floor(position/this.pageFrames);for(let i=0;i<6;i++)this.requestPage(track.assetId,cache,(page+i)%total);}
@@ -266,7 +268,7 @@ export class LoopEngine {
       // does. Monitoring these controls consequently carries the same offset.
       while(this.inputMixQueue.length&&this.inputMixQueue[0].clock<=this.clock)this.vocalDSP.setMix(this.inputMixQueue.shift().mix);
       if(this.audition?.status==='playing'&&this.frame>=this.audition.endFrame+this.audition.tailFrames)this.endAudition();
-      let c=this.capture;
+      let c=this.capture;const loopsOnly=c?.kind==='mix';
       if(c?.status==='counting'&&this.clock>=c.startAtClock){this.frame=0;c.status='arming';c.targetFrame=0;}
       // Sections and capture share one boundary. Snapshot the settings actually
       // used by the first sample, including a section queued for this boundary.
@@ -285,7 +287,7 @@ export class LoopEngine {
           // Destructive edits are avoided: a short playback-only edge taper prevents clicks.
           const edge=Math.min(64,Math.floor(track.frames/8));sample=s*(edge?Math.min(1,position/edge,(track.frames-1-position)/edge):1);
         }}
-        t.dsp.process(sample,this.playing&&!track.muted&&(!anySolo||track.solo));dryL+=t.dsp.left;dryR+=t.dsp.right;roomL+=t.dsp.left*t.dsp.mix.reverb;roomR+=t.dsp.right*t.dsp.mix.reverb;echoL+=t.dsp.left*t.dsp.mix.delay;echoR+=t.dsp.right*t.dsp.mix.delay;
+        t.dsp.process(sample,this.playing&&!track.muted&&(loopsOnly||!anySolo||track.solo));dryL+=t.dsp.left;dryR+=t.dsp.right;roomL+=t.dsp.left*t.dsp.mix.reverb;roomR+=t.dsp.right*t.dsp.mix.reverb;echoL+=t.dsp.left*t.dsp.mix.delay;echoR+=t.dsp.right*t.dsp.mix.delay;
       }
       this.backingFX.process(roomL,roomR,echoL,echoR);dryL=this.playing?dryL+this.backingFX.left:0;dryR=this.playing?dryR+this.backingFX.right:0;
       this.spotlightGain+=((this.spotlight?.35:1)-this.spotlightGain)*this.masterSmooth;dryL*=this.spotlightGain;dryR*=this.spotlightGain;
@@ -297,16 +299,21 @@ export class LoopEngine {
       this.vocalDSP.process(voiceInput,true);this.vocalFX.process(this.vocalDSP.left*this.vocalDSP.mix.reverb,this.vocalDSP.right*this.vocalDSP.mix.reverb,this.vocalDSP.left*this.vocalDSP.mix.delay,this.vocalDSP.right*this.vocalDSP.mix.delay);const voiceL=this.vocalDSP.left+this.vocalFX.left,voiceR=this.vocalDSP.right+this.vocalFX.right;
       let previewL=0,previewR=0;if(this.preview){const p=this.preview,cache=p.cache;if(p.position<p.frames){const value=cache?.sample(p.position);if(Number.isFinite(value)){previewL=value*.6;previewR=value*.6;}p.position++;}else{this.preview=null;this.dropUnusedCaches();this.emit('preview-end');}}
       const masterL=softCeiling((recordL+voiceL)*recordGain),masterR=softCeiling((recordR+voiceR)*recordGain);
-      // The dry click enters only the monitor branch, after the capture tap.
-      const click=this.clickSample(),hearVoice=this.monitor||this.audition?.status==='playing';const l=softCeiling((dryL+(hearVoice?voiceL:0)+previewL+click)*this.masterCurrent),r=softCeiling((dryR+(hearVoice?voiceR:0)+previewR+click)*this.masterCurrent);outputL[i]=l;if(outputR)outputR[i]=r;this.outputPeak=Math.max(this.outputPeak,Math.abs(l),Math.abs(r));
+      // Loop-only capture and monitoring share the same stereo backing tap.
+      // Mic/vocal tails, previews and the monitor-only click never enter it.
+      const click=this.clickSample(),hearVoice=!loopsOnly&&(this.monitor||this.audition?.status==='playing');
+      const captureL=softCeiling(dryL*this.masterCurrent),captureR=softCeiling(dryR*this.masterCurrent);
+      const l=loopsOnly?captureL:softCeiling((dryL+(hearVoice?voiceL:0)+previewL+click)*this.masterCurrent),r=loopsOnly?captureR:softCeiling((dryR+(hearVoice?voiceR:0)+previewR+click)*this.masterCurrent);
+      if(loopsOnly){this.capturePeak=Math.max(this.capturePeak,Math.abs(captureL),Math.abs(captureR));this.captureSquares+=(captureL*captureL+captureR*captureR)*.5;}outputL[i]=l;if(outputR)outputR[i]=r;this.outputPeak=Math.max(this.outputPeak,Math.abs(l),Math.abs(r));
       c=this.capture;
       if(c&&c.startClock!==null&&this.clock>=c.startClock+c.compensation){
         if(c.endClock!==null&&this.clock>=c.endClock+c.compensation){this.completeCapture(c.endFrame-c.startFrame<c.minFrames?'interrupted':'complete');}
         else if(!c.raw.reserve()||(c.master&&!c.master.reserve())){this.emit('error',{message:'Recording stopped because storage could not keep up. The recorded prefix was retained.',captureId:c.id});this.abortCapture('write-buffer-exhausted');}
+        else if(c.kind==='mix')c.raw.write(captureL,captureR);
         else{c.cache.write(c.raw.frames,raw);c.raw.write(raw);c.master?.write(masterL,masterR);}
       }
       if(this.playing&&this.capture?.status!=='counting')this.frame++;this.clock++;this.meterFrames++;
-      if(this.meterFrames>=this.meterInterval){this.emit('meter',{inputLevel:this.inputPeak,inputRms:Math.sqrt(this.inputSquares/this.meterFrames),outputLevel:this.outputPeak,playing:this.playing,baseFrames:this.baseFrames,audition:this.auditionState(),capture:this.captureState()});this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.meterFrames=0;}
+      if(this.meterFrames>=this.meterInterval){this.emit('meter',{inputLevel:this.inputPeak,inputRms:Math.sqrt(this.inputSquares/this.meterFrames),outputLevel:this.outputPeak,captureLevel:this.capturePeak,captureRms:Math.sqrt(this.captureSquares/this.meterFrames),playing:this.playing,baseFrames:this.baseFrames,audition:this.auditionState(),capture:this.captureState()});this.inputPeak=0;this.outputPeak=0;this.inputSquares=0;this.capturePeak=0;this.captureSquares=0;this.meterFrames=0;}
     }
     return true;
   }

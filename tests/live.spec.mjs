@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-function inspectRecording(bytes) {
+function inspectRecording(bytes, channels = 1) {
   expect(bytes.subarray(0, 4).toString()).toBe('RIFF');
   expect(bytes.subarray(8, 12).toString()).toBe('WAVE');
   expect(bytes.readUInt32LE(4) + 8).toBe(bytes.length);
@@ -15,9 +15,9 @@ function inspectRecording(bytes) {
     expect(offset + 8 + length).toBeLessThanOrEqual(bytes.length);
     if (name === 'fmt ') {
       expect(bytes.readUInt16LE(offset + 8)).toBe(3);
-      expect(bytes.readUInt16LE(offset + 10)).toBe(1);
+      expect(bytes.readUInt16LE(offset + 10)).toBe(channels);
       sampleRate = bytes.readUInt32LE(offset + 12);
-      expect(bytes.readUInt16LE(offset + 20)).toBe(4);
+      expect(bytes.readUInt16LE(offset + 20)).toBe(4 * channels);
       expect(bytes.readUInt16LE(offset + 22)).toBe(32);
     }
     if (name === 'data') data = bytes.subarray(offset + 8, offset + 8 + length);
@@ -26,7 +26,7 @@ function inspectRecording(bytes) {
   expect(sampleRate).toBeGreaterThanOrEqual(8000);
   expect(data).toBeDefined();
   expect(data.length % 4).toBe(0);
-  expect(data.length / 4 / sampleRate).toBeGreaterThan(0.9);
+  expect(data.length / 4 / channels / sampleRate).toBeGreaterThan(0.9);
   let peak = 0, invalid = 0;
   for (let offset = 0; offset < data.length; offset += 4) {
     const sample = data.readFloatLE(offset);
@@ -35,14 +35,14 @@ function inspectRecording(bytes) {
   }
   expect(invalid).toBe(0);
   expect(peak).toBeGreaterThan(0.005);
-  return { sampleRate, frames: data.length / 4, peak, sha256: sha256(bytes) };
+  return { sampleRate, channels, frames: data.length / 4 / channels, peak, sha256: sha256(bytes) };
 }
 
 test('the exact deployed HTTPS studio records, loops, saves and exports real audio', async ({ page, context, request, baseURL }, testInfo) => {
   const expectedHash = process.env.FML_EXPECTED_SW_SHA256;
   const swURL = new URL('sw.js', baseURL).href;
   const errors = [], unexpectedRequests = [], indexResponses = [], propagationChecks = [];
-  let servedWorker, finalWorkerHash, registration, recording;
+  let servedWorker, finalWorkerHash, registration, recording, loopRecording;
   page.on('pageerror', error => errors.push(error.message));
   context.on('request', incoming => {
     const url = new URL(incoming.url());
@@ -129,6 +129,31 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     expect(await file.failure()).toBeNull();
     expect(file.suggestedFilename()).toMatch(/\.wav$/i);
     recording = inspectRecording(await readFile(await file.path()));
+    // Prove the deployed loop-only action works after disconnecting the mic.
+    await page.locator('[data-action="view"][data-view="build"]').click();
+    await page.evaluate(() => {
+      window.__unexpectedLoopMicRequests = 0;
+      navigator.mediaDevices.getUserMedia = async () => {
+        window.__unexpectedLoopMicRequests++;
+        throw new DOMException('Microphone is unavailable.', 'NotAllowedError');
+      };
+    });
+    await page.getByTestId('record-all-loops').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
+    await expect(page.locator('[data-ref="capture-live-label"]')).toHaveText('LIVE LOOPS');
+    await page.waitForTimeout(1100);
+    await page.getByTestId('finish').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'idle');
+    const recent = page.locator('[data-ref="recent-recording"]');
+    await expect(recent).toContainText('Loop recording 1');
+    await expect(recent).toContainText('Loops only');
+    const loopDownload = page.waitForEvent('download');
+    await recent.getByRole('button', { name: 'Download Loop recording 1', exact: true }).click();
+    const loopFile = await loopDownload;
+    expect(await loopFile.failure()).toBeNull();
+    loopRecording = inspectRecording(await readFile(await loopFile.path()), 2);
+    expect(await page.evaluate(() => window.__unexpectedLoopMicRequests)).toBe(0);
+    await page.getByTestId('stop').click();
     // Recheck the network after the recording. A competing branch-root Pages
     // publish must not replace this package while its cached shell still works.
     const finalWorker = await request.get(swURL, { timeout: 10_000, maxRedirects: 0, headers: { 'Cache-Control': 'no-cache' } });
@@ -145,7 +170,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await testInfo.attach('live-pages-studio', { path: screenshot, contentType: 'image/png' });
   } finally {
     await testInfo.attach('live-deployment-evidence', {
-      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
+      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',
     });
   }

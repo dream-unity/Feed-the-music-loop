@@ -93,10 +93,16 @@ function archiveHeader(manifestBytes, payloadBytes) {
   return header;
 }
 
+function validateAssetSource(asset) {
+  if (asset.source !== undefined && asset.source !== 'loops') fail('A recording has an unknown source.');
+  if (asset.source === 'loops' && (asset.channels !== 2 || Object.hasOwn(asset, 'leadAssetId'))) fail('A loops-only recording must be stereo without a vocal reference.');
+}
+
 function assetMetadata(asset, offset, sha256) {
   if (typeof asset.id !== 'string' || !ID.test(asset.id)) fail('A recording has an invalid id.');
   if (!['complete', 'interrupted', 'recovered'].includes(asset.status)) fail('Finish saving all recordings before creating a backup.', 'RECORDING_NOT_READY');
   const bytes = validateAudioMetadata(asset);
+  validateAssetSource(asset);
   const metadata = {
     id: asset.id, name: String(asset.name || 'Recording').slice(0, 1000), kind: String(asset.kind || 'audio').slice(0, 100),
     sampleRate: asset.sampleRate, channels: asset.channels, frames: asset.frames,
@@ -107,7 +113,7 @@ function assetMetadata(asset, offset, sha256) {
   // Sealed recordings not yet attached to a track still need their pairing
   // and role metadata after a backup is restored. They are recovery material,
   // not disposable leftovers.
-  for (const key of ['captureId', 'leadAssetId', 'performanceId']) if (asset[key] != null) metadata[key] = asset[key];
+  for (const key of ['captureId', 'leadAssetId', 'performanceId', 'source']) if (asset[key] != null) metadata[key] = asset[key];
   if (asset.track && asset.frames > 0) metadata.track = { ...structuredClone(asset.track), assetId: asset.id, frames: asset.frames, channels: asset.channels };
   return metadata;
 }
@@ -206,6 +212,7 @@ function validateAssetReferences(project, assets) {
     for (const track of checked.tracks) checkTrack(track);
   };
   for (const asset of assets.values()) {
+    validateAssetSource(asset);
     for (const key of ['captureId', 'leadAssetId', 'performanceId']) if (asset[key] != null && (typeof asset[key] !== 'string' || !ID.test(asset[key]))) fail('A recording has an invalid recovery reference.');
     if (asset.leadAssetId != null) {
       const lead = assets.get(asset.leadAssetId);
@@ -236,7 +243,7 @@ function validateAssetReferences(project, assets) {
     // both rather than truncating either to their shared editable interval.
     if (performance.editableFrames !== undefined) {
       integer(performance.editableFrames, 0, performance.frames, 'editable performance length');
-      if (!lead || !master || performance.editableFrames > lead.frames || performance.editableFrames > master.frames) fail('A performance promises more editable audio than its recordings contain.');
+      if (!master || performance.editableFrames > master.frames || (performance.source !== 'loops' && (!lead || performance.editableFrames > lead.frames))) fail('A performance promises more editable audio than its recordings contain.');
     }
   }
 }
@@ -289,7 +296,7 @@ export async function importProject(storage, file, { signal, onProgress } = {}) 
       // Register before beginAsset so a partial backend create can be cleaned.
       started.push(id);
       const recovery = {};
-      for (const key of ['captureId', 'leadAssetId', 'performanceId', 'track']) if (asset[key] != null) recovery[key] = asset[key];
+      for (const key of ['captureId', 'leadAssetId', 'performanceId', 'source', 'track']) if (asset[key] != null) recovery[key] = asset[key];
       await storage.beginAsset({ id, projectId, name: asset.name, kind: asset.kind, sampleRate: asset.sampleRate, channels: asset.channels, createdAt: asset.createdAt,
         ...remapReferences(recovery, ids, original.id, projectId) });
       const pageBytes = PAGE_FRAMES * asset.channels * 4;

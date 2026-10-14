@@ -8,7 +8,7 @@ export class AudioEngine extends EventTarget {
   constructor(storage, { resumeTimeoutMs = 10000 } = {}) {
     super(); this.storage = storage; this.context = null; this.node = null; this.stream = null; this.source = null;
     this.micGeneration = 0; this.initPromise = null; this.tracks = new Map(); this.playing = false; this.frame = 0;
-    this.capture = null; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
+    this.capture = null; this.armingCapture = null; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
     this.selectedDeviceId = ''; this.pendingDeviceId = null; this.deviceTarget = null; this.deviceListener = null; this.deviceListGeneration = 0;
     this.suppressedStateChange = false;
     this.readyTracks = new Set(); this.readyWaiters = new Set(); this.trackAssets = new Map(); this.readinessGeneration = 0;
@@ -76,6 +76,7 @@ export class AudioEngine extends EventTarget {
       this.playing = !!message.playing; this.frame = message.transportFrame ?? this.frame; this.capture = message.capture ?? null;
     }
     if (message.type === 'capture-end') this.capture = null;
+    if (this.armingCapture && (message.capture?.id === this.armingCapture.id || (['capture-end', 'capture-rejected'].includes(message.type) && message.captureId === this.armingCapture.id))) this.armingCapture = null;
     if (message.type === 'track-ready' && (!message.assetId || this.trackAssets.get(message.id) === message.assetId)) { this.readyTracks.add(message.id); for (const check of this.readyWaiters) check(); }
     this.dispatchEvent(event(message.type, message));
   }
@@ -177,8 +178,12 @@ export class AudioEngine extends EventTarget {
         if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('The selected microphone did not provide a live audio input. Choose another microphone and try again.');
         source = this.context.createMediaStreamSource(stream); source.connect(this.node);
         for (const track of stream.getAudioTracks()) {
-          track.addEventListener('ended', () => { if (this.stream === stream) { this.send('interrupt', { reason: 'Microphone disconnected' }); this.dispatchEvent(event('device-lost', { message: 'The microphone disconnected. The recorded portion is retained.' })); this.disableMic(); void this.refreshMicrophones(); } });
-          track.addEventListener('mute', () => { if (this.stream === stream && this.capture) { this.send('interrupt', { reason: 'Microphone muted by device' }); this.dispatchEvent(event('interrupted', { message: 'Microphone input was interrupted. The take was stopped to preserve its timing.' })); } });
+          track.addEventListener('ended', () => { if (this.stream === stream) {
+            // A backing-only capture is independent of microphone availability.
+            if (!this.loopMixCapture()) { this.send('interrupt', { reason: 'Microphone disconnected' }); this.dispatchEvent(event('device-lost', { message: 'The microphone disconnected. The recorded portion is retained.' })); }
+            this.disableMic(); void this.refreshMicrophones();
+          } });
+          track.addEventListener('mute', () => { if (this.stream === stream && this.capture && !this.loopMixCapture()) { this.send('interrupt', { reason: 'Microphone muted by device' }); this.dispatchEvent(event('interrupted', { message: 'Microphone input was interrupted. The take was stopped to preserve its timing.' })); } });
         }
         const { groupId, ...settings } = stream.getAudioTracks()[0]?.getSettings?.() || {};
         // Keep the old graph alive until acquiring and connecting the replacement
@@ -215,7 +220,8 @@ export class AudioEngine extends EventTarget {
   stop() { this.cancelPendingMic(); this.cancelReadiness(); this.send('stop'); }
   finish() { this.send('finish'); }
   cancel() { this.cancelPendingMic(); this.cancelReadiness(); this.send('cancel'); }
-  arm(capture) { this.send('arm', { capture }); }
+  loopMixCapture() { return this.capture?.kind === 'mix' || this.armingCapture?.kind === 'mix'; }
+  arm(capture) { if (this.send('arm', { capture }) && !this.capture && !this.armingCapture) this.armingCapture = { id: capture.id, kind: capture.kind }; }
   clear() { this.cancelPendingMic(); this.cancelReadiness(); this.send('clear'); this.tracks.clear(); this.readyTracks.clear(); this.trackAssets.clear(); }
   async close() {
     if (this.closed) return; this.closed = true; this.disableMic(); this.suppressedStateChange = true;

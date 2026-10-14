@@ -62,7 +62,15 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
    On a phone, keep the studio visible and the screen awake. Calls, screen locking or another app taking the microphone can interrupt a take. Test a short complete recording and export on your device first. If an interruption occurs, follow the recovery notice and listen to the retained audio before relying on it.
 
-During recording, the live microphone history rises and falls with your actual input, including quiet or silent moments. The display shows microphone peak and average levels; it is independent of the backing-loop output.
+## Make a full song using only your loops
+
+Choose **Record all the loops** in the bottom recording bar. This is a separate capture mode from **Add loop** and **Sing over loops**. It records every unmuted loop together into one continuous stereo recording, with their current effects and master volume. Solo does not exclude other unmuted loops in this mode; use Mute to choose what is included.
+
+No microphone permission is needed. A connected microphone, microphone monitoring, a selected vocal take and the metronome are excluded from the recording. A vocal that you previously turned into a loop is included like any other unmuted loop.
+
+If your groove is playing, recording starts on the next cycle. Change mutes, launch sections and adjust the mix while recording to build the song. Choose **Finish recording** when ready; your groove keeps playing. **Stop** saves the recording and stops playback. **Discard** removes the current attempt. The finished **Loop recording** appears immediately below the recorder with Listen, WAV and trash controls, and remains in **Song → Performances**. No separate vocal take is created.
+
+During microphone recording, the live microphone history rises and falls with your actual input, including quiet or silent moments. During **Record all the loops**, the same display shows the captured stereo loop levels instead of microphone input.
 
 After finishing a loop or performance, the recording bar remains with a saved status. A **Latest recording** card appears immediately underneath in the current view. Choose **Listen** to hear it there, or download its WAV. Listening stops the backing loops so you hear the recording clearly. The recorder is always visible directly beneath **The Groove**, even before recording or after cancelling. Reopening a project restores its latest saved recording here. Performances and vocal takes also remain in Song.
 

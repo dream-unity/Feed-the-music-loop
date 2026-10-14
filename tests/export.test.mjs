@@ -414,6 +414,50 @@ test('backup restoration preserves recovery pairing and remaps every recovery au
   assert.equal(voice.performanceId, 'performance-orphan');
 });
 
+test('loop performances and unattached loop masters retain their source and exact stereo audio through backup restore', async () => {
+  for (const status of ['complete', 'interrupted']) {
+    const storage = new MemoryStorage(), project = createProject('Only loops');
+    const loop = new Float32Array(16).fill(.1), master = new Float32Array(64).map((_, i) => i / 128), recovered = new Float32Array(24).fill(.2);
+    await addAsset(storage, project.id, 'loop', loop);
+    await addAsset(storage, project.id, 'loop-master', master, 2, { source: 'loops', captureId: 'loop-capture', performanceId: 'loop-performance' });
+    await addAsset(storage, project.id, 'orphan-loop-master', recovered, 2, { source: 'loops', captureId: 'orphan-loop-capture', performanceId: 'orphan-loop-performance' });
+    storage.assets.get('orphan-loop-master').status = 'recovered';
+    const track = createTrack({ id: 'loop-track', assetId: 'loop', frames: loop.length });
+    project.tracks.push(track); project.baseFrames = loop.length;
+    project.performances.push({ id: 'loop-performance', name: 'Loop song', source: 'loops', masterAssetId: 'loop-master', frames: master.length / 2, startFrame: 0, endFrame: master.length / 2, status, initialState: { tracks: [structuredClone(track)] }, ...(status === 'interrupted' ? { editableFrames: 24, arrangementIncomplete: true } : {}) });
+    await storage.saveProject(project);
+    const { blob } = await exportProject(storage, project), imported = await importProject(storage, blob);
+    const perf = imported.performances[0], assets = await storage.listAssets(imported.id);
+    assert.equal(perf.source, 'loops'); assert.equal(Object.hasOwn(perf, 'leadAssetId'), false); assert.equal(imported.takes.length, 0);
+    assert.equal(perf.status, status); assert.equal(perf.editableFrames, project.performances[0].editableFrames);
+    assert.equal(perf.initialState.tracks[0].assetId, imported.tracks[0].assetId);
+    const attached = assets.find(asset => asset.id === perf.masterAssetId), orphan = assets.find(asset => asset.captureId === 'orphan-loop-capture');
+    for (const [asset, pcm] of [[attached, master], [orphan, recovered]]) {
+      assert.equal(asset.source, 'loops'); assert.equal(asset.channels, 2); assert.equal(Object.hasOwn(asset, 'leadAssetId'), false);
+      assert.deepEqual(await (await storage.getAssetFile(asset.id)).arrayBuffer(), pcm.buffer);
+    }
+    assert.equal(attached.performanceId, 'loop-performance'); assert.equal(orphan.performanceId, 'orphan-loop-performance'); assert.equal(orphan.status, 'interrupted');
+    assert.equal((await inspectProjectArchive((await exportProject(storage, imported)).blob)).assetCount, 3);
+  }
+});
+
+test('loop master source validation rejects mono audio and phantom vocal references before import writes', async () => {
+  const { storage, project } = await fixture(), { blob } = await exportProject(storage, project);
+  const invalidArchives = [
+    await mutateManifest(blob, manifest => { manifest.assets.find(asset => asset.id === 'beat-audio').source = 'loops'; }),
+    await mutateManifest(blob, manifest => { const asset = manifest.assets.find(asset => asset.id === 'master-audio'); asset.source = 'loops'; asset.leadAssetId = 'lead-audio'; }),
+    await mutateManifest(blob, manifest => { const asset = manifest.assets.find(asset => asset.id === 'master-audio'); asset.source = 'loops'; asset.leadAssetId = null; }),
+    await mutateManifest(blob, manifest => { manifest.assets[0].source = 'unknown'; }),
+  ];
+  for (const archive of invalidArchives) {
+    storage.calls = [];
+    await assert.rejects(importProject(storage, archive), /loops-only recording|unknown source/);
+    assert.deepEqual(storage.calls, []);
+  }
+  storage.assets.get('beat-audio').source = 'loops';
+  await assert.rejects(exportProject(storage, project), /loops-only recording/);
+});
+
 test('a stereo-only recovery backup does not depend on an empty abandoned vocal', async () => {
   const { storage, project } = await fixture();
   await addAsset(storage, project.id, 'orphan-master', new Float32Array(200).fill(.1), 2, { kind: 'master', captureId: 'capture-orphan', leadAssetId: 'empty-abandoned' });

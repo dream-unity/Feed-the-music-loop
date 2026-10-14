@@ -168,7 +168,11 @@ export function validateProject(input, { strict = true } = {}) {
   const performances = array(p.performances, 'performances');
   for (const perf of performances) {
     object(perf, 'performance'); validId(perf.id, 'performance'); string(perf.name, 'performance name');
-    validId(perf.leadAssetId, 'performance vocal'); validId(perf.masterAssetId, 'performance mix');
+    if (perf.source !== undefined && perf.source !== 'loops') fail('Unknown performance source.');
+    if (perf.source === 'loops') {
+      if (Object.hasOwn(perf, 'leadAssetId')) fail('A loops-only performance cannot reference a vocal recording.');
+    } else validId(perf.leadAssetId, 'performance vocal');
+    validId(perf.masterAssetId, 'performance mix');
     number(perf.frames, 'performance frames', 0, Number.MAX_SAFE_INTEGER, true); number(perf.startFrame, 'performance start', 0, Number.MAX_SAFE_INTEGER, true);
     number(perf.endFrame, 'performance end', perf.startFrame, Number.MAX_SAFE_INTEGER, true);
     if (!['complete', 'interrupted', 'recovered'].includes(perf.status)) fail('Unknown performance status.');

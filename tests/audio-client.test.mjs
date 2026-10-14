@@ -441,3 +441,24 @@ test('late device enumeration after close cannot publish a stale devices event',
   const first = h.engine.enableMic(), stream = microphone(); h.requests[0].resolve(stream); await first;
   await h.engine.close(); enumerationGate.resolve(); await turn(); assert.equal(events.length, 0);
 });
+
+for (const phase of ['arming', 'recording']) {
+  test(`microphone mute and disconnect do not interrupt loop-only ${phase}`, async t => {
+    const h=fakeBrowser(t);await h.init();const enabling=h.engine.enableMic(),stream=microphone();
+    h.requests[0].resolve(stream);await enabling;
+    h.engine.arm({id:'loops',assetId:'stereo-loops',kind:'mix'});
+    if(phase==='recording')h.nodes[0].emit({type:'state',playing:true,capture:{id:'loops',kind:'mix',status:'recording'}});
+    const events=[];for(const type of ['device-lost','interrupted'])h.engine.addEventListener(type,e=>events.push(e.detail));
+    const before=h.commands().length;stream.track.interrupt('mute');stream.track.interrupt('ended');
+    assert.equal(events.length,0);assert.equal(h.commands().slice(before).some(m=>['interrupt','stop'].includes(m.type)),false);
+    assert.equal(h.engine.stream,null);assert.equal(h.sources[0].disconnected,true);
+    assert.equal(h.engine.loopMixCapture(),true);assert.equal(h.requests.length,1);
+    h.nodes[0].emit({type:'capture-end',captureId:'loops'});assert.equal(h.engine.loopMixCapture(),false);
+  });
+}
+
+test('loop-only arming never asks for microphone permission and rejection retires its pending capture identity',async t=>{
+  const h=fakeBrowser(t);await h.init();h.engine.arm({id:'loops',assetId:'stereo-loops',kind:'mix'});
+  assert.equal(h.requests.length,0);assert.equal(h.engine.loopMixCapture(),true);
+  h.nodes[0].emit({type:'capture-rejected',captureId:'loops'});assert.equal(h.engine.loopMixCapture(),false);
+});
