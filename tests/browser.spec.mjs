@@ -270,7 +270,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await view(page, 'song');
   await expect(takes(page)).toHaveCount(2);
   await expect(page.locator('.performance-card')).toHaveCount(2);
-  const reopenedMaster = await download(page, () => page.locator(`[data-action="export-master"][data-performance-id="${longPerformanceId}"]`).click());
+  const reopenedMaster = await download(page, () => page.locator(`.performance-card [data-action="export-master"][data-performance-id="${longPerformanceId}"]`).click());
   expect(inspectWav(reopenedMaster.bytes).peak).toBeGreaterThan(0.005);
   expect(reopenedMaster.bytes).toEqual(master.bytes);
   await page.locator(`.take-card[data-take-id="${longTakeId}"] [data-action="select-track"]`).click();
@@ -279,7 +279,7 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await view(page, 'song');
   // Byte-correct WAV export alone does not prove native media playback. Use
   // the actual saved-performance preview and its HTMLAudioElement clock.
-  await page.locator(`[data-action="preview-performance"][data-performance-id="${longPerformanceId}"]`).click();
+  await page.locator(`.performance-card [data-action="preview-performance"][data-performance-id="${longPerformanceId}"]`).click();
   const player = page.locator('#performance-player');
   await expect(player).toBeVisible();
   await expect.poll(() => player.evaluate(audio => audio.currentTime)).toBeGreaterThan(0.3);
