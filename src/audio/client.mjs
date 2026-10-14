@@ -94,8 +94,21 @@ export class AudioEngine extends EventTarget {
       const serialized = JSON.stringify(track);
       if (this.trackAssets.get(track.id) !== track.assetId) this.readyTracks.delete(track.id);
       this.trackAssets.set(track.id, track.assetId);
-      if (this.tracks.get(track.id) !== serialized) { this.send('track', { track: clone(track) }); this.tracks.set(track.id, serialized); }
+      // Mixer, timing and section commands also change the running worklet.
+      // A previous project snapshot is not proof that its live state still
+      // matches. Reconcile every desired track; same-asset updates retain DSP,
+      // page caches and playback phase inside the audio engine.
+      this.send('track', { track: clone(track) }); this.tracks.set(track.id, serialized);
     }
+    for (const check of this.readyWaiters) check();
+  }
+  adoptRecordedTrack(track) {
+    // The worklet starts a completed loop at its exact musical boundary before
+    // durable finalization returns. Register that already-playing track without
+    // adding it again or waiting for a second readiness acknowledgement.
+    if (this.closed || !track?.id || !track.assetId) return;
+    this.tracks.set(track.id, JSON.stringify(track));
+    this.trackAssets.set(track.id, track.assetId); this.readyTracks.add(track.id);
     for (const check of this.readyWaiters) check();
   }
   waitUntilReady(timeout = 15000) {

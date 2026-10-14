@@ -313,16 +313,17 @@ export class BrowserBackend {
     }
     return { projectId, audioBytes, bytes: audioBytes, assetCount: assets.length, recordingAssets, byKind, includesMetadataOverhead: false };
   }
-  async purgeProject(projectId) {
+  async purgeProject(projectId, { discardUnfinished = false } = {}) {
     await this.lockProject(projectId);
     const assets = await this.listAssets(projectId);
     if (assets.some(asset => asset.projectId !== projectId)) throw storageError('ASSET_OWNER_MISMATCH', 'Project deletion found an inconsistent audio owner and stopped without deleting audio.');
-    if (assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
+    if (discardUnfinished !== true && assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
     const project = await this.loadProject(projectId);
+    let markerSaved = false;
     // Keep an interrupted purge discoverable, with its metadata, until every
     // owned file and page transaction has succeeded.
     if (project) {
-      try { await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() }); }
+      try { await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() }); markerSaved = true; }
       catch (error) {
         // Deletion must still free space when there is not even enough quota
         // for this optional marker. Existing metadata remains the retry index.
@@ -339,6 +340,9 @@ export class BrowserBackend {
       await this.releaseProject(projectId);
       return { projectId, purged: true, deletedAssets, freedAudioBytes };
     } catch (error) {
+      // A first deletion may have freed the quota needed for this marker.
+      // Preserve the original deletion failure if the best-effort retry fails.
+      if (project && !markerSaved) try { await this.put('projects', { ...project, purgePendingAt: project.purgePendingAt || Date.now() }); } catch {}
       throw Object.assign(storageError('PROJECT_PURGE_INCOMPLETE', `Project deletion stopped after ${deletedAssets} audio file${deletedAssets === 1 ? '' : 's'}. Remaining project data was retained. Retry permanent deletion to finish. ${error.message || ''}`), { projectId, deletedAssets, freedAudioBytes, cause: error });
     }
   }

@@ -46,6 +46,8 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
     const asset = await storage.getAsset(vocalAssetId);
     validateAudioMetadata(asset);
     if (asset.projectId !== project.id || asset.sampleRate !== sampleRate || asset.channels !== 1 || !['complete', 'interrupted', 'recovered'].includes(asset.status)) throw new ExportError('INVALID_RENDER', 'The selected dry vocal is unavailable or incompatible.');
+    const savedTake = project.takes.find(take => take.assetId === vocalAssetId);
+    if ((savedTake && savedTake.frames !== asset.frames) || (performance?.status === 'complete' && performance.frames !== asset.frames) || (performance?.editableFrames || 0) > asset.frames) throw new ExportError('DAMAGED_AUDIO', 'The saved vocal is incomplete or no longer matches this performance. Download its verified incomplete audio from Song, or restore a complete project backup. The original song timing was preserved.');
     vocal = { assetId: asset.id, frames: asset.frames };
   }
   let bodyFrames;

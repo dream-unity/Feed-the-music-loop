@@ -62,6 +62,30 @@ test('an active recording refuses purge before deleting any completed asset', as
   assert.equal(disk.assets.size, 2); assert.equal(disk.files.size, 2); assert.deepEqual(disk.events, ['lock:project-a']);
 });
 
+test('explicitly confirmed unfinished deletion frees orphan recordings without requiring a metadata seal', async () => {
+  const disk = new FakeDiskBackend(); disk.add('orphan-a', 'project-a', 'vocal', 'opfs', 'recording'); disk.add('other-b', 'project-b');
+  disk.put = async () => { throw Object.assign(new Error('Storage full'), { name: 'QuotaExceededError' }); };
+  const result = await disk.purgeProject('project-a', { discardUnfinished: true });
+  assert.equal(result.purged, true); assert.equal(result.deletedAssets, 1);
+  assert.deepEqual([...disk.assets.keys()], ['other-b']); assert.deepEqual([...disk.files], ['other-b.pcm']);
+  assert.equal(disk.projects.has('project-a'), false);
+});
+
+test('unfinished deletion opt-in still requires the project writer lock', async () => {
+  const disk = new FakeDiskBackend(); disk.add('orphan-a', 'project-a', 'vocal', 'opfs', 'recording'); disk.foreign.add('project-a');
+  await assert.rejects(disk.purgeProject('project-a', { discardUnfinished: true }), { code: 'PROJECT_BUSY' });
+  assert.equal(disk.assets.has('orphan-a'), true); assert.deepEqual(disk.events, ['lock:project-a']);
+});
+
+test('partial quota-limited deletion retries its discoverability marker after freeing a file', async () => {
+  const disk = new FakeDiskBackend(); disk.add('first-a', 'project-a'); disk.add('second-a', 'project-a'); disk.failFile = 'second-a.pcm';
+  const put = disk.put.bind(disk); let attempts = 0;
+  disk.put = async (...args) => { if (++attempts === 1) throw Object.assign(new Error('Storage full'), { name: 'QuotaExceededError' }); return put(...args); };
+  await assert.rejects(disk.purgeProject('project-a'), { code: 'PROJECT_PURGE_INCOMPLETE' });
+  assert.equal(attempts, 2); assert.ok(disk.projects.get('project-a').purgePendingAt);
+  assert.equal(disk.assets.has('second-a'), true);
+});
+
 test('file deletion failure retains metadata and resumes safely on retry', async () => {
   const disk = new FakeDiskBackend(); disk.add('first-a', 'project-a'); disk.add('second-a', 'project-a'); disk.add('foreign-b', 'project-b'); disk.failFile = 'second-a.pcm';
   await assert.rejects(disk.purgeProject('project-a'), error => error.code === 'PROJECT_PURGE_INCOMPLETE' && error.deletedAssets === 1);

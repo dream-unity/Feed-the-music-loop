@@ -43,7 +43,7 @@ export class StorageClient extends EventTarget {
   saveProject(project) { return this.rpc('saveProject', [project]); }
   loadProject(id) { return this.rpc('loadProject', [id]); }
   deleteProject(id) { return this.rpc('deleteProject', [id]); }
-  purgeProject(id) { return this.rpc('purgeProject', [id]); }
+  purgeProject(id, options = {}) { return this.rpc('purgeProject', [id, options]); }
   projectUsage(id) { return this.rpc('projectUsage', [id]); }
   beginAsset(metadata) { return this.rpc('beginAsset', [metadata]); }
   finishAsset(id, options = {}) { return this.rpc('finishAsset', [id, options]); }

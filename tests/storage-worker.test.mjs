@@ -22,6 +22,9 @@ async function fixture() {
     async finishAsset(asset) { if (this.failSeal) throw Object.assign(new Error('Disk full'), { name: 'QuotaExceededError' }); this.assets.set(asset.id, structuredClone(asset)); }
     async getAssetRange(asset, range) { this.rangeRequest = { id: asset.id, ...range }; return new Blob([new Uint8Array([1, 2, 3, 4])]); }
     async deleteAsset(id) { if (this.failDelete) throw new Error('Deletion failed'); this.assets.delete(id); for (const key of this.pages.keys()) if (key.startsWith(`${id}:`)) this.pages.delete(key); return { id, deleted: true }; }
+    async lockProject() { if (this.foreignLock) throw storageError('PROJECT_BUSY', 'Another tab owns this project'); }
+    async listAssets(projectId) { return [...this.assets.values()].filter(asset => asset.projectId === projectId).map(asset => structuredClone(asset)); }
+    async purgeProject(projectId, options) { this.purgeOptions = options; for (const asset of await this.listAssets(projectId)) await this.deleteAsset(asset.id); return { purged: true }; }
     closeHandle() {}
     async releaseProject() { this.released = true; }
   }
@@ -138,4 +141,35 @@ test('successful intentional ID reuse clears the recent deletion fence', async (
   await rpc('beginAsset', [{ id: 'asset-1', projectId: 'project-1', sampleRate: 48000, channels: 1, kind: 'loop' }]);
   await rpc('putPage', ['asset-1', 0, new Float32Array([0.25]).buffer, 1, 1]);
   assert.equal(new Float32Array((await rpc('readPage', ['asset-1', 0])).buffer)[0], .25);
+});
+
+test('confirmed project purge fences old worklet writes, reads and ends, including reused audio IDs', async () => {
+  const { rpc, send, port, backend, messages } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
+  await rpc('purgeProject', ['project-1', { discardUnfinished: true }]);
+  assert.deepEqual(backend.purgeOptions, { discardUnfinished: true }); assert.equal(backend.assets.size, 0);
+  const before = messages.length;
+  send({ type: 'write', assetId: 'asset-1', index: 1, frames: 1, channels: 1, buffer: new Float32Array([.8]).buffer });
+  send({ type: 'read', assetId: 'asset-1', index: 0 });
+  send({ type: 'end', assetId: 'asset-1', frames: 2, status: 'complete' });
+  await until(() => port.messages.some(message => message.type === 'recycle') && port.messages.some(message => message.type === 'page-missing'));
+  await rpc('estimate').catch(() => {}); // Wait for preceding queued writes/end.
+  assert.equal(backend.assets.size, 0); assert.equal(backend.pages.size, 0);
+  assert.equal(messages.slice(before).some(message => message.event === 'error'), false);
+  await rpc('beginAsset', [{ id: 'asset-1', projectId: 'project-1', sampleRate: 48000, channels: 1, kind: 'loop' }]);
+  send({ type: 'write', assetId: 'asset-1', index: 0, frames: 1, channels: 1, buffer: new Float32Array([.9]).buffer });
+  await until(() => port.messages.filter(message => message.type === 'recycle').length === 2);
+  assert.equal(backend.assets.get('asset-1').frames, 0, 'old port cannot write into an intentionally reused ID');
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.4]).buffer, 1, 1]);
+  assert.equal(backend.assets.get('asset-1').frames, 1);
+});
+
+test('default purge refusal and foreign writer lock do not fence a live recording', async () => {
+  const { rpc, backend } = await fixture();
+  await assert.rejects(rpc('purgeProject', ['project-1']), { code: 'RECORDING_ACTIVE' });
+  backend.foreignLock = true;
+  await assert.rejects(rpc('purgeProject', ['project-1', { discardUnfinished: true }]), { code: 'PROJECT_BUSY' });
+  backend.foreignLock = false;
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
+  assert.equal(backend.assets.get('asset-1').frames, 1);
 });

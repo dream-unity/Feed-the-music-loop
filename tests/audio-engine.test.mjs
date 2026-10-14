@@ -57,6 +57,29 @@ test('section launches atomically on boundary and excludes later-added tracks',(
   const h=harness();h.arm({lengthFrames:1000});h.run(1001,()=>.1);h.engine.command({type:'track',track:{id:'later',assetId:'raw',frames:1000,channels:1,mix:{volume:1},muted:false}});h.engine.command({type:'section',section:{id:'intro',tracks:{track:{muted:false,mix:{volume:.4}}}}});assert.equal(h.engine.tracks.get('later').track.muted,false);h.run(1000);assert.equal(h.engine.tracks.get('later').track.muted,true);assert.equal(h.engine.tracks.get('track').track.mix.volume,.4);assert.equal(h.events.find(e=>e.type==='section').projectFrame,2000);
 });
 
+test('cancelling a queued section prevents an undone change from returning at its boundary',()=>{
+  const h=harness();h.arm({lengthFrames:1000});h.run(1200,()=>.1);
+  const before={...h.engine.tracks.get('track').track.mix};
+  h.engine.command({type:'section',section:{id:'quiet',tracks:{track:{muted:true,mix:{volume:.1}}}}});
+  assert.equal(h.engine.pendingSection.frame,2000);
+  h.engine.command({type:'cancel-section'});h.run(2000);
+  assert.equal(h.engine.pendingSection,null);assert.equal(!!h.engine.tracks.get('track').track.muted,false);
+  assert.deepEqual(h.engine.tracks.get('track').track.mix,before);
+  assert.equal(h.events.filter(event=>event.type==='section').length,0);
+  assert.equal(h.engine.playing,true);assert.equal(h.engine.frame,3200);
+});
+
+test('deleting one section cancels only its matching queued launch',()=>{
+  const h=harness();h.arm({lengthFrames:1000});h.run(1200,()=>.1);
+  h.engine.command({type:'section',section:{id:'next',tracks:{track:{muted:true,mix:{volume:.1}}}}});
+  h.engine.command({type:'cancel-section',id:'different'});assert.equal(h.engine.pendingSection.section.id,'next');
+  h.engine.command({type:'cancel-section',id:'next'});assert.equal(h.engine.pendingSection,null);
+  h.run(1000);assert.equal(h.events.filter(event=>event.type==='section').length,0);
+  h.engine.command({type:'section',section:{id:'later',tracks:{track:{muted:true,mix:{volume:.3}}}}});
+  h.run(1000);assert.equal(h.events.filter(event=>event.type==='section').at(-1).id,'later');
+  assert.equal(h.engine.tracks.get('track').track.muted,true);
+});
+
 test('bounded cache preserves opening pages while rolling through a long asset',()=>{
   const c=new PageCache(16,1,2,4);for(let n=0;n<2000;n++)c.write(n,n);assert.equal(c.slots.length,6);assert.equal(c.sample(0),0);assert.equal(c.sample(31),31);assert.equal(c.sample(1999),1999);assert(Number.isNaN(c.sample(500)));
 });

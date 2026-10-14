@@ -55,3 +55,13 @@ test('bounded audio range RPC preserves frame units and returns the immutable Bl
   const blob = new Blob([new Uint8Array([1, 2, 3])]); worker.respond(0, blob);
   assert.equal(await requested, blob);
 });
+
+test('project purge retains safe defaults and forwards explicit unfinished-discard authorization', async () => {
+  const { worker, client } = fixture();
+  const guarded = client.purgeProject('first');
+  assert.deepEqual(worker.messages[0].message.args, ['first', {}]);
+  worker.respond(0, { purged: true }); await guarded;
+  const confirmed = client.purgeProject('second', { discardUnfinished: true });
+  assert.deepEqual(worker.messages[1].message.args, ['second', { discardUnfinished: true }]);
+  worker.respond(1, { purged: true }); await confirmed;
+});

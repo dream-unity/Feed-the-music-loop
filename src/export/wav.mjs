@@ -19,6 +19,35 @@ export function validateAudioMetadata(asset) {
 export const WAV_HEADER_BYTES = 58;
 export const MAX_RIFF_DATA_BYTES = 0xffffffff - (WAV_HEADER_BYTES - 8);
 export const MAX_RANGE_DATA_BYTES = 64 * 1024 * 1024;
+export const VERIFY_CHUNK_BYTES = 4 * 1024 * 1024;
+
+/** Verify the exact immutable File snapshot being exported against journal-CRC
+ * checked ranges. Production storage implements getAssetRange; small trusted
+ * in-memory adapters used in tests may omit it. Never cache this verification:
+ * a later export or a reused asset ID must be checked against its own snapshot.
+ * Each RPC is bounded and independent so playback reads can run between them. */
+export async function verifyAudioSnapshot(storage, asset, file, { signal, startFrame = 0, frames = asset.frames } = {}) {
+  signal?.throwIfAborted();
+  const bytes = validateAudioMetadata(asset), stride = asset.channels * 4;
+  if (!(file instanceof Blob) || file.size !== bytes || !Number.isSafeInteger(startFrame) || !Number.isSafeInteger(frames) || startFrame < 0 || frames < 0 || startFrame > asset.frames - frames) throw new ExportError('AUDIO_SIZE_MISMATCH', 'The saved audio snapshot does not match its metadata.');
+  if (typeof storage.getAssetRange !== 'function') return;
+  const chunkFrames = Math.floor(VERIFY_CHUNK_BYTES / stride), endFrame = startFrame + frames;
+  for (let offset = startFrame; offset < endFrame; offset += chunkFrames) {
+    signal?.throwIfAborted();
+    const count = Math.min(chunkFrames, endFrame - offset), expectedBytes = count * stride;
+    const verified = await storage.getAssetRange(asset.id, { startFrame: offset, frames: count });
+    signal?.throwIfAborted();
+    if (!(verified instanceof Blob) || verified.size !== expectedBytes) throw new ExportError('AUDIO_SIZE_MISMATCH', 'A verified audio range does not match its expected length.');
+    const originalBytes = await file.slice(offset * stride, (offset + count) * stride).arrayBuffer();
+    signal?.throwIfAborted();
+    const verifiedBytes = await verified.arrayBuffer();
+    signal?.throwIfAborted();
+    if (originalBytes.byteLength !== expectedBytes || verifiedBytes.byteLength !== expectedBytes) throw new ExportError('AUDIO_SIZE_MISMATCH', 'A saved audio range could not be read completely.');
+    const original = new Uint32Array(originalBytes), checked = new Uint32Array(verifiedBytes);
+    for (let index = 0; index < original.length; index++) if (original[index] !== checked[index]) throw new ExportError('AUDIO_SNAPSHOT_MISMATCH', 'The saved audio changed or failed verification. Reopen the project to recover verified audio before exporting.');
+    signal?.throwIfAborted();
+  }
+}
 
 // IEEE float WAVE includes the extended fmt size and required non-PCM fact
 // chunk. Data comes directly from immutable PCM File/Blob slices, without
@@ -63,6 +92,7 @@ export async function exportWav(storage, assetId, options = {}) {
   const { asset, file } = await source(storage, assetId, options.signal);
   const maxFrames = Math.floor(MAX_RIFF_DATA_BYTES / (asset.channels * 4));
   if (asset.frames > maxFrames) throw new ExportError('WAV_SPLIT_REQUIRED', 'This recording exceeds the WAV size limit. Export numbered WAV parts.', { partCount: Math.ceil(asset.frames / maxFrames), maxFrames });
+  await verifyAudioSnapshot(storage, asset, file, { signal: options.signal });
   options.signal?.throwIfAborted();
   return { blob: new Blob([wavHeader(asset), file], { type: 'audio/wav' }), filename: safeFilename(options.name || asset.name, 'wav'), frames: asset.frames, channels: asset.channels, sampleRate: asset.sampleRate };
 }
@@ -77,6 +107,7 @@ export async function* exportWavParts(storage, assetId, { signal, maxDataBytes =
     signal?.throwIfAborted();
     const startFrame = part * maxFrames;
     const frames = Math.min(maxFrames, asset.frames - startFrame);
+    if (file) await verifyAudioSnapshot(storage, asset, file, { signal, startFrame, frames });
     const pcm = file ? file.slice(startFrame * asset.channels * 4, (startFrame + frames) * asset.channels * 4)
       : await storage.getAssetRange(assetId, { startFrame, frames });
     signal?.throwIfAborted();

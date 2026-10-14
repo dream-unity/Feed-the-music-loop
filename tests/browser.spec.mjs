@@ -115,6 +115,59 @@ test.afterEach(async ({ page }, testInfo) => {
   }
 });
 
+test('Undo and Redo restore the recorded loop in the audible audio graph', async ({ page }, testInfo) => {
+  await boot(page);
+  await recordFirstLoop(page);
+  const trackId = await tracks(page).first().getAttribute('data-track-id');
+  const observations = [];
+  const observeOutput = async (label, audible) => {
+    let consecutive = 0;
+    let measuredDb = Number.NaN;
+    // The meter is fed by the native worklet's final output. Several matching
+    // readings avoid mistaking a single quiet boundary for a silent graph;
+    // silence waits also allow the previous layer's effects tail to decay.
+    await expect.poll(async () => {
+      const text = (await page.locator('[data-ref="output-db"]').textContent()).trim();
+      measuredDb = text === '−∞' || text === '-∞' ? -Infinity : Number(text.replace('−', '-'));
+      const matches = audible ? measuredDb > -60 : measuredDb < -70;
+      consecutive = matches ? consecutive + 1 : 0;
+      return consecutive;
+    }, { timeout: 10_000, intervals: [100, 100, 100, 200], message: `${label}: native output should become ${audible ? 'audible' : 'silent'}` }).toBeGreaterThanOrEqual(3);
+    observations.push({ label, audible, outputDb: Number.isFinite(measuredDb) ? measuredDb : '−∞' });
+  };
+  const restoredTrack = () => page.locator(`.loop-card[data-track-id="${trackId}"]`);
+  const expectRestored = async () => {
+    await expect(tracks(page)).toHaveCount(1);
+    await expect(restoredTrack()).toBeVisible();
+    await expect(restoredTrack().locator('[data-action="mute"]')).toHaveAttribute('aria-pressed', 'false');
+    await playing(page, true);
+  };
+
+  await observeOutput('newly recorded first loop', true);
+  await action(page, 'undo').click();
+  await expect(tracks(page)).toHaveCount(0);
+  await observeOutput('Undo recording', false);
+
+  await action(page, 'redo').click();
+  await expectRestored();
+  await observeOutput('Redo recording', true);
+
+  await restoredTrack().locator('[data-action="mute"]').click();
+  await expect(restoredTrack().locator('[data-action="mute"]')).toHaveAttribute('aria-pressed', 'true');
+  await observeOutput('Mute', false);
+  await action(page, 'undo').click();
+  await expectRestored();
+  await observeOutput('Undo mute', true);
+
+  await restoredTrack().locator('[data-action="remove-track"]').click();
+  await expect(tracks(page)).toHaveCount(0);
+  await observeOutput('Remove layer', false);
+  await action(page, 'undo').click();
+  await expectRestored();
+  await observeOutput('Undo removal', true);
+  await testInfo.attach('audible-history-transitions', { body: JSON.stringify(observations, null, 2), contentType: 'application/json' });
+});
+
 test('record loops, a continuous vocal, another take, and recover after reload', async ({ page }, testInfo) => {
   await boot(page);
   await reviewScreenshot(page, testInfo, 'desktop-welcome');

@@ -26,6 +26,15 @@ contiguous in manifest order, with no holes, overlaps or trailing data. Asset
 length is exactly `frames × channels × 4`; mono and stereo are supported.
 
 Checksums detect corruption; they do not authenticate the archive's author.
+Before exporting a WAV or backup, production storage verifies journal checksums
+in ranges of at most 4 MiB and compares those bytes with the exact File snapshot
+included in the download. A same-size changed snapshot, short read or damaged
+page rejects the export. Verification is cancellable between reads, does not
+cache results across exports, and never allocates a whole-song audio buffer.
+File-backed numbered WAVs verify each part immediately before offering it;
+range-backed fallback parts already verify their journal pages while reading.
+Only trusted in-memory test adapters may omit the `getAssetRange` verification
+interface; both production storage backends provide it.
 Import rejects unsupported versions, oversized/deep metadata, duplicate or unsafe
 IDs, missing references, invalid lengths, mismatched sample rates, NaN/Infinity
 samples, and damaged checksums before creating any recordings. It reads PCM in

@@ -1,6 +1,6 @@
 import { validateProject, MAX_AUTOMATION_EVENTS } from '../project.mjs';
 import { SHA256, hashBlob, bytesToHex } from './sha256.mjs';
-import { ExportError, safeFilename, validateAudioMetadata } from './wav.mjs';
+import { ExportError, safeFilename, validateAudioMetadata, verifyAudioSnapshot } from './wav.mjs';
 
 export const ARCHIVE_MAGIC = 'FMLPACK\n';
 export const ARCHIVE_HEADER_BYTES = 64;
@@ -115,6 +115,7 @@ function assetMetadata(asset, offset, sha256) {
 /** Create a portable binary backup. All archived recordings are immutable and
  * checksummed; PCM data remains in File-backed Blob parts wherever supported. */
 export async function exportProject(storage, project, { signal, onProgress, includeUnreferenced = true } = {}) {
+  signal?.throwIfAborted();
   const snapshot = checkedProject(project);
   const ids = collectAssetIds(snapshot);
   if (includeUnreferenced && typeof storage.listAssets === 'function') {
@@ -128,11 +129,14 @@ export async function exportProject(storage, project, { signal, onProgress, incl
   for (const id of ids) {
     signal?.throwIfAborted();
     const asset = await storage.getAsset(id);
+    signal?.throwIfAborted();
     if (!asset || asset.projectId !== snapshot.id) fail('A project recording is missing or belongs to another project.');
     const metadata = assetMetadata(asset, payloadBytes, '');
     if (metadata.sampleRate !== snapshot.sampleRate) fail('A recording sample rate does not match the project.');
     const file = await storage.getAssetFile(id);
+    signal?.throwIfAborted();
     if (!(file instanceof Blob) || file.size !== metadata.bytes) fail('A recording has an inconsistent saved length.');
+    await verifyAudioSnapshot(storage, asset, file, { signal });
     metadata.sha256 = await hashBlob(file, { signal, validateFloat32: true, onProgress: (bytes, total) => onProgress?.({ phase: 'hashing', assetId: id, asset: index + 1, assets: ids.size, bytes, total }) });
     assets.push(metadata); files.push(file); index++;
     payloadBytes += metadata.bytes;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
 import { createProject, createTrack, DEFAULT_MIX } from '../src/project.mjs';
 import { SHA256, hashBlob } from '../src/export/sha256.mjs';
-import { exportWav, exportWavParts, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, MAX_RANGE_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
+import { exportWav, exportWavParts, verifyAudioSnapshot, VERIFY_CHUNK_BYTES, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, MAX_RANGE_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
 import { exportProject, importProject, inspectProjectArchive, ARCHIVE_HEADER_BYTES, MAX_MANIFEST_BYTES, validateJsonTree } from '../src/export/archive.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -99,6 +99,106 @@ test('float32 WAV preserves every sample with correct fmt/fact/data metadata', a
   assert.equal(view.getUint32(24, true), 48000); assert.equal(view.getUint32(28, true), 48000 * 8);
   assert.equal(view.getUint32(46, true), master.length / 2); assert.equal(view.getUint32(54, true), master.byteLength);
   assert.deepEqual(new Uint8Array(bytes, WAV_HEADER_BYTES), new Uint8Array(master.buffer));
+});
+
+test('snapshot verification reads independent frame-aligned chunks and never materialises the full recording', async () => {
+  const bytes = randomBytes(VERIFY_CHUNK_BYTES * 2 + 24), calls = [];
+  class BoundedBlob extends Blob {
+    async arrayBuffer() { assert.ok(this.size <= VERIFY_CHUNK_BYTES); return super.arrayBuffer(); }
+    slice(...args) { return new BoundedBlob([super.slice(...args)]); }
+  }
+  const file = new BoundedBlob([bytes]);
+  const asset = { id: 'long-stereo', channels: 2, sampleRate: 48000, frames: bytes.length / 8 };
+  const storage = { getAssetRange: async (id, range) => {
+    assert.equal(id, asset.id); assert.ok(range.frames * 8 <= VERIFY_CHUNK_BYTES); calls.push(range);
+    return file.slice(range.startFrame * 8, (range.startFrame + range.frames) * 8);
+  } };
+  await verifyAudioSnapshot(storage, asset, file);
+  assert.deepEqual(calls, [
+    { startFrame: 0, frames: VERIFY_CHUNK_BYTES / 8 },
+    { startFrame: VERIFY_CHUNK_BYTES / 8, frames: VERIFY_CHUNK_BYTES / 8 },
+    { startFrame: VERIFY_CHUNK_BYTES / 4, frames: 3 },
+  ]);
+});
+
+test('original WAV and project backup reject journal corruption even when snapshot byte length is correct', async () => {
+  const { storage, project } = await fixture();
+  const error = Object.assign(new Error('The journal page checksum does not match.'), { code: 'CORRUPT_PAGE' });
+  storage.getAssetRange = async () => { throw error; };
+  await assert.rejects(exportWav(storage, 'beat-audio'), error);
+  await assert.rejects(exportProject(storage, project), error);
+  assert.deepEqual(storage.calls, []);
+});
+
+test('exports compare the exact saved snapshot against verified ranges and reject same-size substitution', async () => {
+  const { storage, project } = await fixture();
+  const originalFiles = new Map(await Promise.all([...storage.assets.keys()].map(async id => [id, await storage.getAssetFile(id)])));
+  storage.getAssetRange = async (id, range) => {
+    const stride = storage.assets.get(id).channels * 4;
+    return originalFiles.get(id).slice(range.startFrame * stride, (range.startFrame + range.frames) * stride);
+  };
+  const exported = await exportWav(storage, 'beat-audio');
+  assert.equal(hash(new Uint8Array(await exported.blob.slice(WAV_HEADER_BYTES).arrayBuffer())), hash(new Uint8Array(await originalFiles.get('beat-audio').arrayBuffer())));
+  const backup = await exportProject(storage, project);
+  assert.equal((await inspectProjectArchive(backup.blob)).assetCount, originalFiles.size);
+  // Reuse the same ID with the same dimensions after a successful export. A
+  // cached verification, or trusting only the journal's current file, is unsafe.
+  const substituted = new Uint8Array(await originalFiles.get('beat-audio').arrayBuffer()); substituted[7] ^= 1;
+  storage.getAssetFile = async id => id === 'beat-audio' ? new Blob([substituted]) : originalFiles.get(id);
+  await assert.rejects(exportWav(storage, 'beat-audio'), { code: 'AUDIO_SNAPSHOT_MISMATCH' });
+  await assert.rejects(exportProject(storage, project), { code: 'AUDIO_SNAPSHOT_MISMATCH' });
+});
+
+test('cancelling archive verification cannot return a backup or start another source read', async () => {
+  const { storage, project } = await fixture(), abort = new AbortController(), reads = [];
+  const getAssetFile = storage.getAssetFile.bind(storage);
+  storage.getAssetFile = async id => { reads.push(['file', id]); return getAssetFile(id); };
+  storage.getAssetRange = async (id, range) => {
+    reads.push(['range', id]); const file = await getAssetFile(id), stride = storage.assets.get(id).channels * 4;
+    abort.abort(); return file.slice(range.startFrame * stride, (range.startFrame + range.frames) * stride);
+  };
+  await assert.rejects(exportProject(storage, project, { signal: abort.signal }), { name: 'AbortError' });
+  assert.equal(reads.length, 2); assert.equal(reads[0][0], 'file'); assert.equal(reads[1][0], 'range'); assert.equal(reads[0][1], reads[1][1]);
+});
+
+test('snapshot verification rejects short verified ranges without returning a misleading WAV', async () => {
+  const { storage } = await fixture();
+  storage.getAssetRange = async () => new Blob([new Float32Array(2)]);
+  await assert.rejects(exportWav(storage, 'beat-audio'), { code: 'AUDIO_SIZE_MISMATCH' });
+});
+
+test('snapshot cancellation after every asynchronous read prevents subsequent reads and completion', async () => {
+  for (const abortStage of ['range', 'snapshot', 'verified']) {
+    const abort = new AbortController(), calls = [];
+    class ReadBlob extends Blob {
+      constructor(parts, stage) { super(parts); this.stage = stage; }
+      async arrayBuffer() { calls.push(this.stage); const bytes = await super.arrayBuffer(); if (this.stage === abortStage) abort.abort(); return bytes; }
+      slice(...args) { return new ReadBlob([super.slice(...args)], this.stage); }
+    }
+    const file = new ReadBlob([new Float32Array(8)], 'snapshot');
+    const asset = { id: 'cancel', channels: 1, frames: 8, sampleRate: 48000 };
+    const storage = { getAssetRange: async () => { calls.push('range'); if (abortStage === 'range') abort.abort(); return new ReadBlob([new Float32Array(8)], 'verified'); } };
+    await assert.rejects(verifyAudioSnapshot(storage, asset, file, { signal: abort.signal }), { name: 'AbortError' });
+    assert.deepEqual(calls, ['range', 'snapshot', 'verified'].slice(0, ['range', 'snapshot', 'verified'].indexOf(abortStage) + 1));
+  }
+  const abort = new AbortController(); abort.abort();
+  await assert.rejects(verifyAudioSnapshot({ getAssetRange: () => assert.fail('Cancelled verification must not begin storage I/O') }, null, null, { signal: abort.signal, frames: 0 }), { name: 'AbortError' });
+});
+
+test('file-backed numbered parts verify only the part being offered and stop at a corrupt later part', async () => {
+  const { storage } = await fixture(), ranges = [], original = await storage.getAssetFile('master-audio');
+  storage.getAssetRange = async (_id, range) => {
+    ranges.push(range);
+    const result = original.slice(range.startFrame * 8, (range.startFrame + range.frames) * 8);
+    if (range.startFrame === 0) return result;
+    const bytes = new Uint8Array(await result.arrayBuffer()); bytes[0] ^= 1; return new Blob([bytes]);
+  };
+  const parts = exportWavParts(storage, 'master-audio', { maxDataBytes: 16384 });
+  const first = (await parts.next()).value;
+  assert.equal(first.part, 1); assert.deepEqual(ranges, [{ startFrame: 0, frames: 2048 }]);
+  assert.deepEqual(new Uint8Array(await first.blob.slice(WAV_HEADER_BYTES).arrayBuffer()), new Uint8Array(await original.slice(0, 16384).arrayBuffer()));
+  await assert.rejects(parts.next(), { code: 'AUDIO_SNAPSHOT_MISMATCH' });
+  assert.deepEqual(ranges.at(-1), { startFrame: 2048, frames: 2048 });
 });
 
 test('numbered WAV parts split on complete frames and reconstruct the original stereo PCM', async () => {

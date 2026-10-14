@@ -91,7 +91,7 @@ test('project dialogs cancel empty names safely and create a distinct saved proj
   await expect(page.locator('[data-ref="project-name"]')).toHaveText(renamed);
 });
 
-test('a first-loop count-in can be stopped without a deferred recording, then retried and saved', async ({ page }, testInfo) => {
+test('a first-loop count-in cancels safely, preserves chosen focus, and Enter saves after recording starts', async ({ page }, testInfo) => {
   await boot(page);
   await page.getByTestId('enable-mic').click();
   await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Disconnect microphone');
@@ -117,12 +117,31 @@ test('a first-loop count-in can be stopped without a deferred recording, then re
   await expect(tracks(page)).toHaveCount(0);
   await expect(page.getByTestId('add-loop')).toBeEnabled();
 
+  // Returning to Cancel deliberately must preserve that choice when recording
+  // starts; automatic focus repair must not override keyboard navigation.
   await page.getByTestId('add-loop').click();
   await captureState(page, 'counting');
+  await expect(page.getByTestId('cancel')).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.getByTestId('stop')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByTestId('cancel')).toBeFocused();
+  await captureState(page, 'recording');
+  await expect(page.getByTestId('cancel')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await captureState(page, 'idle');
+  await expect(tracks(page)).toHaveCount(0);
+
+  // With no intervening navigation, focus initially redirected to Cancel must
+  // move to Finish as soon as recording begins. Enter must keep the recording.
+  await page.getByTestId('add-loop').click();
+  await captureState(page, 'counting');
+  await expect(page.getByTestId('cancel')).toBeFocused();
   await captureState(page, 'recording');
   await expect(page.getByTestId('finish')).toBeVisible();
+  await expect(page.getByTestId('finish')).toBeFocused();
   await page.waitForTimeout(1100);
-  await page.getByTestId('finish').click();
+  await page.keyboard.press('Enter');
   await captureState(page, 'idle');
   await expect(tracks(page)).toHaveCount(1);
   await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
@@ -133,6 +152,132 @@ test('a first-loop count-in can be stopped without a deferred recording, then re
   await page.reload();
   await expect(page.getByTestId('add-loop')).toBeEnabled();
   await expect(tracks(page)).toHaveCount(1);
+});
+
+test('a truncated saved source preserves song timing and offers only its verified incomplete prefix', async ({ page, context }, testInfo) => {
+  await boot(page);
+  await page.getByTestId('demo').click();
+  await expect(tracks(page)).toHaveCount(3);
+  await playing(page, true);
+  await page.getByTestId('sing').click();
+  await captureState(page, 'recording');
+  await page.waitForTimeout(1100);
+  await page.getByTestId('finish').click();
+  await captureState(page, 'idle');
+  await page.getByTestId('stop').click();
+  await playing(page, false);
+  await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
+
+  const readSaved = () => page.evaluate(async () => {
+    const modulePath = './src/storage/client.mjs';
+    const { StorageClient } = await import(modulePath);
+    const storage = new StorageClient();
+    try {
+      const { backend } = await storage.init();
+      const project = await storage.loadProject(localStorage.getItem('fml:last-project'));
+      return { backend, project, assets: await storage.listAssets(project.id) };
+    } finally { await storage.dispose(); }
+  });
+  const before = await readSaved();
+  expect(before.backend).toBe('opfs');
+  const damagedTrack = before.project.tracks[0];
+  expect(damagedTrack.frames).toBeGreaterThan(2 * 16_384);
+  const performance = before.project.performances[0];
+  expect(performance.frames).toBeGreaterThan(0);
+  const getDownload = async click => {
+    const event = page.waitForEvent('download');
+    await click();
+    const file = await event;
+    expect(await file.failure()).toBeNull();
+    return { filename: file.suggestedFilename(), bytes: await readFile(await file.path()) };
+  };
+  await page.locator('[data-action="view"][data-view="song"]').click();
+  const masterButton = () => page.locator(`.performance-card [data-action="export-master"][data-performance-id="${performance.id}"]`);
+  const intactMaster = await getDownload(() => masterButton().click());
+  expect(intactMaster.bytes.length).toBeGreaterThan(1000);
+
+  // Leave the app so its real worker releases OPFS handles. The isolated same-
+  // origin fixture changes one actual PCM file; no production fault switch or
+  // recovery mock is used, and project/page metadata remains untouched.
+  await context.route('**/__ci-storage-maintenance.html', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Isolated storage maintenance</title>' }));
+  await page.goto('./__ci-storage-maintenance.html');
+  await expect.poll(() => page.evaluate(async assetId => {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const directory = await root.getDirectoryHandle('feed-the-music-loop-v1');
+      const file = await directory.getFileHandle(`${assetId}.pcm`);
+      const writer = await file.createWritable({ keepExistingData: true });
+      try { await writer.truncate(16_384 * 4 + 13); } finally { await writer.close(); }
+      return 'truncated';
+    } catch (error) { return `${error.name}: ${error.message}`; }
+  }, damagedTrack.assetId), { timeout: 10_000 }).toBe('truncated');
+  const survivingPcm = Buffer.from(await page.evaluate(async assetId => {
+    const root = await navigator.storage.getDirectory();
+    const directory = await root.getDirectoryHandle('feed-the-music-loop-v1');
+    const file = await (await directory.getFileHandle(`${assetId}.pcm`)).getFile();
+    return Array.from(new Uint8Array(await file.slice(0, 16_384 * 4).arrayBuffer()));
+  }, damagedTrack.assetId));
+
+  await page.goto('./');
+  const panel = page.locator('.damaged-panel');
+  await expect(panel).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Some source audio is incomplete.' })).toBeVisible();
+  await expect(panel.locator('.damaged-card')).toHaveCount(1);
+  await expect(panel).toContainText('Your song’s timing has been kept');
+  await expect(panel).toContainText('This download is incomplete');
+  await expect(tracks(page)).toHaveCount(3);
+  for (const control of ['play', 'add-loop', 'sing']) await expect(page.getByTestId(control)).toBeDisabled();
+  await expect(action(page, 'export-project')).toBeDisabled();
+  await playing(page, false);
+
+  const timing = p => ({
+    baseFrames: p.baseFrames,
+    tracks: p.tracks.map(t => ({ id: t.id, frames: t.frames, offsetFrames: t.offsetFrames })),
+    takes: p.takes.map(t => ({ id: t.id, frames: t.frames, startFrame: t.startFrame })),
+    performances: p.performances.map(t => ({ id: t.id, frames: t.frames, startFrame: t.startFrame, endFrame: t.endFrame })),
+  });
+  const after = await readSaved();
+  expect(timing(after.project)).toEqual(timing(before.project));
+  const recovered = after.assets.find(asset => asset.id === damagedTrack.assetId);
+  expect(recovered.status).toBe('interrupted');
+  expect(recovered.frames).toBe(16_384);
+  expect(recovered.checkpointFrames).toBe(16_384);
+  const incomplete = await getDownload(() => panel.locator(`[data-action="export-damaged-audio"][data-id="${damagedTrack.assetId}"]`).click());
+  expect(incomplete.filename).toMatch(/-incomplete\.wav$/i);
+  expect(incomplete.bytes.subarray(0, 4).toString()).toBe('RIFF');
+  expect(incomplete.bytes.readUInt32LE(4) + 8).toBe(incomplete.bytes.length);
+  let format, pcm;
+  for (let offset = 12; offset + 8 <= incomplete.bytes.length;) {
+    const name = incomplete.bytes.subarray(offset, offset + 4).toString();
+    const length = incomplete.bytes.readUInt32LE(offset + 4);
+    expect(offset + 8 + length).toBeLessThanOrEqual(incomplete.bytes.length);
+    if (name === 'fmt ') format = { encoding: incomplete.bytes.readUInt16LE(offset + 8), channels: incomplete.bytes.readUInt16LE(offset + 10), sampleRate: incomplete.bytes.readUInt32LE(offset + 12), blockAlign: incomplete.bytes.readUInt16LE(offset + 20) };
+    if (name === 'data') pcm = incomplete.bytes.subarray(offset + 8, offset + 8 + length);
+    offset += 8 + length + length % 2;
+  }
+  expect(format).toEqual({ encoding: 3, channels: 1, sampleRate: before.project.sampleRate, blockAlign: 4 });
+  expect(pcm).toEqual(survivingPcm);
+  expect(pcm.length / format.blockAlign).toBe(16_384);
+
+  await page.locator(`.loop-card[data-track-id="${damagedTrack.id}"] .track-select`).click();
+  await expect(action(page, 'export-track')).toBeDisabled();
+  await action(page, 'export-menu').click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.locator('[data-action="export-project"]')).toBeDisabled();
+  await expect(dialog.locator('[data-action="preview-mix"]')).toBeDisabled();
+  await expect(dialog.locator('[data-action="export-mix"]')).toBeDisabled();
+  await expect(dialog.locator(`[data-action="export-master"][data-performance-id="${performance.id}"]`)).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await page.locator('[data-action="view"][data-view="song"]').click();
+  await expect(masterButton()).toBeEnabled();
+  const retainedMaster = await getDownload(() => masterButton().click());
+  expect(retainedMaster.bytes).toEqual(intactMaster.bytes);
+  await expect(panel).toBeVisible();
+  await screenshot(page, testInfo, 'incomplete-source-desktop');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await screenshot(page, testInfo, 'incomplete-source-mobile');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await testInfo.attach('incomplete-source-recovery', { body: JSON.stringify({ assetId: damagedTrack.assetId, expectedFrames: damagedTrack.frames, recoveredFrames: recovered.frames, incompleteFilename: incomplete.filename, originalMasterUnchanged: true, projectTimingUnchanged: true }, null, 2), contentType: 'application/json' });
 });
 
 test('storage management preserves a cancelled deletion, then removes the confirmed project and opens a usable studio', async ({ page }, testInfo) => {

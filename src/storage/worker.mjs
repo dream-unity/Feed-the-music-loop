@@ -5,6 +5,7 @@ const backend = new BrowserBackend();
 const journal = new AssetJournal(backend);
 const queue = new FairQueue();
 const ports = new Set();
+const portFences = new WeakMap();
 const releasedProjects = new Set();
 const deletedAssets = new Set();
 const pendingReads = new Map();
@@ -38,6 +39,7 @@ async function assertReadable(id, ticket) {
 }
 
 async function seal(id, options) {
+  await assertReadable(id);
   const asset = await journal.finish(id, options);
   progress(asset, { sealed: true, finalized: true, error: asset.error });
   return asset;
@@ -54,11 +56,22 @@ const methods = {
   loadProject: ([id]) => { validId(id, 'Project'); return backend.loadProject(id); },
   deleteProject: ([id]) => { validId(id, 'Project'); return backend.deleteProject(id); },
   projectUsage: ([id]) => { validId(id, 'Project'); return backend.projectUsage(id); },
-  purgeProject: async ([id]) => {
+  purgeProject: async ([id, options = {}]) => {
     validId(id, 'Project');
-    try { return await backend.purgeProject(id); }
+    // Controller closes audio before opting into unfinished-asset deletion.
+    // Preflight under the writer lock before fencing anything on a refusal.
+    await backend.lockProject(id);
+    const assets = await backend.listAssets(id);
+    if (assets.some(asset => asset.projectId !== id)) throw storageError('ASSET_OWNER_MISMATCH', 'Project deletion found an inconsistent audio owner.');
+    if (options.discardUnfinished !== true && assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
+    releasedProjects.add(id);
+    for (const asset of assets) {
+      markDeleted(asset.id);
+      for (const port of ports) portFences.get(port)?.add(asset.id);
+    }
+    try { return await backend.purgeProject(id, options); }
     finally {
-      for (const [assetId, asset] of journal.assets) if (asset.projectId === id && asset.status !== 'recording') { journal.assets.delete(assetId); journal.failures.delete(assetId); }
+      for (const [assetId, asset] of journal.assets) if (asset.projectId === id) { journal.assets.delete(assetId); journal.failures.delete(assetId); }
     }
   },
   beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); deletedAssets.delete(asset.id); return asset; },
@@ -67,6 +80,7 @@ const methods = {
   listAssets: ([projectId]) => backend.listAssets(projectId),
   readPage: async ([id, index]) => { await assertReadable(id); return journal.read(id, index); },
   putPage: async ([id, index, buffer, frames, channels]) => {
+    await assertReadable(id);
     const result = await journal.write(id, index, buffer, frames, channels);
     progress(result.asset); return { ...result.page, checkpointFrames: result.asset.checkpointFrames };
   },
@@ -115,6 +129,7 @@ const methods = {
 
 function attachPort(port) {
   ports.add(port); port.start();
+  const fencedAssets = new Set(); portFences.set(port, fencedAssets);
   port.onmessage = ({ data }) => {
     if (disposed) return;
     const type = data?.type;
@@ -122,7 +137,9 @@ function attachPort(port) {
     const readTicket = type === 'read' ? trackRead(data.assetId) : null;
     const run = async () => {
       await initialize();
+      if (fencedAssets.has(data.assetId)) throw storageError('ASSET_DELETED', 'This recording was intentionally deleted with its project.');
       if (type === 'write') {
+        await assertReadable(data.assetId);
         const result = await journal.write(data.assetId, data.index, data.buffer, data.frames, data.channels);
         port.postMessage({ type: 'written', assetId: data.assetId, index: data.index, frames: data.frames, checkpointFrames: result.asset.checkpointFrames });
         progress(result.asset);
@@ -138,7 +155,10 @@ function attachPort(port) {
     };
     queue.add(run, { read: type === 'read', bytes: type === 'write' ? data.buffer?.byteLength || 0 : 0 })
       .catch(async (error) => {
-        if (type === 'read' && ['PROJECT_RELEASED', 'ASSET_DELETED'].includes(error.code)) { port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: false }); return; }
+        if (['PROJECT_RELEASED', 'ASSET_DELETED'].includes(error.code)) {
+          if (type === 'read') port.postMessage({ type: 'page-missing', assetId: data.assetId, index: data.index, retryable: false });
+          return; // A retired worklet must not recreate files or report a new recording failure.
+        }
         if (type !== 'read') journal.fail(data.assetId, error);
         const detail = { assetId: data.assetId, index: data.index, ...serializeError(error), operation: type };
         port.postMessage({ type: 'storage-error', ...detail });

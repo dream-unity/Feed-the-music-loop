@@ -115,7 +115,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .status-banner { margin-top: 20px; padding: 10px 12px 10px 18px; background: #333426; border: 1px solid #5a5837; color: #dfd9ad; border-radius: 12px; font-size: 12px; line-height: 1.6; display: flex; align-items: center; gap: 15px; }
 .status-banner > span { flex: 1; }
 .status-banner > .button { flex: 0 0 auto; color: inherit; }
-.status-banner > [data-action="reload-studio"] { font-size: 12px; }
+.status-banner > [data-action="reload-studio"], .status-banner > [data-action="retry-recovery"] { font-size: 12px; }
 .status-banner.is-error { background: #392725; border-color: #69443c; color: #ffc7b8; }
 .status-banner, .toast > span, .dialog-copy { overflow-wrap: anywhere; }
 .recovery-panel { margin-top: 20px; padding: 22px; border: 1px solid #786b43; background: #302f23; border-radius: 16px; }
@@ -131,6 +131,15 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .recovery-card > .button { font-size: 10px; min-height: 40px; }
 .recovery-card > .button .icon { width: 15px; height: 15px; }
 .recovery-card > .delete-saved-mix { color: var(--coral); flex: 0 0 48px; min-height: 48px; }
+.damaged-panel { margin-top: 20px; padding: 22px; border: 1px solid #765346; background: #332b25; border-radius: 16px; }
+.damaged-heading h2 { color: #ffd0b9; font-size: 19px; }
+.damaged-heading p { margin-top: 9px; max-width: 780px; color: #dec5b9; font-size: 12px; line-height: 1.65; }
+.damaged-list { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
+.damaged-card { display: flex; align-items: center; gap: 15px; padding: 13px; border: 1px solid #705044; border-radius: 10px; }
+.damaged-card > div { flex: 1; min-width: 0; }
+.damaged-card h3 { font-size: 14px; font-weight: 550; overflow-wrap: anywhere; }
+.damaged-card p, .damaged-card small { display: block; margin-top: 5px; color: #e0c7b9; font-size: 12px; }
+.damaged-card > .button { min-height: 48px; white-space: normal; }
 .transport-panel { display: flex; gap: 27px; align-items: center; padding: 21px 24px; border: 1px solid var(--line); background: linear-gradient(115deg, #202c29, #182225 76%); border-radius: var(--radius); }
 .transport-time { flex: 0 0 130px; }
 .transport-time .eyebrow { color: #95aba2; font-size: 8px; }
@@ -873,10 +882,13 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 @media (max-width: 480px) {
   html { scroll-padding-bottom: calc(175px + env(safe-area-inset-bottom)); }
   .status-banner { flex-wrap: wrap; gap: 8px; }
-  .status-banner > [data-action="reload-studio"] { flex-basis: 100%; }
+  .status-banner > [data-action="reload-studio"], .status-banner > [data-action="retry-recovery"] { flex-basis: 100%; }
   .preview-loading { order: 3; flex-basis: 100%; max-width: none; }
   .recovery-card > .delete-saved-mix { flex: 0 0 48px; }
   .discarded-panel { padding: 17px; }
+  .damaged-panel { padding: 17px; }
+  .damaged-card { flex-wrap: wrap; }
+  .damaged-card > div, .damaged-card > .button { flex-basis: 100%; }
   .discarded-card { flex-wrap: wrap; gap: 12px; }
   .discarded-card > div, .discarded-card > .button { flex-basis: 100%; }
   .discarded-card > .button { justify-content: center; }
