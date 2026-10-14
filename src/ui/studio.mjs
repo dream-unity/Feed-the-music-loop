@@ -1,3 +1,5 @@
+import { LiveInputWaveform } from './live-input.mjs';
+
 const ICONS = {
   loop: '<path d="M12 8c-3-4-8-2-8 2s5 6 8 2l3-4c3-4 7-2 7 2s-5 6-8 2l-3-4"/>',
   mic: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
@@ -54,6 +56,7 @@ export class StudioUI extends EventTarget {
     this.abort = new AbortController();
     this.root.innerHTML = this.shell();
     this.refs = Object.fromEntries([...this.root.querySelectorAll('[data-ref]')].map(el => [el.dataset.ref,el]));
+    this.liveInput = new LiveInputWaveform(this.refs['capture-waveform'], this.refs['capture-level']);
     this.bind();
   }
 
@@ -69,11 +72,12 @@ export class StudioUI extends EventTarget {
       <section class="recovery-panel" data-ref="recovery" aria-label="Recovered recordings" hidden></section>
       <div class="workspace-top"><nav class="view-tabs" aria-label="Studio views"><button class="view-tab is-active" data-action="view" data-view="build" aria-current="page">${icon('layers')}<span>Build</span></button><button class="view-tab" data-action="view" data-view="song">${icon('song')}<span>Song</span></button><button class="view-tab" data-action="view" data-view="mix">${icon('sliders')}<span>Mix</span></button></nav><div class="studio-signals"><span class="local-badge" title="Recordings stay in this browser until you export them.">${icon('shield')}<span>Yours. On this device.</span></span><button class="mic-status" data-action="toggle-mic" data-testid="enable-mic"><span class="status-dot"></span><span data-ref="mic-label">Connect mic</span>${icon('mic')}</button></div></div>
       <section class="transport-panel" aria-label="Playback transport"><div class="transport-time"><span class="eyebrow" data-ref="transport-label">THE GROOVE</span><div class="time-display" data-ref="transport-time">0:00.0</div></div><div class="cycle-display"><div class="cycle-meta"><span data-ref="cycle-description">Your first loop sets the rhythm</span><span data-ref="cycle-position">FREE</span></div><div class="cycle-track"><div class="cycle-progress" data-ref="cycle-progress"></div><div class="cycle-ticks" aria-hidden="true"><i></i><i></i><i></i></div></div><div class="transport-caption"><span data-ref="track-count">No layers yet</span><span data-ref="sample-rate">LOCAL AUDIO STUDIO</span></div></div><div class="master-meter" aria-label="Master output level"><div class="meter-label">OUT</div><div class="meter-track"><div class="meter-fill" data-ref="output-meter"></div></div><span class="meter-value" data-ref="output-db">−∞</span></div><button class="button icon-button restart-button" data-action="seek-start" aria-label="Return to start" title="Return to start">${icon('rewind')}</button></section>
-      <section class="preview-panel" data-ref="preview-panel" aria-label="Recording preview" hidden><div class="preview-description">${icon('headphones')}<span><small data-ref="preview-kind">LISTEN BACK</small><strong data-ref="preview-name">Your performance</strong></span></div><p class="preview-loading" data-ref="preview-loading" hidden>Preparing your recording. Stop cancels this.</p><audio id="performance-player" data-ref="preview-audio" controls preload="metadata"></audio><button class="button icon-button" data-action="close-preview" aria-label="Close recording preview">${icon('close')}</button></section>
       <section class="audition-panel" data-ref="audition-panel" aria-label="Live mix playback" hidden><div class="audition-symbol">${icon('headphones')}</div><div class="audition-copy"><span class="eyebrow">HEAR YOUR CHANGES</span><strong data-ref="audition-name">Live vocal mix</strong><div class="audition-progress-track"><div data-ref="audition-progress"></div></div></div><span class="audition-time" data-ref="audition-time">0:00.0</span><button class="button quiet" data-action="stop">${icon('stop')}Stop mix</button></section>
       <section class="downloads-panel" data-ref="downloads" aria-label="Ready downloads" hidden></section>
       <section class="export-progress-panel" data-ref="export-panel" aria-label="Export progress" hidden><div><strong data-ref="export-title">Preparing your audio…</strong><p data-ref="export-caption">Your recordings remain safe while this file is prepared.</p><div class="export-progress-track" role="progressbar" aria-label="Export completion" aria-valuemin="0" aria-valuemax="100" data-ref="export-progressbar"><div data-ref="export-progress"></div></div></div><button class="button quiet" data-action="cancel-export">${icon('close')}Cancel export</button></section>
-      <section class="capture-panel" data-ref="capture-panel" aria-label="Current recording" hidden><div class="capture-symbol">${icon('mic')}</div><div class="capture-copy"><strong data-ref="capture-title">Recording your first loop</strong><p data-ref="capture-hint">Make your sound. Finish whenever it feels right.</p><div class="capture-progress-track"><div data-ref="capture-progress"></div></div></div><span class="capture-clock" data-ref="capture-time" aria-label="Recording duration">0:00.0</span></section>
+      <section class="capture-panel" data-ref="capture-panel" aria-label="Current recording" hidden><div class="capture-symbol">${icon('mic')}</div><div class="capture-copy"><strong data-ref="capture-title">Recording your first loop</strong><p data-ref="capture-hint">Make your sound. Finish whenever it feels right.</p><div class="capture-live" data-ref="capture-live" aria-label="Microphone input history"><div class="capture-live-label"><span data-ref="capture-live-label">LIVE MIC</span><span data-ref="capture-level">−∞ dB</span></div><svg data-ref="capture-waveform" aria-hidden="true"></svg></div><div class="capture-progress-track"><div data-ref="capture-progress"></div></div></div><span class="capture-clock" data-ref="capture-time" aria-label="Recording duration">0:00.0</span></section>
+      <section class="recent-recording" data-ref="recent-recording" aria-label="Just recorded" hidden></section>
+      <section class="preview-panel" data-ref="preview-panel" aria-label="Recording preview" hidden><div class="preview-description">${icon('headphones')}<span><small data-ref="preview-kind">LISTEN BACK</small><strong data-ref="preview-name">Your performance</strong></span></div><p class="preview-loading" data-ref="preview-loading" hidden>Preparing your recording. Stop cancels this.</p><audio id="performance-player" data-ref="preview-audio" controls preload="metadata"></audio><button class="button icon-button" data-action="close-preview" aria-label="Close recording preview">${icon('close')}</button></section>
       <div class="studio-body">
         <div class="main-column">
           <section data-view-panel="build" class="view-panel" aria-label="Build your loops">
@@ -173,7 +177,7 @@ export class StudioUI extends EventTarget {
     if(type==='manage-storage'){this.refs.dialog.close('cancel');return this.emit(type);}
     if(type==='export-project'){this.refs.dialog.close();return this.emit(type);}
     if(type==='export-master'){this.refs.dialog.close();return this.emit(type,{performanceId:button.dataset.performanceId||id});}
-    if(type==='preview-performance')return this.emit(type,{performanceId:button.dataset.performanceId||id});
+    if(type==='preview-performance'||type==='delete-performance')return this.emit(type,{performanceId:button.dataset.performanceId||id});
     if(type==='export-mix'||type==='preview-mix'){
       const input=this.root.querySelector('[data-export-duration]'),details={};
       if(type==='export-mix'&&input&&!(input.dataset.useExact==='true'&&input.value===input.dataset.initial)){
@@ -184,7 +188,7 @@ export class StudioUI extends EventTarget {
       this.refs.dialog.close();return this.emit(type,details);
     }
     if(type==='add-loop'){if(this.state.capture)return;return this.emit(type,{cycles:this.state.project?.baseFrames ? this.cycles : 0,customCycles:this.customCycles});}
-    if(type==='select-take'||type==='preview-take'||type==='select-track'||type==='mute'||type==='solo'||type==='remove-track'||type==='launch-section'||type==='export-track'||type==='layer-vocal'||type==='recover-asset'||type==='export-recovered'||type==='export-damaged-audio'||type==='delete-saved-mix'||type==='delete-discarded')return this.emit(type,{id});
+    if(type==='preview-track'||type==='select-take'||type==='preview-take'||type==='select-track'||type==='mute'||type==='solo'||type==='remove-track'||type==='launch-section'||type==='export-track'||type==='layer-vocal'||type==='recover-asset'||type==='export-recovered'||type==='export-damaged-audio'||type==='delete-saved-mix'||type==='delete-discarded')return this.emit(type,{id});
     if(type==='nudge')return this.emit(type,{id,frames:Math.round(finite(button.dataset.ms)*finite(this.state.sampleRate||this.state.project?.sampleRate,48000)/1000)});
     this.emit(type);
   }
@@ -271,6 +275,7 @@ export class StudioUI extends EventTarget {
     this.renderRecovery(state.recovered||[],rate);
     this.refs['export-panel'].hidden=!state.exporting;
     this.updateExportProgress(state.exportProgress||{});
+    this.renderRecentRecording(rate);
     this.renderDock(capture,tracks,rate);
     this.updateMeters({inputLevel:state.inputLevel,outputLevel:state.outputLevel});
     this.updateTransport({transportFrame:state.transportFrame,sampleRate:rate,baseFrames:p.baseFrames});
@@ -297,12 +302,12 @@ export class StudioUI extends EventTarget {
     this.root.querySelectorAll('[data-action="stop"]').forEach(el=>el.disabled=false);
     this.root.querySelectorAll('[data-action="export-project"]').forEach(el=>el.disabled=recording||!!state.exporting||!!state.busy);
     this.root.querySelectorAll('input[data-control="mix"],input[data-control="master"],input[data-control="input"],[data-control="role"],[data-control="compensation"],[data-control="selected-take"]').forEach(el=>el.disabled=!!state.readonly||!!state.busy);
-    this.root.querySelectorAll('[data-action="layer-vocal"],[data-action="recover-asset"],[data-action="delete-saved-mix"],[data-action="delete-discarded"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting||!!state.readonly);
+    this.root.querySelectorAll('[data-action="layer-vocal"],[data-action="recover-asset"],[data-action="delete-performance"],[data-action="delete-saved-mix"],[data-action="delete-discarded"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting||!!state.readonly);
     this.root.querySelector('[data-control="compensation"]').disabled=recording||!!state.readonly||!!state.busy;
     this.root.querySelector('[data-control="monitor"]').disabled=!!state.readonly||state.capabilities?.microphone===false||!!capture?.waitingForMic;
     mic.disabled=!state.micEnabled&&(state.capabilities?.microphone===false||!!capture?.waitingForMic||!!state.readonly);
-    this.root.querySelectorAll('[data-action="export-track"],[data-action="export-master"],[data-action="export-recovered"],[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
-    this.root.querySelectorAll('[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>{if(state.previewPreparing)el.disabled=true;});
+    this.root.querySelectorAll('[data-action="export-track"],[data-action="export-master"],[data-action="export-recovered"],[data-action="preview-track"],[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
+    this.root.querySelectorAll('[data-action="preview-track"],[data-action="preview-take"],[data-action="preview-performance"]').forEach(el=>{if(state.previewPreparing)el.disabled=true;});
     this.root.querySelectorAll('[data-action="export-recovered"]').forEach(el=>{if((state.recovered||[]).some(a=>a.id===el.dataset.id&&a.needsRecovery))el.disabled=true;});
     this.root.querySelector('[data-action="spotlight"]').disabled=!!state.readonly||!!state.busy;
     this.root.querySelectorAll('[data-action="mute"],[data-action="solo"],[data-action="remove-track"],[data-action="rename-track"],[data-action="rename-take"],[data-action="delete-take"],[data-action="delete-section"],[data-action="launch-section"],[data-action="nudge"]').forEach(el=>el.disabled=!!state.readonly||!!state.busy);
@@ -311,10 +316,10 @@ export class StudioUI extends EventTarget {
     if(damagedBacking)this.root.querySelectorAll('[data-action="play"],[data-action="add-loop"],[data-action="sing"]').forEach(el=>el.disabled=true);
     if(damaged.size)this.root.querySelectorAll('[data-action="export-project"]').forEach(el=>el.disabled=true);
     this.root.querySelectorAll('[data-action="export-damaged-audio"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
-    this.root.querySelectorAll('[data-action="export-track"],[data-action="layer-vocal"]').forEach(el=>{const track=[...tracks,...(p.takes||[])].find(t=>t.id===el.dataset.id);if(damaged.has(track?.assetId))el.disabled=true;});
+    this.root.querySelectorAll('[data-action="preview-track"],[data-action="export-track"],[data-action="layer-vocal"]').forEach(el=>{const track=[...tracks,...(p.takes||[])].find(t=>t.id===el.dataset.id);if(damaged.has(track?.assetId))el.disabled=true;});
     this.root.querySelectorAll('[data-action="export-master"],[data-action="preview-performance"]').forEach(el=>{const performance=(p.performances||[]).find(x=>x.id===el.dataset.performanceId);if(damaged.has(performance?.masterAssetId))el.disabled=true;});
     this.root.querySelectorAll('[data-action="preview-take"]').forEach(el=>{const take=(p.takes||[]).find(t=>t.id===el.dataset.id),performance=(p.performances||[]).find(x=>x.id===take?.performanceId);if(damaged.has(performance?.masterAssetId||take?.assetId))el.disabled=true;});
-    if(state.deletionPending)this.root.querySelectorAll('[data-action="play"],[data-action="seek-start"],[data-action="preview-take"],[data-action="preview-performance"],[data-action="preview-mix"],[data-action="export-menu"],[data-action="export-track"],[data-action="export-master"],[data-action="export-recovered"],[data-action="export-damaged-audio"],[data-action="export-mix"],[data-action="export-project"]').forEach(el=>el.disabled=true);
+    if(state.deletionPending)this.root.querySelectorAll('[data-action="play"],[data-action="seek-start"],[data-action="preview-track"],[data-action="preview-take"],[data-action="preview-performance"],[data-action="preview-mix"],[data-action="export-menu"],[data-action="export-track"],[data-action="export-master"],[data-action="export-recovered"],[data-action="export-damaged-audio"],[data-action="export-mix"],[data-action="export-project"]').forEach(el=>el.disabled=true);
     if(state.storageFailed){
       this.root.querySelectorAll('[data-action]').forEach(el=>{if(!['help','view','studio-home','reload-studio'].includes(el.dataset.action))el.disabled=true;});
       this.root.querySelectorAll('input,select').forEach(el=>el.disabled=true);
@@ -364,10 +369,10 @@ export class StudioUI extends EventTarget {
   }
 
   renderSong(p,rate) {
-    const performances=p.performances||[],takes=p.takes||[],damaged=this.damagedIds();
+    const performances=(p.performances||[]).filter(item=>!item.removed),takes=p.takes||[],damaged=this.damagedIds();
     this.renderDiscarded(this.state.discarded||[],rate);
     this.refs['performance-count'].textContent=`${performances.length} ${performances.length===1?'recording':'recordings'}`;
-    this.region('performances',JSON.stringify(performances.map(x=>[x.id,x.name,x.frames,x.status,x.arrangementIncomplete,x.editableFrames,damaged.has(x.masterAssetId)])),performances.length?performances.slice().reverse().map((x,i)=>`<article class="performance-card"><div class="performance-art" aria-hidden="true">${icon('song')}</div><div class="performance-copy"><h3>${html(x.name||`Performance ${performances.length-i}`)}</h3><p>${duration(x.frames,rate)} · ${damaged.has(x.masterAssetId)?'Original audio is incomplete':x.arrangementIncomplete?'Original audio saved':x.status==='interrupted'||x.status==='recovered'?'Recovered recording':'Full stereo performance'}${x.createdAt?` · ${this.date(x.createdAt)}`:''}</p>${x.arrangementIncomplete?`<p class="arrangement-limit">${finite(x.editableFrames)>0?`Edited arrangement available through ${time(x.editableFrames,rate)}.`:'No editable arrangement interval was retained.'}${damaged.has(x.masterAssetId)?'':' Full stereo WAV available.'}</p>`:''}</div><button class="button icon-button" data-action="preview-performance" data-performance-id="${html(x.id)}" aria-label="Listen to ${html(x.name||'performance')}">${icon('play')}</button><button class="button quiet" data-action="export-master" data-performance-id="${html(x.id)}" aria-label="Download ${html(x.name||'performance')} as WAV">${icon('download')}<span>WAV</span></button></article>`).join(''):'<div class="quiet-empty">'+icon('song')+'<h3>Your song lives here.</h3><p>Choose “Sing over loops” to capture your voice and backing together.</p></div>');
+    this.region('performances',JSON.stringify(performances.map(x=>[x.id,x.name,x.frames,x.status,x.arrangementIncomplete,x.editableFrames,damaged.has(x.masterAssetId)])),performances.length?performances.slice().reverse().map((x,i)=>`<article class="performance-card" data-performance-id="${html(x.id)}"><div class="performance-art" aria-hidden="true">${icon('song')}</div><div class="performance-copy"><h3>${html(x.name||`Performance ${performances.length-i}`)}</h3><p>${duration(x.frames,rate)} · ${damaged.has(x.masterAssetId)?'Original audio is incomplete':x.arrangementIncomplete?'Original audio saved':x.status==='interrupted'||x.status==='recovered'?'Recovered recording':'Full stereo performance'}${x.createdAt?` · ${this.date(x.createdAt)}`:''}</p>${x.arrangementIncomplete?`<p class="arrangement-limit">${finite(x.editableFrames)>0?`Edited arrangement available through ${time(x.editableFrames,rate)}.`:'No editable arrangement interval was retained.'}${damaged.has(x.masterAssetId)?'':' Full stereo WAV available.'}</p>`:''}</div><div class="performance-actions"><button class="button icon-button" data-action="preview-performance" data-performance-id="${html(x.id)}" aria-label="Listen to ${html(x.name||'performance')}">${icon('play')}</button><button class="button quiet" data-action="export-master" data-performance-id="${html(x.id)}" aria-label="Download ${html(x.name||'performance')} as WAV">${icon('download')}<span>WAV</span></button><button class="button icon-button performance-remove" data-action="delete-performance" data-performance-id="${html(x.id)}" aria-label="Remove ${html(x.name||'performance')}" title="Remove performance">${icon('trash')}</button></div></article>`).join(''):'<div class="quiet-empty">'+icon('song')+'<h3>Your song lives here.</h3><p>Choose “Sing over loops” to capture your voice and backing together.</p></div>');
     this.region('takes',JSON.stringify(takes.map(x=>[x.id,x.name,x.frames,damaged.has(x.assetId)])),takes.length?takes.slice().reverse().map((t,i)=>`<article class="take-card" data-take-id="${html(t.id)}"><div class="take-main"><button class="button icon-button" data-action="preview-take" data-id="${html(t.id)}" aria-label="Listen to ${html(t.name||'vocal take')} with recorded backing" title="Listen with recorded backing">${icon('play')}</button><button class="take-name" data-action="select-track" data-id="${html(t.id)}" aria-label="Mix ${html(t.name||'vocal take')}"><strong>${html(t.name||`Vocal take ${takes.length-i}`)}</strong><span>${duration(t.frames,rate)} · ${damaged.has(t.assetId)?'vocal audio is incomplete':'original vocal'}</span></button><button class="button icon-button" data-action="rename-take" data-id="${html(t.id)}" aria-label="Rename ${html(t.name||'vocal take')}">${icon('more')}</button><button class="button icon-button" data-action="delete-take" data-id="${html(t.id)}" aria-label="Remove ${html(t.name||'vocal take')}">${icon('trash')}</button></div><div class="take-footer"><label class="take-selection"><input type="checkbox" data-control="selected-take" data-id="${html(t.id)}"><span>Use in edited song</span></label><button class="text-button" data-action="layer-vocal" data-id="${html(t.id)}" title="Make a separate looping layer from this vocal">${icon('loop')}Turn into a loop</button></div></article>`).join(''):'<p class="help-copy empty-takes">Each continuous vocal is kept as a separate take, ready for another version.</p>');
     for(const el of this.refs.takes.children){const selected=el.dataset.takeId===p.selectedTakeId;el.classList.toggle('is-selected',selected);const input=el.querySelector('[data-control="selected-take"]');if(input)input.checked=selected;}
   }
@@ -498,7 +503,8 @@ export class StudioUI extends EventTarget {
     this.refs['dock-label'].textContent=label;this.refs['dock-caption'].textContent=caption;
     const finishText=this.refs['dock-finish'].querySelector('span');finishText.textContent=capture?.targetFrames?'Finish at boundary':'Finish recording';
     const cancelText=this.refs['dock-cancel'].querySelector('span');cancelText.textContent=status==='recording'?'Discard':'Cancel';
-    this.refs['capture-panel'].hidden=!active;
+    const recent=this.recentRecording();
+    this.refs['capture-panel'].hidden=!active&&!recent;
     this.refs['capture-panel'].dataset.status=status||'idle';
     this.refs['capture-title'].textContent=capture?.waitingForMic?'Let your browser hear you':status==='arming'?'Ready for the next cycle':status==='finishing'?'Saving your sound':capture?.kind==='vocal'?'Recording your performance':tracks.length?'Recording a new layer':'Recording your first loop';
     this.refs['capture-hint'].textContent=capture?.waitingForMic?'Choose Allow in the microphone permission prompt. You can cancel here at any time.':status==='arming'?'Your groove keeps moving. Your recording starts at the next boundary.':status==='finishing'?'Keeping the original audio and your project together.':capture?.kind==='vocal'?(tracks.length?'Keep singing. Your loops are carrying the song underneath.':'Let the vocal run. Finish whenever you are ready.'):capture?.targetFrames?'This layer finishes automatically at the end of its chosen cycles.':'Make your sound. Finish whenever it feels right.';
@@ -513,11 +519,44 @@ export class StudioUI extends EventTarget {
       this.refs['capture-time'].setAttribute('aria-label',`Count-in beat ${beat} of ${total}`);
       this.refs['capture-progress'].style.width=`${clamp(beat/total*100,0,100)}%`;
     }
+    const captureId=capture?.id||capture?.captureId;
+    if(status==='recording'&&captureId&&this.liveCaptureId!==captureId){this.liveInput.reset();this.liveCaptureId=captureId;}
+    const showHistory=(status==='recording'&&captureId===this.liveCaptureId)||(status==='finishing'&&captureId===this.liveCaptureId)||(!active&&recent&&this.liveCaptureId===this.state.recentRecording?.captureId);
+    this.refs['capture-live'].hidden=!showHistory;
+    this.refs['capture-live-label'].textContent=status==='recording'?'LIVE MIC':'RECORDED MIC';
+    this.refs['capture-progress'].parentElement.hidden=!active||(!capture?.targetFrames&&status!=='counting');
+    if(!active&&recent){
+      this.refs['capture-panel'].dataset.status='saved';
+      this.refs['capture-title'].textContent=recent.status==='interrupted'?'Saved recording · interrupted':this.state.recentRecording.kind==='performance'?'Performance recorded':'Loop recorded';
+      this.refs['capture-hint'].textContent='Your sound is ready below. Listen here, or keep creating.';
+      this.refs['capture-time'].textContent=time(recent.frames,rate);
+      this.refs['capture-time'].setAttribute('aria-label','Saved recording duration');
+    }
     if(!active)this.autoCaptureFocus=false;
     else if(status==='recording'&&this.autoCaptureFocus){
       this.autoCaptureFocus=false;
       if(document.activeElement===this.refs['dock-cancel']&&!this.refs.dialog.open&&!this.refs['dock-finish'].disabled)this.refs['dock-finish'].focus({preventScroll:true});
     }
+  }
+
+  recentRecording() {
+    const recent=this.state.recentRecording,p=this.state.project;
+    return recent?.kind==='performance'?p?.performances?.find(item=>item.id===recent.id&&!item.removed):recent?.kind==='loop'?p?.tracks?.find(item=>item.id===recent.id):null;
+  }
+
+  renderRecentRecording(rate) {
+    const recording=this.recentRecording(),target=this.refs['recent-recording'];
+    target.hidden=!recording||!!this.state.capture;
+    if(!recording)return;
+    const performance=this.state.recentRecording.kind==='performance',name=html(recording.name),recordId=html(recording.id);
+    this.region('recent-recording',JSON.stringify([recording.id,recording.name,recording.frames,recording.status]),`<article class="recent-recording-card" data-recording-id="${recordId}"><div class="recent-recording-copy"><span class="eyebrow">JUST RECORDED</span><h2>${name}</h2><p>${duration(recording.frames,rate)} · ${performance?'Voice + backing · stereo':'Original loop'}${recording.status==='interrupted'?' · saved portion':''}</p></div><div class="performance-actions"><button class="button primary" data-action="${performance?'preview-performance':'preview-track'}" ${performance?'data-performance-id':'data-id'}="${recordId}" aria-label="Listen to ${name}">${icon('play')}Listen</button><button class="button quiet" data-action="${performance?'export-master':'export-track'}" ${performance?'data-performance-id':'data-id'}="${recordId}" aria-label="Download ${name}">${icon('download')}WAV</button>${performance?`<button class="button icon-button performance-remove" data-action="delete-performance" data-performance-id="${recordId}" aria-label="Remove ${name}" title="Remove performance">${icon('trash')}</button>`:''}</div></article>`);
+  }
+
+  updateLiveInput(data={}) {
+    if(data.capture?.status!=='recording')return;
+    const captureId=data.capture.id||data.capture.captureId;
+    if(this.liveCaptureId!==captureId){this.liveInput.reset();this.liveCaptureId=captureId;}
+    this.liveInput.update(data);
   }
 
   updateMeters(data={}) {
@@ -587,7 +626,7 @@ export class StudioUI extends EventTarget {
   }
 
   showExport() {
-    const p=this.state.project||{},performances=(p.performances||[]).slice().reverse(),take=(p.takes||[]).find(t=>t.id===p.selectedTakeId),performance=performances.find(x=>x.id===take?.performanceId);
+    const p=this.state.project||{},performances=(p.performances||[]).filter(item=>!item.removed).slice().reverse(),take=(p.takes||[]).find(t=>t.id===p.selectedTakeId),performance=(p.performances||[]).find(x=>x.id===take?.performanceId);
     const frames=performance?(performance.status==='complete'?performance.frames:performance.editableFrames??Math.min(performance.frames,take?.frames||0)):take?.frames;
     const limited=!!take&&!!performance&&performance.status!=='complete',noArrangement=limited&&finite(frames)<=0;
     const seconds=noArrangement?0:take?Math.max(.01,Number((frames/(p.sampleRate||48000)).toFixed(2))):60;
@@ -596,7 +635,7 @@ export class StudioUI extends EventTarget {
     const canAudition=canMix&&!damagedBacking&&!damaged.has(take?.assetId),damagedRender=damagedBacking||damaged.has(selectedRaw),canRender=canMix&&!noArrangement&&!damagedRender;
     const auditionNote=canMix&&!canAudition?'Hear current mix is unavailable because a source recording is incomplete.':take?'Hear current mix plays the selected vocal with the layers as they are now.':'Hear current mix starts live playback.';
     const renderNote=noArrangement?'':damagedRender?' Render WAV is unavailable while a required recording is incomplete.':take?' Render WAV follows the recorded arrangement with your updated sound.':' Render WAV saves the length chosen above.';
-    const limitNote=limited?`<p class="export-arrangement-note">${noArrangement?'No editable arrangement interval was retained, so Render WAV is unavailable for this take.':`Render WAV can remix only the first ${duration(frames,p.sampleRate)} of the saved arrangement.`} The complete ${duration(performance.frames,p.sampleRate)} recorded stereo performance ${damaged.has(performance.masterAssetId)?'also has missing or damaged audio.':'remains downloadable above.'}${canAudition?' Hear current mix still plays the full vocal with your current backing.':''}</p>`:'';
+    const limitNote=limited?`<p class="export-arrangement-note">${noArrangement?'No editable arrangement interval was retained, so Render WAV is unavailable for this take.':`Render WAV can remix only the first ${duration(frames,p.sampleRate)} of the saved arrangement.`} The complete ${duration(performance.frames,p.sampleRate)} recorded stereo performance ${damaged.has(performance.masterAssetId)?'also has missing or damaged audio.':performance.removed?'is retained with your vocal take. Undo removal to restore its download entry.':'remains downloadable above.'}${canAudition?' Hear current mix still plays the full vocal with your current backing.':''}</p>`:'';
     this.showDialog('Take your music with you',`<div class="export-options"><section><h3>Recorded performances</h3><p class="help-copy">Your voice and backing, exactly as recorded.</p>${performances.length?performances.map(x=>`<button type="button" class="export-row" data-action="export-master" data-performance-id="${html(x.id)}" ${damaged.has(x.masterAssetId)?'disabled':''}><span>${html(x.name||'Performance')}<small>${duration(x.frames,p.sampleRate)} · ${damaged.has(x.masterAssetId)?'audio is incomplete':x.arrangementIncomplete?'full original stereo WAV':'stereo WAV'}</small></span>${icon('download')}</button>`).join(''):'<p class="dialog-hint">Sing over your loops to create a performance.</p>'}</section><section><h3>Current sound, recorded arrangement</h3><p class="help-copy">${take?`Use ${html(take.name)} with your current sound settings and its recorded arrangement.`:'Render the current loop layers and mix. Select a vocal take to include your voice.'}</p>${limitNote}<div class="export-mix-row"><label>Length <input data-export-duration data-initial="${seconds}" data-use-exact="${!!take}" type="number" min="0.01" max="86400" step="0.01" value="${seconds}" inputmode="decimal" ${noArrangement?'disabled':''}> seconds</label><div class="export-mix-buttons"><button type="button" class="button quiet" data-action="preview-mix" ${!canAudition?'disabled':''}>${icon('headphones')}Hear current mix</button><button type="button" class="button primary" data-action="export-mix" ${!canRender?'disabled':''}>${icon('download')}Render WAV</button></div></div><p class="export-mode-note">${auditionNote}${renderNote}</p></section><section class="backup-option"><div><h3>Whole project backup</h3><p class="help-copy">${damaged.size?'A complete backup is unavailable while source audio is missing or damaged. Restore a valid project backup to continue.':'Audio, takes, sections and settings in one .fml file.'}</p></div><button type="button" class="button primary" data-action="export-project" ${damaged.size?'disabled':''}>${icon('download')}Backup</button></section></div>`);
   }
 

@@ -43,6 +43,154 @@ test.afterEach(async ({}, testInfo) => {
   expect(testInfo.runtimeErrors).toEqual([]);
 });
 
+test('performance trash removes only the chosen card, supports Undo and persists with the vocal arrangement intact', async ({ page }, testInfo) => {
+  await boot(page);
+  await firstLoop(page);
+  for (let i = 0; i < 2; i++) {
+    await page.getByTestId('sing').click();
+    await captureState(page, 'recording');
+    await page.waitForTimeout(600);
+    await page.getByTestId('finish').click();
+    await captureState(page, 'idle');
+  }
+  await page.getByTestId('stop').click();
+  await page.locator('[data-action="view"][data-view="song"]').click();
+  const cards = page.locator('.performance-card');
+  const takes = page.locator('.take-card');
+  await expect(cards).toHaveCount(2);
+  await expect(takes).toHaveCount(2);
+  const chosen = cards.first();
+  const performanceId = await chosen.getAttribute('data-performance-id');
+  const performanceName = await chosen.locator('h3').textContent();
+  const removedCard = page.locator(`.performance-card[data-performance-id="${performanceId}"]`);
+  const remove = removedCard.getByRole('button', { name: `Remove ${performanceName}`, exact: true });
+  const dialog = page.getByRole('dialog');
+  await remove.click();
+  await expect(dialog).toHaveAccessibleName('Remove performance?');
+  await expect(dialog).toContainText('does not free device storage');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(cards).toHaveCount(2);
+
+  await chosen.locator('[data-action="preview-performance"]').click();
+  await expect(page.locator('#performance-player')).toBeVisible();
+  await remove.click();
+  await dialog.getByRole('button', { name: 'Remove performance', exact: true }).click();
+  await expect(removedCard).toHaveCount(0);
+  await expect(cards).toHaveCount(1);
+  await expect(page.locator('[data-ref="performance-count"]')).toHaveText('1 recording');
+  await expect(page.locator('#performance-player')).toBeHidden();
+  await expect(page.locator('#performance-player')).not.toHaveAttribute('src');
+  await expect(takes).toHaveCount(2);
+  await action(page, 'export-menu').click();
+  await expect(dialog.locator(`[data-action="export-master"][data-performance-id="${performanceId}"]`)).toHaveCount(0);
+  await expect(dialog.locator('[data-action="export-master"]')).toHaveCount(1);
+  await expect(dialog.locator('[data-action="export-mix"]')).toBeEnabled();
+  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
+  await action(page, 'undo').click();
+  await expect(cards).toHaveCount(2);
+  await action(page, 'redo').click();
+  await expect(cards).toHaveCount(1);
+  await action(page, 'undo').click();
+
+  // The same accessible trash control must remain reachable on a small phone.
+  await page.setViewportSize({ width: 360, height: 800 });
+  await remove.scrollIntoViewIfNeeded();
+  await expect(remove).toBeVisible();
+  const bounds = await remove.boundingBox();
+  expect(bounds.width).toBeGreaterThanOrEqual(44);
+  expect(bounds.height).toBeGreaterThanOrEqual(44);
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(360);
+  await screenshot(page, testInfo, 'performance-trash-phone');
+  await remove.click();
+  await dialog.getByRole('button', { name: 'Remove performance', exact: true }).click();
+  await expect(cards).toHaveCount(1);
+  await expect(page.locator('[data-ref="save-state"]')).toContainText(/saved/i);
+  await page.reload();
+  await expect(page.getByTestId('add-loop')).toBeEnabled();
+  await expect(tracks(page)).toHaveCount(1);
+  await page.locator('[data-action="view"][data-view="song"]').click();
+  await expect(cards).toHaveCount(1);
+  await expect(removedCard).toHaveCount(0);
+  await expect(takes).toHaveCount(2);
+  await expect(page.locator('.recovery-card')).toHaveCount(0);
+
+  const downloadEvent = page.waitForEvent('download');
+  await action(page, 'export-project').click();
+  const backup = await downloadEvent;
+  const bytes = await readFile(await backup.path());
+  const size = Number(bytes.readBigUInt64LE(16));
+  const manifest = JSON.parse(bytes.subarray(64, 64 + size).toString());
+  const performance = manifest.project.performances.find(item => item.id === performanceId);
+  expect(performance.removed).toBe(true);
+  expect(manifest.project.takes.some(take => take.performanceId === performanceId)).toBe(true);
+  expect(performance.initialState.tracks).toHaveLength(1);
+  expect(manifest.assets.some(asset => asset.id === performance.masterAssetId)).toBe(true);
+  expect(manifest.assets.some(asset => asset.id === performance.leadAssetId)).toBe(true);
+});
+
+test('live microphone history follows input and finished recordings stay beneath the capture bar in Build', async ({ page }, testInfo) => {
+  await boot(page);
+  await firstLoop(page);
+  const recent = page.locator('[data-ref="recent-recording"]');
+  const panel = page.locator('[data-ref="capture-panel"]');
+  await expect(panel).toHaveAttribute('data-status', 'saved');
+  await expect(recent).toBeVisible();
+  await expect(recent).toContainText('Original loop');
+  await recent.getByRole('button', { name: /^Listen to / }).click();
+  await expect(page.locator('#performance-player')).toBeVisible();
+  await page.getByTestId('stop').click();
+
+  await page.getByTestId('sing').click();
+  await captureState(page, 'recording');
+  const waveform = page.locator('[data-ref="capture-waveform"]');
+  const peak = waveform.locator('.live-input-peak');
+  await expect(waveform).toBeVisible();
+  await expect.poll(async () => Number(await waveform.getAttribute('data-samples'))).toBeGreaterThan(8);
+  const initialPath = await peak.getAttribute('d');
+  const heights = [...initialPath.matchAll(/,([\d.]+)V([\d.]+)/g)].map(match => Number(match[2]) - Number(match[1]));
+  expect(Math.max(...heights)).toBeGreaterThan(2);
+  expect(Math.max(...heights) - Math.min(...heights)).toBeGreaterThan(1);
+  await expect(peak).not.toHaveAttribute('d', initialPath);
+  await screenshot(page, testInfo, 'live-microphone');
+
+  // Zero mic gain must become silent even while the backing loops are audible.
+  const gain = page.locator('input[data-control="input"][data-key="gain"]');
+  await gain.evaluate(input => { input.value = '0'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await expect(page.locator('[data-ref="capture-level"]')).toHaveText('−∞ dB');
+  await expect(peak).toHaveAttribute('d', /,36\.00V36\.00$/);
+  await gain.evaluate(input => { input.value = '1'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await expect(page.locator('[data-ref="capture-level"]')).not.toHaveText('−∞ dB');
+  await page.getByTestId('finish').click();
+  await captureState(page, 'idle');
+  await expect(page.locator('[data-view-panel="build"]')).toBeVisible();
+  await expect(panel).toHaveAttribute('data-status', 'saved');
+  await expect(page.locator('[data-ref="capture-title"]')).toHaveText('Performance recorded');
+  await expect(recent).toBeVisible();
+  await expect(recent).toContainText('Performance 1');
+  await expect(recent).toContainText('Voice + backing');
+  expect(await panel.evaluate(element => element.nextElementSibling.dataset.ref)).toBe('recent-recording');
+  const frozenPath = await peak.getAttribute('d');
+  await page.waitForTimeout(200);
+  await expect(peak).toHaveAttribute('d', frozenPath);
+  await playing(page, true);
+  await expect(page.locator('#performance-player')).toBeHidden();
+  await screenshot(page, testInfo, 'finished-performance-build');
+  await recent.getByRole('button', { name: 'Listen to Performance 1', exact: true }).click();
+  await expect(page.locator('#performance-player')).toBeVisible();
+  await expect(page.locator('[data-ref="preview-name"]')).toHaveText('Performance 1');
+  await expect(page.locator('[data-view-panel="build"]')).toBeVisible();
+  await playing(page, false);
+
+  await page.setViewportSize({ width: 360, height: 800 });
+  await recent.scrollIntoViewIfNeeded();
+  const listen = recent.getByRole('button', { name: 'Listen to Performance 1', exact: true });
+  const bounds = await listen.boundingBox();
+  expect(bounds.height).toBeGreaterThanOrEqual(44);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(360);
+  await screenshot(page, testInfo, 'finished-performance-phone');
+});
+
 test('project dialogs cancel empty names safely and create a distinct saved project', async ({ page }) => {
   await boot(page);
   const originalName = await page.locator('[data-ref="project-name"]').textContent();

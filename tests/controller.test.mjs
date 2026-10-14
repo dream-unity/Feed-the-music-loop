@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { StudioController } from '../src/controller.mjs';
-import { createProject, createTrack, clone, MAX_TRACKS } from '../src/project.mjs';
+import { createProject, createTrack, clone, validateProject, MAX_TRACKS } from '../src/project.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -429,6 +429,120 @@ test('a performance commits only after both raw vocal and master seal', async ()
   assert.equal(f.controller.state.project.performances.length, 1); assert.equal(f.controller.state.project.takes.length, 1);
   assert.equal(f.storage.saved.at(-1).performances.length, 1); assert.equal(f.storage.saved.at(-1).pendingCapture, undefined);
   assert.equal(f.controller.pending, null);
+});
+
+for (const kind of ['loop', 'vocal']) {
+  test(`recent ${kind} recording is published only after its project save commits and keeps the current view`, async () => {
+    const f = fixture(), saved = deferred();
+    const previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
+    f.controller.state.recentRecording = previous; f.controller.state.view = 'mix';
+    finishedCapture(f, { kind });
+    const expected = { kind: kind === 'loop' ? 'loop' : 'performance', id: kind === 'loop' ? f.controller.pending.track.id : 'performance-1', captureId: 'capture-1' };
+    f.storage.saveHook = () => saved.promise;
+    const finalizing = f.controller.tryFinalize(); await tick();
+    assert.equal(f.controller.state.recentRecording, previous, 'uncommitted capture must not replace the last saved recording');
+    assert.equal(f.controller.state.capture.status, 'finishing');
+    assert.equal(f.storage.saved.length, 0);
+    saved.resolve(); await finalizing;
+    assert.deepEqual(f.controller.state.recentRecording, expected);
+    assert.equal(f.controller.state.capture, null);
+    assert.equal(f.controller.state.view, 'mix');
+    assert.equal(f.storage.saved.length, 1);
+    assert.equal(f.storage.saved[0].recentRecording, undefined, 'recent recording is session UI state, not project data');
+  });
+}
+
+test('the recent performance waits for both audio streams to seal', async () => {
+  const f = fixture(); finishedCapture(f);
+  const master = f.controller.sealed.get('master-1'); f.controller.sealed.delete('master-1');
+  await f.controller.tryFinalize();
+  assert.equal(f.controller.state.recentRecording, null);
+  f.controller.sealed.set('master-1', master); await f.controller.tryFinalize();
+  assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: 'performance-1', captureId: 'capture-1' });
+});
+
+for (const kind of ['loop', 'vocal']) {
+  test(`discarded ${kind} capture does not become the recent saved recording`, async () => {
+    const f = fixture(), previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
+    f.controller.state.recentRecording = previous;
+    finishedCapture(f, { kind, rawStatus: 'cancelled', masterStatus: 'cancelled' });
+    f.controller.pending.end.status = 'cancelled';
+    await f.controller.tryFinalize();
+    assert.equal(f.controller.state.recentRecording, previous);
+    assert.equal(f.controller.state.capture, null);
+    assert.equal(f.controller.state.project.tracks.length, 0);
+    assert.equal(f.controller.state.project.performances.length, 0);
+  });
+}
+
+for (const kind of ['loop', 'vocal']) {
+  test(`a failed ${kind} project save does not publish a recent recording`, async () => {
+    const f = fixture(), previous = { kind: 'loop', id: 'previous-loop', captureId: 'previous-capture' };
+    f.controller.state.recentRecording = previous;
+    finishedCapture(f, { kind });
+    f.storage.saveHook = () => { throw new Error('Cannot commit recorded project'); };
+    await assert.rejects(f.controller.tryFinalize(), /Cannot commit/);
+    assert.equal(f.controller.state.recentRecording, previous);
+    assert.equal(f.storage.saved.length, 0);
+    assert.ok(f.storage.assets.has('raw-1'), 'audio remains available for recovery');
+    assert.equal(f.controller.state.capture, null);
+  });
+}
+
+test('audio still requiring recovery is not described as a recent playable recording', async () => {
+  const f = fixture(); finishedCapture(f, { rawStatus: 'recording', masterStatus: 'recording', finalized: false });
+  f.storage.finishHook = () => { throw new Error('Seal unavailable'); };
+  f.storage.recoverError = new Error('Recovery unavailable');
+  await f.controller.tryFinalize();
+  assert.equal(f.controller.state.recentRecording, null);
+  assert.equal(f.controller.state.project.performances.length, 0);
+  assert.equal(f.controller.state.recovered.length, 2);
+});
+
+test('opening another project clears the recent recording instead of pointing to foreign audio', async () => {
+  const f = fixture(); finishedCapture(f); await f.controller.tryFinalize();
+  assert.equal(f.controller.state.recentRecording.id, 'performance-1');
+  const next = createProject('New song'); f.storage.projects.set(next.id, next);
+  await f.controller.openProject(next.id);
+  assert.equal(f.controller.state.project.id, next.id);
+  assert.equal(f.controller.state.recentRecording, null);
+  assert.equal(f.controller.state.capture, null);
+});
+
+test('real meter events forward their microphone peak, RMS and capture identity to the live input display', () => {
+  const f = fixture(), forwarded = [];
+  f.ui.updateLiveInput = data => forwarded.push(data);
+  const sample = { inputLevel: .7, inputRms: .24, outputLevel: .3, playing: true, capture: { id: 'live-capture', kind: 'vocal', status: 'recording', elapsedFrames: 1200 } };
+  f.controller.audioEvent('meter', sample);
+  assert.deepEqual(forwarded, [sample]);
+  assert.equal(f.controller.state.inputLevel, .7);
+  f.controller.audioEvent('state', { playing: true, capture: sample.capture });
+  f.controller.render();
+  assert.equal(forwarded.length, 1, 'state changes and renders must not manufacture waveform samples');
+});
+
+test('stale meter events from suspended or closed audio do not advance the microphone display', () => {
+  for (const state of ['suspended', 'interrupted', 'closed']) {
+    const f = fixture(), forwarded = [];
+    f.engine.context = { state };
+    f.ui.updateLiveInput = data => forwarded.push(data);
+    f.controller.audioEvent('meter', { inputLevel: .9, inputRms: .6, playing: true, capture: { id: 'stale-capture', status: 'recording' } });
+    assert.equal(forwarded.length, 0);
+    assert.equal(f.controller.state.inputLevel, 0);
+    assert.equal(f.controller.state.capture, null);
+  }
+});
+
+test('recent loop playback targets its recorded source and keeps the current view', async () => {
+  const f = fixture(); finishedCapture(f, { kind: 'loop' }); await f.controller.tryFinalize();
+  f.controller.state.view = 'mix';
+  const previews = []; f.controller.previewRecordedAsset = async (assetId, name) => previews.push({ assetId, name });
+  const track = f.controller.state.project.tracks[0];
+  await f.controller.handle({ type: 'preview-track', id: f.controller.state.recentRecording.id });
+  assert.deepEqual(previews, [{ assetId: track.assetId, name: track.name }]);
+  assert.equal(f.controller.state.view, 'mix');
+  await f.controller.handle({ type: 'preview-track', id: 'missing-track' });
+  assert.equal(previews.length, 1);
 });
 
 test('an incomplete arrangement preserves full recorded audio while limiting edits to its acknowledged prefix', async () => {
@@ -1034,6 +1148,163 @@ function savedMix(f, overrides = {}) {
   f.controller.removeDownloadAsset = id => f.controller.removedDownloadAssets.push(id);
   return asset;
 }
+
+async function removablePerformance(f) {
+  const project = f.controller.state.project;
+  const backing = createTrack({ assetId: 'backing-1', name: 'Backing loop', frames: 100 });
+  project.tracks.push(backing); project.baseFrames = 100;
+  f.storage.assets.set(backing.assetId, { id: backing.assetId, projectId: project.id, sampleRate: project.sampleRate, channels: 1, kind: 'loop', status: 'complete', frames: 100 });
+  finishedCapture(f);
+  f.controller.pending.initialState.tracks = clone(project.tracks);
+  f.controller.pending.initialState.baseFrames = project.baseFrames;
+  f.controller.pending.events = [{ type: 'mix', frame: 1040, id: backing.id, muted: true }];
+  await f.controller.tryFinalize();
+  // A current mixer edit must not replace the recorded entrance or automation.
+  backing.muted = true;
+  f.controller.history.clear();
+  f.ui.confirm = async () => true;
+  f.storage.deleteHook = () => { throw new Error('Removing a performance must not delete shared audio'); };
+  return project.performances[0];
+}
+
+test('performance removal preserves strict project validity, shared sources and its vocal arrangement through Undo and Redo', async () => {
+  const f = fixture(), performance = await removablePerformance(f), project = f.controller.state.project;
+  const { prepareRenderPlan } = await import('../src/export/render.mjs');
+  const planBefore = await prepareRenderPlan(f.storage, project, { tailSeconds: 0, prerollSeconds: 0 });
+  assert.equal(planBefore.tracks[0].muted, false);
+  assert.equal(planBefore.events[0].muted, true);
+  const takesBefore = clone(project.takes), tracksBefore = clone(project.tracks), audioBefore = clone([...f.storage.assets]);
+  let confirmation, savesScheduled = 0;
+  f.ui.confirm = async options => { confirmation = options; return true; };
+  f.controller.scheduleSave = () => savesScheduled++;
+
+  await f.controller.handle({ type: 'delete-performance', performanceId: performance.id });
+
+  assert.equal(confirmation.title, 'Remove performance?');
+  assert.equal(confirmation.confirmLabel, 'Remove performance');
+  assert.equal(confirmation.danger, true);
+  assert.equal(project.performances[0].removed, true);
+  assert.equal(validateProject(project).performances[0].removed, true);
+  assert.deepEqual(project.takes, takesBefore);
+  assert.deepEqual(project.tracks, tracksBefore);
+  assert.deepEqual([...f.storage.assets], audioBefore);
+  assert.deepEqual(await prepareRenderPlan(f.storage, project, { tailSeconds: 0, prerollSeconds: 0 }), planBefore);
+  assert.equal(savesScheduled, 1);
+  assert.equal(f.controller.state.undoAvailable, true);
+
+  await f.controller.handle({ type: 'undo' });
+  assert.notEqual(f.controller.state.project.performances[0].removed, true);
+  assert.deepEqual(f.controller.state.project.takes, takesBefore);
+  assert.equal(f.controller.state.redoAvailable, true);
+  await f.controller.handle({ type: 'redo' });
+  assert.equal(f.controller.state.project.performances[0].removed, true);
+  assert.deepEqual(await prepareRenderPlan(f.storage, f.controller.state.project, { tailSeconds: 0, prerollSeconds: 0 }), planBefore);
+  assert.deepEqual([...f.storage.assets], audioBefore);
+  assert.equal(f.controller.performanceRemoval, null);
+});
+
+test('canceling performance removal leaves its project, audio, preview and undo history unchanged', async () => {
+  const f = fixture(), performance = await removablePerformance(f);
+  const before = clone(f.controller.state.project), audioBefore = clone([...f.storage.assets]);
+  const preview = { assetId: performance.masterAssetId, name: performance.name };
+  f.controller.state.preview = preview;
+  f.controller.closePreview = () => { throw new Error('Cancel must not close playback'); };
+  f.ui.confirm = async () => false;
+  await f.controller.removePerformance(performance.id);
+  assert.deepEqual(f.controller.state.project, before);
+  assert.deepEqual([...f.storage.assets], audioBefore);
+  assert.equal(f.controller.state.preview, preview);
+  assert.equal(f.controller.history.past.length, 0);
+  assert.equal(f.controller.performanceRemoval, null);
+});
+
+test('removed performances stay removed on reopen without appearing as recovered audio', async () => {
+  const f = fixture(), performance = await removablePerformance(f);
+  await f.controller.handle({ type: 'delete-performance', id: performance.id });
+  await f.controller.saveNow();
+  await f.controller.openProject(f.controller.state.project.id);
+  assert.equal(f.controller.state.project.performances[0].removed, true);
+  assert.equal(f.controller.state.project.takes[0].performanceId, performance.id);
+  assert.equal(f.controller.state.recovered.length, 0);
+  assert.equal(f.controller.state.damagedAudio.length, 0);
+  assert.ok(f.storage.assets.has(performance.masterAssetId));
+  assert.ok(f.storage.assets.has(performance.leadAssetId));
+});
+
+for (const previewState of ['matching-ready', 'matching-preparing', 'unrelated-ready', 'unrelated-preparing']) {
+  test(`performance removal closes only its own preview: ${previewState}`, async () => {
+    const f = fixture(), performance = await removablePerformance(f);
+    const matching = previewState.startsWith('matching'), preparing = previewState.endsWith('preparing');
+    const preview = { name: performance.name, assetId: matching ? performance.masterAssetId : 'another-master' };
+    f.controller.state[preparing ? 'previewPreparing' : 'preview'] = preview;
+    let closed = 0; f.controller.closePreview = () => { closed++; f.controller.state.preview = null; f.controller.state.previewPreparing = null; };
+    await f.controller.removePerformance(performance.id);
+    assert.equal(closed, matching ? 1 : 0);
+    if (!matching) assert.equal(f.controller.state[preparing ? 'previewPreparing' : 'preview'], preview);
+    assert.equal(f.controller.state.project.performances[0].removed, true);
+  });
+}
+
+for (const blocked of ['readonly', 'busy', 'capture', 'pending', 'exporting']) {
+  test(`performance removal rejects ${blocked} state without confirmation or edits`, async () => {
+    const f = fixture(), performance = await removablePerformance(f);
+    if (blocked === 'pending') f.controller.pending = { id: 'other-capture' };
+    else f.controller.state[blocked] = blocked === 'capture' ? { kind: 'vocal', status: 'recording' } : true;
+    let confirmations = 0; f.ui.confirm = async () => { confirmations++; return true; };
+    await assert.rejects(f.controller.removePerformance(performance.id), /Finish|read only|another tab|current operation|export/i);
+    assert.equal(confirmations, 0);
+    assert.notEqual(performance.removed, true);
+    assert.equal(f.controller.history.past.length, 0);
+  });
+}
+
+test('performance removal rejects concurrent dialogs and abandons confirmation after Stop or project change', async () => {
+  for (const change of ['stop', 'project']) {
+    const f = fixture(), performance = await removablePerformance(f), gate = deferred();
+    f.ui.confirm = () => gate.promise;
+    const removing = f.controller.removePerformance(performance.id); await tick();
+    await assert.rejects(f.controller.removePerformance(performance.id), /current operation|remov/i);
+    if (change === 'stop') await f.controller.handle({ type: 'stop' });
+    else {
+      const next = createProject('Other song'); f.storage.projects.set(next.id, next);
+      await f.controller.openProject(next.id);
+    }
+    gate.resolve(true); await removing;
+    assert.notEqual(performance.removed, true);
+    assert.equal(f.controller.history.past.length, 0);
+    assert.equal(f.controller.performanceRemoval, null);
+  }
+});
+
+test('performance removal rechecks write, recording, busy and export guards after confirmation', async () => {
+  for (const change of ['readonly', 'capture', 'busy', 'exporting']) {
+    const f = fixture(), performance = await removablePerformance(f), gate = deferred();
+    f.ui.confirm = () => gate.promise;
+    const removing = f.controller.removePerformance(performance.id); await tick();
+    f.controller.state[change] = change === 'capture' ? { kind: 'vocal', status: 'recording' } : true;
+    gate.resolve(true);
+    await assert.rejects(removing, /Finish|read only|another tab|current operation|export/i);
+    assert.notEqual(performance.removed, true);
+    assert.equal(f.controller.history.past.length, 0);
+    assert.equal(f.controller.performanceRemoval, null);
+  }
+});
+
+test('unknown and already removed performances are harmless, including changes during confirmation', async () => {
+  for (const change of ['missing', 'removed', 'missing-after-confirmation', 'removed-after-confirmation']) {
+    const f = fixture(), performance = await removablePerformance(f), gate = deferred();
+    let confirmations = 0; f.ui.confirm = () => { confirmations++; return gate.promise; };
+    const duringConfirmation = change.endsWith('after-confirmation');
+    if (!duringConfirmation && change === 'removed') performance.removed = true;
+    const removing = f.controller.removePerformance(change === 'missing' ? 'missing-performance' : performance.id);
+    await tick();
+    if (change === 'missing-after-confirmation') f.controller.state.project.performances = [];
+    if (change === 'removed-after-confirmation') performance.removed = true;
+    gate.resolve(true); await removing;
+    assert.equal(confirmations, duringConfirmation ? 1 : 0);
+    assert.equal(f.controller.history.past.length, 0);
+  }
+});
 
 test('saved mix deletion confirms its exact name and PCM bytes, keeping every source recording', async () => {
   const f = fixture(), mix = savedMix(f); recoverable(f, { id: 'loop-source' }); recoverable(f, { id: 'vocal-source', kind: 'vocal' });
