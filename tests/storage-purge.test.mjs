@@ -20,6 +20,7 @@ class FakeDiskBackend extends BrowserBackend {
   }
   async lockProject(id) { this.events.push(`lock:${id}`); if (this.foreign.has(id)) throw Object.assign(new Error('Another tab owns this project'), { code: 'PROJECT_BUSY' }); }
   async releaseProject(id) { this.events.push(`release:${id}`); }
+  async all(store) { assert.equal(store, 'projects'); return [...this.projects.values()].map(project => structuredClone(project)); }
   async getAsset(id) { return this.assets.get(id); }
   async listAssets(projectId) { return [...this.assets.values()].filter(asset => asset.projectId === projectId); }
   async loadProject(id) { return this.projects.get(id); }
@@ -138,4 +139,12 @@ test('projectUsage totals audio metadata without reading PCM and includes mixes'
   disk.readData = () => assert.fail('Usage must not read audio'); disk.openHandle = () => assert.fail('Usage must not open audio files');
   const usage = await disk.projectUsage('project-a');
   assert.equal(usage.audioBytes, 2200); assert.equal(usage.assetCount, 3); assert.equal(usage.recordingAssets, 1); assert.equal(usage.byKind.mix.bytes, 1600); assert.equal(usage.includesMetadataOverhead, false);
+});
+
+test('whole-project purge refuses shared audio before mutating any metadata or bytes', async () => {
+  const disk = new FakeDiskBackend(); disk.add('shared-audio', 'owner');
+  disk.projects.set('other-project', { id: 'other-project', name: 'Other song', deletedAt: 123, tracks: [{ assetId: 'shared-audio' }] });
+  await assert.rejects(disk.purgeProject('owner'), error => error.code === 'PROJECT_AUDIO_SHARED' && /Other song/.test(error.message) && /individually in Storage/.test(error.message));
+  assert.equal(disk.assets.has('shared-audio'), true); assert.equal(disk.files.has('shared-audio.pcm'), true);
+  assert.equal(disk.projects.get('owner').purgePendingAt, undefined); assert.deepEqual(disk.events, ['lock:owner']);
 });

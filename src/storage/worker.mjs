@@ -56,6 +56,17 @@ const methods = {
   loadProject: ([id]) => { validId(id, 'Project'); return backend.loadProject(id); },
   deleteProject: ([id]) => { validId(id, 'Project'); return backend.deleteProject(id); },
   projectUsage: ([id]) => { validId(id, 'Project'); return backend.projectUsage(id); },
+  getStorageInventory: () => backend.getStorageInventory(),
+  deleteStoredFile: async ([file]) => {
+    return backend.deleteStoredFile(file, { onDetached(id) {
+      if (!id) return;
+      // Fence after durable reference detachment, before physical deletion: even
+      // an interrupted deletion must not let a retired recording recreate PCM.
+      markDeleted(id);
+      for (const port of ports) portFences.get(port)?.add(id);
+      journal.assets.delete(id); journal.failures.delete(id);
+    } });
+  },
   purgeProject: async ([id, options = {}]) => {
     validId(id, 'Project');
     // Controller closes audio before opting into unfinished-asset deletion.
@@ -64,14 +75,18 @@ const methods = {
     const assets = await backend.listAssets(id);
     if (assets.some(asset => asset.projectId !== id)) throw storageError('ASSET_OWNER_MISMATCH', 'Project deletion found an inconsistent audio owner.');
     if (options.discardUnfinished !== true && assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
-    releasedProjects.add(id);
-    for (const asset of assets) {
-      markDeleted(asset.id);
-      for (const port of ports) portFences.get(port)?.add(asset.id);
-    }
-    try { return await backend.purgeProject(id, options); }
+    let deleting = false;
+    try { return await backend.purgeProject(id, options, { onDelete(ownedAssets) {
+      // The backend first checks shared references under its maintenance lock.
+      // A refused purge must leave surviving playback and recording unfenced.
+      deleting = true; releasedProjects.add(id);
+      for (const asset of ownedAssets) {
+        markDeleted(asset.id);
+        for (const port of ports) portFences.get(port)?.add(asset.id);
+      }
+    } }); }
     finally {
-      for (const [assetId, asset] of journal.assets) if (asset.projectId === id) { journal.assets.delete(assetId); journal.failures.delete(assetId); }
+      if (deleting) for (const [assetId, asset] of journal.assets) if (asset.projectId === id) { journal.assets.delete(assetId); journal.failures.delete(assetId); }
     }
   },
   beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); deletedAssets.delete(asset.id); return asset; },
@@ -184,7 +199,7 @@ self.onmessage = ({ data }) => {
   if (data?.type !== 'rpc') return;
   const { id, method, args = [] } = data;
   if (!Object.hasOwn(methods, method)) { self.postMessage({ type: 'rpc-result', id, error: serializeError(storageError('UNKNOWN_METHOD', 'Unknown storage operation.')) }); return; }
-  const read = ['getAsset', 'listAssets', 'readPage', 'estimate', 'loadProject', 'listProjects', 'projectUsage'].includes(method);
+  const read = ['getAsset', 'listAssets', 'readPage', 'estimate', 'loadProject', 'listProjects', 'projectUsage', 'getStorageInventory'].includes(method);
   const bytes = method === 'putPage' ? args[2]?.byteLength || 0 : 0;
   const readTicket = method === 'readPage' ? trackRead(args[0]) : null;
   queue.add(async () => {

@@ -2,7 +2,7 @@
 
 The studio is tested at three levels: deterministic audio/storage tests, automated browsers, and a recording/export check against the deployed GitHub Pages website. These checks complement a short test on the microphone and headphones you plan to use.
 
-## Verified release
+## Earlier verified release
 
 Application commit: [`4db2fd8d53f31e300663d16904b4330b74d5340c`](https://github.com/dream-unity/Feed-the-music-loop/commit/4db2fd8d53f31e300663d16904b4330b74d5340c).
 
@@ -18,6 +18,14 @@ The deployment check compared the exact packaged service-worker SHA-256 before a
 ```
 
 Browser reports, screenshots and failure traces are uploaded by the workflows with 14-day retention. The tests themselves remain in the repository and can be run again after those artifacts expire.
+
+## Storage manager verification
+
+Studio 2026.10.15.2 adds a top-right Storage dialog and removes the estimate-only recording block. Its regression suite measures native audio and cache payload bytes, deletes confirmed files, reloads saved manifests, verifies surviving audio, and keeps failed measurements unknown. Chromium scenarios include cancelled confirmations, active previews, another tab’s writer lock, unindexed OPFS files and IndexedDB pages, cache ownership, phone/tablet controls, and low or unavailable quota estimates. Firefox and WebKit additionally delete a restored loop and verify the original project’s PCM hash is unchanged.
+
+The WebKit test environment uses IndexedDB and cannot inspect OPFS. The test requires the specific inspection limitation, an unknown overall audio total, and exact known-file byte reclamation; it never treats an unknown total as zero. Node tests cover changed confirmations, failed manifest writes, failed physical deletion, shared references, pending writes, Undo/Redo, incomplete scans and preflight refusals. The public deployment check opens Storage and verifies the captured audio row and offline app files after recording and downloading real WAVs.
+
+Browser usage, quota and remaining recording time are estimates. File rows report measured PCM or cached-response bytes; metadata reports encoded size. These are intentionally not described as exact physical disk allocation. The app cannot inspect downloaded files or other apps’ private storage.
 
 ## What the checks establish
 

@@ -459,9 +459,9 @@ test('retained recordings stay out of the studio and are recoverable beside thei
   await action(page, 'manage-storage').click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.locator('.recovery-card')).toHaveCount(24);
-  const retained = dialog.locator('.recovery-card').filter({ has: page.locator(`[data-action="export-recovered"][data-id="${fixture.retainedId}"]`) });
+  const retained = dialog.locator(`.recovery-card[data-file-key="asset:${fixture.retainedId}"]`);
   await expect(retained).toContainText('Retained loop 12');
-  const retainedWav = await download(page, () => retained.locator('[data-action="export-recovered"]').click());
+  const retainedWav = await download(page, () => retained.locator('[data-action="download-storage-file"]').click());
   expect(inspectWav(retainedWav.bytes).frames).toBe(8192);
   await retained.getByRole('button', { name: 'Keep in project', exact: true }).click();
   await expect(retained).toHaveCount(0);

@@ -491,7 +491,7 @@ test('storage management preserves a cancelled deletion, then removes the confir
 
   await action(page, 'manage-storage').click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog).toHaveAccessibleName('Make room for your next song');
+  await expect(dialog).toHaveAccessibleName('Storage');
   const currentProject = dialog.locator('.storage-project.is-current');
   await expect(currentProject).toContainText('Current project');
   await screenshot(page, testInfo, 'storage-manager');

@@ -1,4 +1,6 @@
-import { PAGE_FRAMES, MAX_FALLBACK_FILE_BYTES, MAX_ASSET_RANGE_BYTES, crc32, storageError } from './core.mjs';
+import { PAGE_FRAMES, MAX_FALLBACK_FILE_BYTES, MAX_ASSET_RANGE_BYTES, crc32, storageError, validId } from './core.mjs';
+import { removeAssetReferences } from '../storage-management.mjs';
+import { referencedAssets, touch } from '../project.mjs';
 
 const DB_NAME = 'feed-the-music-loop-v1';
 const DIRECTORY_NAME = 'feed-the-music-loop-v1';
@@ -54,8 +56,20 @@ export class BrowserBackend {
     return { backend: this.backend, ...(await this.estimate()), persistenceSupported: Boolean(navigator.storage?.persist), locking: Boolean(navigator.locks) };
   }
   async estimate() {
-    const estimate = await navigator.storage?.estimate?.() || {};
-    return { usage: estimate.usage ?? null, quota: estimate.quota ?? null, persistent: await navigator.storage?.persisted?.() || false };
+    // Estimates are optional and may be rounded or temporarily unavailable.
+    // In particular, a failed estimate must not prevent opening saved music.
+    let estimate = {}, persistent = false;
+    try { estimate = await navigator.storage?.estimate?.() || {}; } catch {}
+    try { persistent = await navigator.storage?.persisted?.() || false; } catch {}
+    const bytes = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : null;
+    return { usage: bytes(estimate.usage), quota: bytes(estimate.quota), persistent };
+  }
+  async withMaintenance(operation, { required = false } = {}) {
+    if (!navigator.locks) {
+      if (required) throw storageError('LOCKING_UNAVAILABLE', 'This browser cannot safely coordinate permanent file deletion across tabs. Open the studio in a browser with Web Locks support.');
+      return operation();
+    }
+    return navigator.locks.request('feed-the-music-loop:storage-maintenance', { mode: 'exclusive' }, operation);
   }
   async lockProject(projectId) {
     if (!navigator.locks) return; // The UI exposes this capability limitation.
@@ -117,7 +131,7 @@ export class BrowserBackend {
   async loadProject(id) { return this.get('projects', id); }
   async saveProject(project) {
     await this.lockProject(project.id);
-    await this.put('projects', structuredClone(project));
+    await this.withMaintenance(() => this.put('projects', structuredClone(project)));
     return { id: project.id, updatedAt: project.updatedAt, saved: true };
   }
   async deleteProject(id) {
@@ -128,13 +142,18 @@ export class BrowserBackend {
   }
   async createAsset(asset) {
     await this.lockProject(asset.projectId);
-    if (asset.backend === 'opfs') {
-      const handle = await this.openHandle(asset);
-      handle.truncate(0); handle.flush();
-    }
-    const tx = transaction(this.db, 'assets', 'readwrite'), done = completion(tx);
-    try { await request(tx.objectStore('assets').add(asset)); await done; }
-    catch (error) { this.closeHandle(asset.id); throw error; }
+    return this.withMaintenance(async () => {
+      // Keep the new physical file and its index together relative to orphan
+      // cleanup in other tabs. Recheck IDs after entering that same lock.
+      if (await this.getAsset(asset.id)) throw storageError('ASSET_EXISTS', 'An audio recording with this identifier already exists.');
+      if (asset.backend === 'opfs') {
+        const handle = await this.openHandle(asset);
+        handle.truncate(0); handle.flush();
+      }
+      const tx = transaction(this.db, 'assets', 'readwrite'), done = completion(tx);
+      try { await request(tx.objectStore('assets').add(asset)); await done; }
+      catch (error) { this.closeHandle(asset.id); throw error; }
+    });
   }
   async openHandle(asset) {
     if (this.handles.has(asset.id)) return this.handles.get(asset.id);
@@ -301,6 +320,188 @@ export class BrowserBackend {
     await this.removeAssetMetadata(id);
     return { id, deleted: true };
   }
+  async inventoryPages() {
+    // Only one page's PCM exists in JS at a time. The result contains small
+    // aggregates, never a second copy of every recording in memory.
+    const tx = transaction(this.db, 'pages'), done = completion(tx), groups = new Map();
+    await new Promise((resolve, reject) => {
+      const req = tx.objectStore('pages').openCursor();
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        try {
+          const cursor = req.result;
+          if (!cursor) { resolve(); return; }
+          const { buffer, ...metadata } = cursor.value;
+          const group = groups.get(metadata.assetId) || { bytes: 0, metadataBytes: 0, pages: 0, unknown: false };
+          if (buffer instanceof ArrayBuffer) group.bytes += buffer.byteLength;
+          else if (buffer !== undefined) group.unknown = true;
+          group.metadataBytes += new TextEncoder().encode(JSON.stringify(metadata)).byteLength;
+          group.pages++; groups.set(metadata.assetId, group); cursor.continue();
+        } catch (error) { reject(error); }
+      };
+    });
+    await done; return groups;
+  }
+  async inventoryOpfs() {
+    const files = new Map(), errors = [];
+    if (!this.directory) return { files, complete: false, errors: ['Audio file storage could not be inspected.'] };
+    try {
+      for await (const [name, handle] of this.directory.entries()) {
+        if (handle.kind !== 'file') { errors.push(`The folder ${name} could not be measured.`); continue; }
+        try {
+          const file = await handle.getFile();
+          files.set(name, { bytes: file.size, lastModified: file.lastModified });
+        } catch (error) { files.set(name, { bytes: null }); errors.push(`${name}: ${error.message || 'File size unavailable.'}`); }
+      }
+    } catch (error) { errors.push(error.message || 'The audio file listing is unavailable.'); }
+    return { files, complete: !errors.length, errors };
+  }
+  async getStorageInventory() {
+    const errors = [], logicalBytes = value => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    const inspect = async (label, operation, fallback) => {
+      try { return await operation(); } catch (error) { errors.push(`${label}: ${error.message || 'Unavailable.'}`); return fallback; }
+    };
+    // Include tombstoned projects and assets with no project; neither is visible
+    // through the normal project picker, but both still occupy browser storage.
+    const assets = await inspect('Recording index', () => this.all('assets'), null);
+    const storedProjects = await inspect('Project metadata', () => this.all('projects'), null);
+    const pages = await inspect('Audio pages', () => this.inventoryPages(), null);
+    const opfs = await this.inventoryOpfs(); errors.push(...opfs.errors);
+    const projects = [];
+    for (const project of storedProjects || []) {
+      const bytes = new TextEncoder().encode(JSON.stringify(project));
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
+      projects.push({ id: project.id, name: project.name || 'Untitled project', deletedAt: project.deletedAt || null,
+        revision: project.revision ?? null, updatedAt: project.updatedAt ?? null, purgePendingAt: project.purgePendingAt || null,
+        metadataRevision: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''),
+        logicalMetadataBytes: bytes.byteLength, assetIds: referencedAssets(project) });
+    }
+    const files = [], assetIds = new Set((assets || []).map(asset => asset.id)), assetById = new Map((assets || []).map(asset => [asset.id, asset]));
+    let metadataBytes = projects.reduce((sum, project) => sum + project.logicalMetadataBytes, 0);
+    for (const group of pages?.values() || []) metadataBytes += group.metadataBytes;
+    const decorate = (entry, asset = null) => {
+      const referenceId = entry.kind === 'orphan-opfs' && /^[A-Za-z0-9_-]{1,120}\.pcm$/.test(entry.id) ? entry.id.slice(0, -4) : entry.id;
+      // An unused OPFS twin of an IndexedDB asset is only a stray physical
+      // file. Deleting that twin must not detach the retained fallback audio.
+      const retainedAsset = entry.kind === 'orphan-opfs' ? assetById.get(referenceId) : null;
+      entry.assetId = retainedAsset ? null : referenceId;
+      if (retainedAsset) entry.retainedAssetId = retainedAsset.id;
+      const refs = retainedAsset ? [] : projects.filter(project => project.assetIds.includes(referenceId));
+      const owner = projects.find(project => project.id === (asset || retainedAsset)?.projectId);
+      entry.projectId = (asset || retainedAsset)?.projectId || null; entry.projectName = owner?.name || null;
+      entry.referencedProjectIds = refs.map(project => project.id);
+      entry.referenced = refs.length > 0;
+      entry.orphaned = asset ? !refs.length : true;
+      entry.revision = JSON.stringify([entry.kind, entry.id, asset?.updatedAt ?? null, asset?.status ?? null, asset?.frames ?? null,
+        asset?.byteLength ?? null, entry.bytes, entry.lastModified ?? null, entry.pageCount ?? null,
+        refs.map(project => [project.id, project.metadataRevision]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+      files.push(entry);
+    };
+    for (const asset of assets || []) {
+      const pageGroup = pages?.get(asset.id), opfsName = `${asset.id}.pcm`, physical = opfs.files.get(opfsName);
+      let bytes = pageGroup && !pageGroup.unknown ? pageGroup.bytes : pages ? 0 : null, missing = false;
+      if (asset.backend === 'opfs') {
+        const fileBytes = physical ? physical.bytes : opfs.complete ? 0 : null;
+        bytes = bytes !== null && fileBytes !== null ? bytes + fileBytes : null;
+        missing = !physical && opfs.complete;
+        opfs.files.delete(opfsName);
+      }
+      if (asset.backend !== 'opfs' && bytes === 0 && asset.byteLength > 0) missing = true;
+      const assetMetadataBytes = logicalBytes(asset); metadataBytes += assetMetadataBytes;
+      decorate({ key: `asset:${asset.id}`, kind: 'asset', id: asset.id, name: asset.name || 'Untitled recording',
+        backend: asset.backend, status: asset.status, channels: asset.channels, frames: asset.frames, sampleRate: asset.sampleRate, createdAt: asset.createdAt ?? null,
+        bytes, metadataBytes: assetMetadataBytes + (pageGroup?.metadataBytes || 0), missing,
+        lastModified: physical?.lastModified ?? null, pageCount: pageGroup?.pages ?? null,
+        deletedProject: Boolean(ownerDeleted(asset.projectId)), assetKind: asset.kind || 'audio', source: asset.source || null,
+      }, asset);
+    }
+    function ownerDeleted(projectId) { return projects.find(project => project.id === projectId)?.deletedAt; }
+    // If the asset index could not be read, do not guess that physical files are
+    // orphans. Their ownership is unknown and permanent deletion must be refused.
+    if (assets) {
+      for (const [name, physical] of opfs.files) decorate({ key: `orphan-opfs:${name}`, kind: 'orphan-opfs', id: name,
+        name, backend: 'opfs', status: 'unindexed', bytes: physical.bytes, metadataBytes: 0, lastModified: physical.lastModified ?? null });
+      for (const [id, group] of pages || []) if (!assetIds.has(id)) decorate({ key: `orphan-pages:${id}`, kind: 'orphan-pages', id,
+        name: `Unindexed audio ${id}`, backend: 'indexeddb', status: 'unindexed', bytes: group.unknown ? null : group.bytes,
+        metadataBytes: group.metadataBytes, pageCount: group.pages });
+    }
+    for (const file of files) if (file.bytes === null && !errors.length) errors.push('Some audio bytes could not be measured.');
+    const knownAudioBytes = files.reduce((sum, file) => sum + (file.bytes || 0), 0);
+    const complete = errors.length === 0, unknownFiles = files.filter(file => file.bytes === null).length;
+    return { files, projects, knownAudioBytes, audioBytes: complete ? knownAudioBytes : null,
+      metadataBytes: storedProjects && assets && pages ? metadataBytes : null,
+      unknownFiles, complete, errors, includesMetadataOverhead: false,
+      locking: Boolean(navigator.locks), ...(await this.estimate()) };
+  }
+  async saveDetachedProjects(projects) {
+    if (!projects.length) return;
+    // All manifests detach atomically. If quota or a transaction abort prevents
+    // saving any of them, physical bytes have not been touched.
+    const tx = transaction(this.db, 'projects', 'readwrite'), done = completion(tx);
+    try {
+      for (const project of projects) tx.objectStore('projects').put(project);
+      await done;
+    } catch (error) {
+      try { tx.abort(); } catch {}
+      await done.catch(() => {});
+      throw error;
+    }
+  }
+  async deleteStoredFile(file = {}, { onDetached = () => {} } = {}) {
+    const { kind, id, revision, discardUnfinished = false } = file;
+    if (!['asset', 'orphan-opfs', 'orphan-pages'].includes(kind)) throw storageError('INVALID_STORAGE_FILE', 'Choose a recording from the storage file list.');
+    if (kind === 'orphan-opfs') {
+      if (typeof id !== 'string' || !id || id === '.' || id === '..' || /[/\\\0]/.test(id)) throw storageError('INVALID_STORAGE_FILE', 'The audio filename is invalid.');
+    } else validId(id);
+    return this.withMaintenance(async () => {
+      const acquired = [];
+      try {
+        const inventory = await this.getStorageInventory();
+        const entry = inventory.files.find(item => item.kind === kind && item.id === id);
+        if (!entry) throw storageError('FILE_CHANGED', 'This file is no longer in the storage list. Refresh storage and try again.');
+        if (revision !== undefined && revision !== entry.revision) throw storageError('FILE_CHANGED', 'This file or a project using it changed. Review the refreshed storage list before deleting it.');
+        // Ownership and references must be known even when physical measurement
+        // is unavailable. Unknown sizes do not imply an empty/deletable file.
+        if (inventory.errors.some(message => /^(Recording index|Project metadata):/.test(message))) throw storageError('STORAGE_INVENTORY_INCOMPLETE', 'Project ownership could not be inspected. No audio was deleted.');
+        const asset = kind === 'asset' ? await this.getAsset(id) : null;
+        if (kind === 'asset' && !asset) throw storageError('FILE_CHANGED', 'This recording changed. Refresh storage and try again.');
+        const projectIds = new Set([...entry.referencedProjectIds, ...(entry.projectId ? [entry.projectId] : [])]);
+        for (const projectId of [...projectIds].sort()) {
+          const wasHeld = this.projectLocks.has(projectId);
+          await this.lockProject(projectId);
+          if (!wasHeld) acquired.push(projectId);
+        }
+        if (asset?.status === 'recording' && discardUnfinished !== true) throw storageError('RECORDING_ACTIVE', 'This recording is unfinished. Close its recording session before permanently deleting it.');
+        // saveProject and createAsset use the maintenance lock too. Nothing can
+        // attach a new reference or create an unindexed file during this operation.
+        const changes = [];
+        for (const projectId of entry.referencedProjectIds) {
+          const project = await this.loadProject(projectId);
+          if (!project) throw storageError('FILE_CHANGED', 'A project using this recording changed. Refresh storage and try again.');
+          const result = removeAssetReferences(project, entry.assetId);
+          if (result.changed) changes.push(touch(result.project));
+        }
+        await this.saveDetachedProjects(changes);
+        onDetached(entry.assetId);
+        // A known physical deletion failure leaves the asset/page index (or the
+        // still-enumerable orphan file) for a retry, after durable detachment.
+        if (kind === 'asset') await this.deleteAsset(id, asset.projectId);
+        else if (kind === 'orphan-pages') await this.removeAssetMetadata(id);
+        else {
+          if (!this.directory) throw storageError('OPFS_UNAVAILABLE', 'Audio file storage is unavailable.');
+          const possibleAssetId = id.endsWith('.pcm') ? id.slice(0, -4) : null;
+          if (possibleAssetId) {
+            if ((await this.getAsset(possibleAssetId))?.backend === 'opfs') throw storageError('FILE_CHANGED', 'This file is now indexed as a recording. Refresh storage before deleting it.');
+            this.closeHandle(possibleAssetId);
+          }
+          try { await this.directory.removeEntry(id); } catch (error) { if (error.name !== 'NotFoundError') throw error; }
+        }
+        return { kind, id, assetId: entry.assetId, deleted: true, affectedProjectIds: changes.map(project => project.id), freedAudioBytes: entry.bytes };
+      } finally {
+        for (const projectId of acquired) await this.releaseProject(projectId);
+      }
+    }, { required: true });
+  }
   async projectUsage(projectId) {
     const assets = await this.listAssets(projectId), byKind = Object.create(null);
     let audioBytes = 0, recordingAssets = 0;
@@ -313,11 +514,17 @@ export class BrowserBackend {
     }
     return { projectId, audioBytes, bytes: audioBytes, assetCount: assets.length, recordingAssets, byKind, includesMetadataOverhead: false };
   }
-  async purgeProject(projectId, { discardUnfinished = false } = {}) {
+  async purgeProject(projectId, options = {}, { onDelete = () => {} } = {}) {
     await this.lockProject(projectId);
+    return this.withMaintenance(() => this.purgeProjectLocked(projectId, options, onDelete));
+  }
+  async purgeProjectLocked(projectId, { discardUnfinished = false } = {}, onDelete = () => {}) {
     const assets = await this.listAssets(projectId);
     if (assets.some(asset => asset.projectId !== projectId)) throw storageError('ASSET_OWNER_MISMATCH', 'Project deletion found an inconsistent audio owner and stopped without deleting audio.');
     if (discardUnfinished !== true && assets.some(asset => asset.status === 'recording')) throw storageError('RECORDING_ACTIVE', 'Finish recording or recover this project before permanently deleting it.');
+    const owned = new Set(assets.map(asset => asset.id));
+    const shared = (await this.all('projects')).filter(project => project.id !== projectId && referencedAssets(project).some(id => owned.has(id)));
+    if (shared.length) throw storageError('PROJECT_AUDIO_SHARED', `This project's audio is also used by ${shared.map(project => `“${project.name || 'Untitled project'}”`).join(', ')}. Delete shared files individually in Storage first so their project references can be removed safely.`);
     const project = await this.loadProject(projectId);
     let markerSaved = false;
     // Keep an interrupted purge discoverable, with its metadata, until every
@@ -332,6 +539,7 @@ export class BrowserBackend {
     }
     let deletedAssets = 0, freedAudioBytes = 0;
     try {
+      onDelete(assets);
       for (const asset of assets) {
         await this.deleteAsset(asset.id, projectId);
         deletedAssets++; freedAudioBytes += asset.byteLength || asset.frames * asset.channels * 4 || 0;
