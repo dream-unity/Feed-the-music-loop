@@ -303,7 +303,22 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     await expect(storageDialog).toHaveAccessibleName('Storage');
     await expect(storageRow).toHaveCount(0);
     const afterDeletion = await readStorage();
-    expect(afterDeletion.inventory.audioBytes).toBe(beforeDeletion.inventory.audioBytes - targetFile.bytes);
+    // WebKit may use native IndexedDB while its OPFS API is unavailable. The
+    // measured files still have exact sizes, but a complete total must remain
+    // unknown; never coerce that null total to zero in this assertion.
+    expect(afterDeletion.inventory.knownAudioBytes).toBe(beforeDeletion.inventory.knownAudioBytes - targetFile.bytes);
+    for (const snapshot of [beforeDeletion, afterDeletion]) {
+      if (snapshot.inventory.complete) {
+        expect(snapshot.inventory.errors).toEqual([]);
+        expect(snapshot.inventory.audioBytes).toBe(snapshot.inventory.knownAudioBytes);
+      } else {
+        expect(snapshot.backend).toBe('indexeddb');
+        expect(snapshot.inventory.audioBytes).toBeNull();
+        expect(snapshot.inventory.errors).toEqual(['Audio file storage could not be inspected.']);
+        expect(snapshot.inventory.unknownFiles).toBe(0);
+      }
+    }
+    expect(afterDeletion.inventory.complete).toBe(beforeDeletion.inventory.complete);
     expect(afterDeletion.restoredReferences).not.toContain(target.assetId);
     expect(afterDeletion.restoredProject.tracks).toHaveLength(2);
     expect(afterDeletion.originalProject).toEqual(beforeDeletion.originalProject);
@@ -324,7 +339,10 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     expect(uploadRequests).toEqual([]);
     await testInfo.attach('audio-and-backup-results', {
       body: JSON.stringify({ baseline: baseline.audio, nativeWavPlayback, edited: edited.audio, loops: restored.musicalContent.loops.length, backupBytes: backup.bytes.length,
-        storageDeletion: { backend: beforeDeletion.backend, deletedBytes: targetFile.bytes, remainingAudioBytes: afterDeletion.inventory.audioBytes, remainingLoops: afterDeletion.restoredProject.tracks.length, originalPcmSha256: afterDeletion.originalPcmSha256 } }, null, 2),
+        storageDeletion: { backend: beforeDeletion.backend, deletedBytes: targetFile.bytes, remainingAudioBytes: afterDeletion.inventory.audioBytes,
+          beforeKnownAudioBytes: beforeDeletion.inventory.knownAudioBytes, remainingKnownAudioBytes: afterDeletion.inventory.knownAudioBytes,
+          inventoryComplete: afterDeletion.inventory.complete, inventoryErrors: afterDeletion.inventory.errors,
+          remainingLoops: afterDeletion.restoredProject.tracks.length, originalPcmSha256: afterDeletion.originalPcmSha256 } }, null, 2),
       contentType: 'application/json',
     });
   } finally {
