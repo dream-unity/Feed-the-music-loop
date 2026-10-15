@@ -2,6 +2,8 @@ import { AudioEngine } from './audio/client.mjs';
 import { createProject, createTrack, validateProject, roleMix, normalizeMix, sectionFromProject, applySection, ProjectHistory, CaptureMetadataBudget, MAX_AUTOMATION_EVENTS, referencedAssets, cleanName, id, clone, touch, PAGE_FRAMES, MAX_TRACKS, COLORS, DEFAULT_METRONOME } from './project.mjs';
 import { exportWav, exportWavParts, exportProject, importProject } from './export/index.mjs';
 import { inspectProjectAudio } from './audio-integrity.mjs';
+import { normalizedStorageCapacity, removeAssetReferences } from './storage-management.mjs';
+import { listStudioCacheFiles, deleteStudioCacheFile } from './storage/cache-files.mjs';
 
 const now = () => new Date().toISOString();
 const nextLoopRecordingName = project => `Loop recording ${project.performances.filter(performance => performance.source === 'loops').length + 1}`;
@@ -52,11 +54,11 @@ export class StudioController {
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (this.state.playing || this.pending)) this.keepAwake(); });
     return this;
   }
-  assertWritable() { if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error(this.state.readonlyReason || 'This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
+  assertWritable() { if (this.fileDeletion?.committing) throw new Error('Wait for file deletion to finish before editing.'); if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error(this.state.readonlyReason || 'This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
   assertIdle() { if (this.pending || this.state.capture) throw new Error('Finish or cancel the recording before changing projects or exporting.'); }
   async openProject(projectId = null, supplied = null) {
     this.assertIdle();
-    if (this.projectDeletion?.committing) throw new Error('Wait for project deletion to finish before opening another project.');
+    if (this.projectDeletion?.committing || this.fileDeletion?.committing) throw new Error('Wait for deletion to finish before opening another project.');
     if (this.openingProject) throw new Error('A project is still opening. Wait for it to finish before switching again.');
     this.openingProject = true;
     try {
@@ -305,9 +307,12 @@ export class StudioController {
     try {
       const engine = await this.ensureAudio(); if (token !== this.generation) return;
       if (kind !== 'mix') { await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return; }
-      const capacity = await this.storage.estimate(); if (token !== this.generation) return;
+      const capacity = await this.storage.estimate().catch(() => ({ usage: null, quota: null })); if (token !== this.generation) return;
       this.state.storage = { ...this.state.storage, ...capacity };
-      if (capacity.quota && capacity.quota - capacity.usage < 8 * 1024 * 1024) throw new Error('There is very little recording space left. Export a project backup and free device storage before recording.');
+      const available = normalizedStorageCapacity(capacity);
+      // An origin quota estimate is advisory, and can lag behind deletions.
+      // The actual journal writes decide whether recording can continue.
+      if (available.low) this.ui.notify(`The browser estimates ${available.remaining.toLocaleString('en-US')} bytes remaining for this site. Open Storage at the top right to review files and free space. Recording will continue while saving is possible.`, 'info');
       const project = this.state.project, captureId = id('capture-'), assetId = id('audio-'), masterAssetId = kind === 'vocal' ? id('master-') : null;
       const role = kind === 'vocal' ? 'lead' : project.tracks.length === 0 ? 'beat' : project.tracks.length === 1 ? 'bass' : 'harmony';
       const label = kind === 'mix' ? nextLoopRecordingName(project) : kind === 'vocal' ? `Vocal take ${project.takes.length + 1}` : `${role[0].toUpperCase()}${role.slice(1)} ${project.tracks.length + 1}`;
@@ -688,7 +693,7 @@ export class StudioController {
   }
   async withExport(fn) {
     this.assertIdle(); if (this.state.exporting) throw new Error('An export is already running.');
-    if (this.state.deletionPending || this.projectDeletion?.committing) throw new Error('Finish deleting this project or open another project before exporting.');
+    if (this.state.deletionPending || this.projectDeletion?.committing || this.fileDeletion?.committing) throw new Error('Finish deleting files or open another project before exporting.');
     if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before exporting.');
     this.closePreview();
     this.state.exporting = true; this.state.exportProgress = 0; this.exportAbort = new AbortController(); this.render();
@@ -939,14 +944,152 @@ export class StudioController {
   }
   async manageStorage() {
     this.assertIdle();
-    if (this.state.exporting) throw new Error('Finish or cancel the export before managing storage.');
-    const projects = await this.storage.listProjects();
-    const rows = [];
-    for (const project of projects) rows.push({ id: project.id, name: project.name, updatedAt: project.updatedAt, purgePending: !!project.purgePendingAt, ...(await this.storage.projectUsage(project.id)) });
-    this.state.storage = { ...this.state.storage, ...await this.storage.estimate() };
+    if (this.state.exporting || this.fileDeletion?.committing) throw new Error('Finish the current operation before managing storage.');
+    const token = this.generation, inventory = await this.getStorageInventory();
+    if (token !== this.generation) return;
+    const listed = await this.storage.listProjects(), visible = new Map(listed.map(project => [project.id, project]));
+    // The normal picker omits soft-deleted projects. Their retained audio still
+    // consumes space, so Storage uses the complete inventory instead.
+    const projects = inventory.projects || listed;
+    const rows = projects.map(project => {
+      const files = inventory.files.filter(file => file.kind !== 'cache' && file.projectId === project.id), byKind = Object.create(null);
+      const knownAudioBytes = files.reduce((sum, file) => sum + (Number.isSafeInteger(file.bytes) && file.bytes >= 0 ? file.bytes : 0), 0);
+      const unknown = inventory.audioComplete === false || files.some(file => !Number.isSafeInteger(file.bytes) || file.bytes < 0);
+      for (const file of files) {
+        const kind = file.assetKind || 'audio', group = byKind[kind] ||= { assets: 0, bytes: 0 };
+        group.assets++; if (group.bytes !== null) group.bytes = Number.isSafeInteger(file.bytes) && file.bytes >= 0 ? group.bytes + file.bytes : null;
+      }
+      return { ...visible.get(project.id), ...project, purgePending: !!(project.purgePendingAt || visible.get(project.id)?.purgePendingAt),
+        audioBytes: unknown ? null : knownAudioBytes, knownAudioBytes, assetCount: files.length,
+        recordingAssets: files.filter(file => file.status === 'recording').length, byKind };
+    });
+    if (token !== this.generation) return;
     this.state.storageProjects = rows;
-    this.ui.showStorageManager?.(rows, this.state.storage);
+    this.ui.showStorageManager?.(rows, this.state.storage, inventory);
     this.render();
+  }
+  async getStorageInventory() {
+    const [audio, caches] = await Promise.all([this.storage.getStorageInventory(), listStudioCacheFiles()]);
+    const inventory = { ...audio, audioComplete: audio.complete !== false, files: [...(audio.files || []), ...(caches.files || [])], cacheBytes: caches.cacheBytes,
+      knownCacheBytes: caches.knownCacheBytes, unknownFiles: (audio.unknownFiles || 0) + (caches.unknownFiles || 0),
+      complete: audio.complete !== false && caches.complete !== false, errors: [...(audio.errors || []), ...(caches.errors || [])] };
+    this.state.storage = { ...this.state.storage, usage: audio.usage ?? null, quota: audio.quota ?? null,
+      ...(audio.persistent === undefined ? {} : { persistent: audio.persistent }) };
+    this.state.storageInventory = inventory;
+    return inventory;
+  }
+  async downloadStorageFile(fileKey) {
+    this.assertIdle();
+    const inventory = await this.getStorageInventory(), file = inventory.files.find(item => item.key === fileKey);
+    if (!file || file.kind !== 'asset') throw new Error('Choose a saved recording to download. Refresh Storage if the file has changed.');
+    if (file.status === 'recording') throw new Error('Recover this unfinished recording before downloading it.');
+    // WAV export validates the actual saved pages, including assets belonging
+    // to another project. No project selection or metadata mutation is needed.
+    return this.withExport(signal => this.offerAudioDownload(file.id, file.name || 'Recording', signal));
+  }
+  async deleteStorageFile(fileKey) {
+    const ready = () => {
+      this.assertIdle();
+      if (this.state.busy || this.state.exporting || this.projectDeletion || this.state.storageFailed) throw new Error('Finish the current operation before deleting a file.');
+    };
+    ready();
+    if (this.fileDeletion) throw new Error('Finish the current operation before deleting another file.');
+    if (typeof fileKey !== 'string' || !fileKey) throw new Error('Choose a file from Storage.');
+    const project = this.state.project, token = this.generation, operation = { committing: false };
+    this.fileDeletion = operation;
+    let selected, sourceAssetId = null, currentAffected = false, committed = false, failure = null;
+    const current = () => token === this.generation && project === this.state.project;
+    try {
+      let inventory = await this.getStorageInventory(); if (!current()) return;
+      selected = inventory.files.find(file => file.key === fileKey);
+      if (!selected) throw new Error('This file is no longer available. Refresh Storage.');
+      sourceAssetId = selected.assetId || (selected.kind === 'asset' ? selected.id : null);
+      currentAffected = !!sourceAssetId && (referencedAssets(project).includes(sourceAssetId) || selected.referencedProjectIds?.includes(project.id));
+      if (currentAffected) {
+        // A quota-limited recovery session can still delete files: the worker
+        // commits its smaller detached manifest before removing any audio.
+        if (!this.state.recoveryRequired) { this.assertWritable(); await this.flushSave(); }
+        if (!current()) return;
+        // A completed autosave changes the deletion revision, so confirmation
+        // must describe the freshly durable file and its project references.
+        inventory = await this.getStorageInventory(); if (!current()) return;
+        selected = inventory.files.find(file => file.key === fileKey);
+        if (!selected) throw new Error('This file is no longer available. Refresh Storage.');
+      }
+      const descriptions = [];
+      if (sourceAssetId) for (const projectId of selected.referencedProjectIds || []) {
+        const source = projectId === project.id ? project : await this.storage.loadProject(projectId);
+        if (!current()) return;
+        const { impacts } = removeAssetReferences(source, sourceAssetId), parts = [];
+        for (const [key, label] of [['tracks', 'loop'], ['takes', 'vocal take'], ['performances', 'performance'], ['arrangements', 'saved arrangement']]) {
+          if (impacts[key].length) parts.push(`${impacts[key].length} ${label}${impacts[key].length === 1 ? '' : 's'}`);
+        }
+        if (impacts.pendingCapture) parts.push('its unfinished recording recovery entry');
+        if (parts.length) descriptions.push(`“${source.name}”: ${parts.join(', ')}`);
+      }
+      const confirmedProjectRevision = project.revision;
+      const bytes = Number.isSafeInteger(selected.bytes) && selected.bytes >= 0 ? `${selected.bytes.toLocaleString('en-US')} bytes` : 'size unavailable';
+      const consequence = selected.kind === 'cache'
+        ? 'This removes an offline app file. A future studio update can restore its offline copy. Until then, reopening this part of the studio may require an internet connection.'
+        : descriptions.length ? `It will be removed from ${descriptions.join('; ')}. Other audio files are kept.` : 'No saved project uses this file. Other recordings are kept.';
+      const accepted = await this.ui.confirm({ title: `Delete ${selected.name || 'file'} permanently?`, message: `Permanently delete “${selected.name || 'file'}” (${bytes}) from this browser? ${consequence} This cannot be undone. Download a copy first if you want to keep it.`, danger: true, confirmLabel: 'Delete permanently' });
+      if (!accepted || !current()) return;
+      ready();
+      if (project.revision !== confirmedProjectRevision) throw new Error('The project changed while confirmation was open. Review the file again before deleting.');
+      if (currentAffected) { if (!this.state.recoveryRequired) { this.assertWritable(); await this.flushSave(); } if (!current()) return; }
+      inventory = await this.getStorageInventory(); if (!current()) return;
+      const fresh = inventory.files.find(file => file.key === fileKey);
+      if (!fresh || fresh.revision !== selected.revision || fresh.bytes !== selected.bytes || fresh.status !== selected.status || fresh.name !== selected.name || JSON.stringify(fresh.referencedProjectIds || []) !== JSON.stringify(selected.referencedProjectIds || [])) throw new Error('This file or its project references changed while confirmation was open. Review it again before deleting.');
+      if (project.revision !== confirmedProjectRevision) throw new Error('The project changed while confirmation was open. Review the file again before deleting.');
+      ready(); operation.committing = true; this.state.busy = true; this.state.status = 'Permanently deleting file…';
+      if (sourceAssetId) {
+        // Retire all queued audio reads and prevent any in-flight project save
+        // from restoring references after the worker has detached them.
+        if (currentAffected) { clearTimeout(this.saveTimer); this.saveTimer = null; }
+        this.history.clear();
+        this.closePreview(); this.microphoneOperation = null; this.state.micChanging = false;
+        const engine = this.engine; this.engine = null;
+        this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; this.state.audition = null;
+        project.input.monitor = false;
+        await engine?.close(); await this.releaseWake();
+        await this.saveChain.catch(() => {});
+        if (currentAffected) ++this.saveSerial;
+      }
+      this.render();
+      if (selected.kind === 'cache') await deleteStudioCacheFile(selected);
+      else await this.storage.deleteStoredFile({ kind: selected.kind, id: selected.id, revision: selected.revision, discardUnfinished: selected.kind === 'asset' });
+      committed = true;
+      if (sourceAssetId) this.removeDownloadAsset(sourceAssetId);
+      this.state.error = null; this.state.status = 'File permanently deleted';
+      this.ui.notify(`${selected.name || 'File'} permanently deleted.`, 'success');
+    } catch (error) { failure = error; }
+    finally {
+      if (operation.committing && current()) {
+        try {
+          // Physical deletion may fail after durable reference removal. Reload
+          // even on error so Undo/autosave cannot resurrect detached sources.
+          if (currentAffected) {
+            this.state.project = validateProject(await this.storage.loadProject(project.id));
+            this.state.selectedTrackId = this.state.project.tracks.find(track => track.id === this.state.selectedTrackId)?.id || this.state.project.tracks[0]?.id || null;
+            this.state.recentRecording = latestProjectRecording(this.state.project);
+            this.state.activeSectionId = null; this.state.queuedSectionId = null;
+          }
+          const active = this.state.project, assets = await this.storage.listAssets(active.id), used = new Set(referencedAssets({ ...active, pendingCapture: null }));
+          this.state.recovered = assets.filter(asset => asset.frames > 0 && asset.status !== 'cancelled' && !used.has(asset.id)).map(asset => ({ ...asset, needsRecovery: asset.status === 'recording' }));
+          this.state.discarded = assets.filter(isDiscardedCapture); this.updateAudioIntegrity(active, assets);
+          this.state.projects = await this.storage.listProjects();
+        } catch (error) {
+          if (currentAffected) { this.state.readonly = true; this.state.readonlyReason = 'Reopen this project to refresh its saved file references before editing.'; }
+          failure ||= error;
+        }
+      }
+      if (this.fileDeletion === operation) this.fileDeletion = null;
+      if (operation.committing) this.state.busy = false;
+      this.render();
+    }
+    if (operation.committing) await this.manageStorage().catch(error => { if (!failure) failure = error; });
+    if (failure) throw failure;
+    return { deleted: committed };
   }
   async selectMicrophone(deviceId) {
     this.assertWritable(); this.assertIdle();
@@ -1038,7 +1181,7 @@ export class StudioController {
     this.projectDeletion = operation;
     let project, deletingCurrent = false, purged = false;
     try {
-      project = (await this.storage.listProjects()).find(item => item.id === projectId);
+      project = await this.storage.loadProject(projectId);
       if (!project || token !== this.generation) return;
       const accepted = await this.ui.confirm({ title: `Delete ${project.name}?`, message: 'This permanently removes this project, its recordings and its saved takes from this device. Download a project backup first if you want to keep it. Playback will pause.', danger: true, confirmLabel: 'Delete permanently' });
       if (!accepted || token !== this.generation) return;
@@ -1094,6 +1237,7 @@ export class StudioController {
   async handle(action = {}) {
     if (this.state.storageFailed && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview'].includes(action.type)) throw new Error('Reopen the studio to recover saved recordings before continuing.');
     if (this.projectDeletion?.committing && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'stop', 'mic-off'].includes(action.type)) throw new Error('Wait for project deletion to finish before starting another operation.');
+    if (this.fileDeletion?.committing && !['help', 'view', 'dismiss-error', 'close-preview'].includes(action.type)) throw new Error('Wait for file deletion to finish before starting another operation.');
     if (this.state.deletionPending && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'manage-storage', 'delete-project', 'projects', 'open-project', 'new-project', 'stop', 'mic-off', 'select-track'].includes(action.type)) throw new Error(this.state.readonlyReason || 'Retry permanent deletion in Manage storage, or open another project.');
     const p = this.state.project; if (!p && !['help', 'reload-studio', 'dismiss-error', 'view'].includes(action.type)) return;
     switch (action.type) {
@@ -1169,6 +1313,8 @@ export class StudioController {
       case 'export-damaged-audio': return this.downloadDamagedAudio(action.id);
       case 'persist': { this.state.storage = { ...this.state.storage, ...await this.storage.requestPersistence() }; this.ui.notify(this.state.storage.persistent ? 'Persistent storage granted. Keep backups as well.' : 'The browser did not grant persistent storage. Project backups are still available.', 'info'); this.render(); return; }
       case 'manage-storage': return this.manageStorage();
+      case 'download-storage-file': return this.downloadStorageFile(action.fileKey);
+      case 'delete-storage-file': return this.deleteStorageFile(action.fileKey);
       case 'delete-project': return this.deleteProject(action.id);
       case 'delete-saved-mix': return this.deleteSavedMix(action.id);
       case 'delete-discarded': return this.deleteDiscardedRecording(action.id);

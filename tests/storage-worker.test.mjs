@@ -22,9 +22,18 @@ async function fixture() {
     async finishAsset(asset) { if (this.failSeal) throw Object.assign(new Error('Disk full'), { name: 'QuotaExceededError' }); this.assets.set(asset.id, structuredClone(asset)); }
     async getAssetRange(asset, range) { this.rangeRequest = { id: asset.id, ...range }; return new Blob([new Uint8Array([1, 2, 3, 4])]); }
     async deleteAsset(id) { if (this.failDelete) throw new Error('Deletion failed'); this.assets.delete(id); for (const key of this.pages.keys()) if (key.startsWith(`${id}:`)) this.pages.delete(key); return { id, deleted: true }; }
+    async getStorageInventory() { return { files: [...this.assets.values()].map(asset => ({ kind: 'asset', id: asset.id, bytes: asset.byteLength })) }; }
+    async deleteStoredFile(file, { onDetached } = {}) {
+      this.deleteFileRequest = file;
+      await this.lockProject();
+      if (this.failDetach) throw new Error('Manifest save failed');
+      onDetached(file.id);
+      await this.deleteAsset(file.id);
+      return { id: file.id, assetId: file.id, deleted: true, affectedProjectIds: ['project-1'] };
+    }
     async lockProject() { if (this.foreignLock) throw storageError('PROJECT_BUSY', 'Another tab owns this project'); }
     async listAssets(projectId) { return [...this.assets.values()].filter(asset => asset.projectId === projectId).map(asset => structuredClone(asset)); }
-    async purgeProject(projectId, options) { this.purgeOptions = options; for (const asset of await this.listAssets(projectId)) await this.deleteAsset(asset.id); return { purged: true }; }
+    async purgeProject(projectId, options, { onDelete } = {}) { this.purgeOptions = options; if (this.sharedProject) throw storageError('PROJECT_AUDIO_SHARED', 'Another project uses this recording'); const assets = await this.listAssets(projectId); onDelete?.(assets); for (const asset of assets) await this.deleteAsset(asset.id); return { purged: true }; }
     closeHandle() {}
     async releaseProject() { this.released = true; }
   }
@@ -172,4 +181,49 @@ test('default purge refusal and foreign writer lock do not fence a live recordin
   backend.foreignLock = false;
   await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
   assert.equal(backend.assets.get('asset-1').frames, 1);
+});
+
+test('storage inventory and file deletion RPC preserve the revision and fence retired worklet traffic', async () => {
+  const { rpc, send, port, backend, messages } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
+  const inventory = await rpc('getStorageInventory'); assert.equal(inventory.files[0].id, 'asset-1'); assert.equal(inventory.files[0].bytes, 4);
+  const file = { kind: 'asset', id: 'asset-1', revision: 'reviewed-revision', discardUnfinished: true };
+  await rpc('deleteStoredFile', [file]); assert.deepEqual(backend.deleteFileRequest, file);
+  const before = messages.length;
+  send({ type: 'write', assetId: 'asset-1', index: 1, frames: 1, channels: 1, buffer: new Float32Array([.8]).buffer });
+  send({ type: 'read', assetId: 'asset-1', index: 0 });
+  send({ type: 'end', assetId: 'asset-1', frames: 2, status: 'complete' });
+  await until(() => port.messages.some(message => message.type === 'recycle') && port.messages.some(message => message.type === 'page-missing'));
+  await rpc('getStorageInventory');
+  assert.equal(backend.assets.size, 0); assert.equal(backend.pages.size, 0); assert.equal(messages.slice(before).some(message => message.event === 'error'), false);
+  await rpc('beginAsset', [{ id: 'asset-1', projectId: 'project-1', sampleRate: 48000, channels: 1, kind: 'loop' }]);
+  send({ type: 'write', assetId: 'asset-1', index: 0, frames: 1, channels: 1, buffer: new Float32Array([.9]).buffer });
+  await until(() => port.messages.filter(message => message.type === 'recycle').length === 2);
+  assert.equal(backend.assets.get('asset-1').frames, 0, 'retired port cannot resurrect a reused identifier');
+});
+
+test('failed durable detachment preserves playback; failure after detachment fences late writes', async () => {
+  const { rpc, backend, send, port } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
+  backend.failDetach = true;
+  await assert.rejects(rpc('deleteStoredFile', [{ kind: 'asset', id: 'asset-1', discardUnfinished: true }]), /Manifest save failed/);
+  assert.equal((await rpc('readPage', ['asset-1', 0])).frames, 1);
+  backend.failDetach = false; backend.failDelete = true;
+  await assert.rejects(rpc('deleteStoredFile', [{ kind: 'asset', id: 'asset-1', discardUnfinished: true }]), /Deletion failed/);
+  assert.equal(backend.assets.size, 1, 'failed physical delete is still listed for retry');
+  send({ type: 'write', assetId: 'asset-1', index: 1, frames: 1, channels: 1, buffer: new Float32Array([.8]).buffer });
+  send({ type: 'end', assetId: 'asset-1', frames: 2, status: 'complete' });
+  await until(() => port.messages.some(message => message.type === 'recycle'));
+  await rpc('getStorageInventory');
+  assert.equal(backend.assets.get('asset-1').frames, 1); assert.equal(backend.assets.get('asset-1').status, 'recording');
+});
+
+test('shared-audio purge refusal does not fence surviving project reads', async () => {
+  const { rpc, backend, send, port } = await fixture();
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.2]).buffer, 1, 1]);
+  await rpc('finishAsset', ['asset-1', { frames: 1 }]); backend.sharedProject = true;
+  await assert.rejects(rpc('purgeProject', ['project-1']), { code: 'PROJECT_AUDIO_SHARED' });
+  assert.equal((await rpc('readPage', ['asset-1', 0])).frames, 1);
+  send({ type: 'read', assetId: 'asset-1', index: 0 }); await until(() => port.messages.some(message => message.type === 'page'));
+  assert.equal(backend.assets.size, 1);
 });

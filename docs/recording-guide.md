@@ -56,7 +56,7 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
 9. **Keep a copy outside the browser.**
 
-   Wait for saving to finish, then choose **Download project backup** regularly. The `.fml` file keeps the working project and audio; use **Projects → Restore backup** to reopen it as a separate project. **Protect local storage** requests extra browser protection, but is not a backup. **Manage storage** helps free space deliberately.
+   Wait for saving to finish, then choose **Download project backup** regularly. The `.fml` file keeps the working project and audio; use **Projects → Restore backup** to reopen it as a separate project. **Protect local storage** requests extra browser protection, but is not a backup. The top-right **Storage** button opens every studio recording and offline app file, with measured file sizes, an estimate of remaining recording space, downloads and permanent deletion.
 
    Long recordings depend on available storage and device performance. If an export produces numbered WAV parts, download every part before closing the page. Some browser storage fallbacks cannot preview or bundle very large individual recordings; keep their numbered original WAVs when prompted.
 
@@ -80,4 +80,4 @@ When **Studio update ready** appears, finish and save your recording, close ever
 
 Use the WAV control beside the recording you want. Saved edited mixes are in **Song → Saved mixes**, with their own WAV and delete controls. The studio does not display a running download history.
 
-Audio retained separately from your current loops and takes is available through **Manage storage → Retained recordings**. Download a recording there, or choose **Keep in project** to restore it. Removing the workspace file list does not delete any saved audio. Exceptionally long WAV exports open a dialog containing only that recording’s numbered parts.
+Audio retained separately from your current loops and takes is available through **Storage → All studio files**. Download a recording there, or choose **Keep in project** to restore it. Removing the workspace file list does not delete any saved audio. Exceptionally long WAV exports open a dialog containing only that recording’s numbered parts.

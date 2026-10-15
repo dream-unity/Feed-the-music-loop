@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { StudioController } from '../src/controller.mjs';
-import { createProject, createTrack, clone, validateProject, MAX_TRACKS } from '../src/project.mjs';
+import { createProject, createTrack, clone, validateProject, referencedAssets, MAX_TRACKS } from '../src/project.mjs';
+import { removeAssetReferences } from '../src/storage-management.mjs';
 
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -19,6 +20,23 @@ class FakeStorage extends EventTarget {
   async getAsset(id) { if (this.readHook) await this.readHook(id); const asset = this.assets.get(id); if (!asset) throw new Error('Asset not found'); return clone(asset); }
   async recover() { if (this.recoverError) throw this.recoverError; return []; }
   async releaseProject(id) { this.released.push(id); }
+  async projectUsage(projectId) { return { projectId, audioBytes: (await this.listAssets(projectId)).reduce((bytes, asset) => bytes + asset.frames * asset.channels * 4, 0) }; }
+  async getStorageInventory() {
+    const files = [...this.assets.values()].map(asset => {
+      const projects = [...this.projects.values()].filter(project => referencedAssets(project).includes(asset.id));
+      return { ...clone(asset), assetKind: asset.kind, key: `asset:${asset.id}`, kind: 'asset', assetId: asset.id, bytes: asset.frames * asset.channels * 4,
+        referencedProjectIds: projects.map(project => project.id), revision: JSON.stringify([asset, projects]) };
+    });
+    return { files, projects: await this.listProjects(), complete: true, unknownFiles: 0, errors: [], ...(await this.estimate()) };
+  }
+  async deleteStoredFile(file) {
+    if (this.storedDeleteHook) await this.storedDeleteHook(file);
+    const fresh = (await this.getStorageInventory()).files.find(item => item.id === file.id);
+    if (!fresh || fresh.revision !== file.revision) throw new Error('File changed');
+    for (const [id, project] of this.projects) { const result = removeAssetReferences(project, file.id); if (result.changed) this.projects.set(id, result.project); }
+    if (this.storedPhysicalDeleteHook) await this.storedPhysicalDeleteHook(file);
+    this.assets.delete(file.id); return { deleted: true };
+  }
 }
 class FakeUI extends EventTarget {
   constructor() { super(); this.notifications = []; this.renders = []; }
@@ -1651,4 +1669,109 @@ test('a loop-only performance can be removed, undone and reopened without losing
   await f.controller.saveNow(); await f.controller.openProject(projectId);
   assert.deepEqual(f.controller.state.recentRecording, { kind: 'performance', id: performanceId });
   assert.equal(f.controller.state.project.takes.length, 0); assert.equal(f.controller.state.recovered.length, 0);
+});
+
+for (const capacity of [{ usage: 1, quota: 1 }, { usage: null, quota: 500 }, { usage: 0, quota: 0 }, { usage: NaN, quota: 1000 }]) test(`recording uses actual writes rather than rejecting the browser quota estimate ${JSON.stringify(capacity)}`, async () => {
+  const f = loopMixFixture(); f.storage.estimate = async () => capacity;
+  await f.controller.startCapture('mix', 0);
+  assert.equal(f.storage.beginCalls.length, 1); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+  assert.equal(f.ui.notifications.some(item => /browser estimates/.test(item.message)), Number.isFinite(capacity.usage) && capacity.usage >= 0 && capacity.quota > 0);
+});
+test('unavailable quota estimation does not block recording but an actual storage write failure does', async () => {
+  const f = loopMixFixture(); f.storage.estimate = async () => { throw new Error('Estimate unavailable'); };
+  await f.controller.startCapture('mix', 0); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+  assert.equal(f.controller.state.storage.usage, null); assert.equal(f.controller.state.storage.quota, null);
+  const blocked = loopMixFixture(); blocked.storage.beginHook = () => { throw Object.assign(new Error('Device storage is full'), { name: 'QuotaExceededError' }); };
+  await assert.rejects(blocked.controller.startCapture('mix', 0), /Device storage is full/);
+  assert.equal(blocked.engine.commands.some(command => command.type === 'arm'), false);
+});
+
+function storageFileFixture() {
+  const f = loopMixFixture(), project = f.controller.state.project;
+  f.storage.assets.get('backing').name = 'Bass'; f.storage.projects.set(project.id, clone(project));
+  f.controller.history.push(project); f.ui.confirm = async () => true;
+  f.ui.showStorageManager = (...args) => { f.manager = args; };
+  return f;
+}
+test('Storage lists files across projects and keeps unknown capacity unknown', async () => {
+  const f = storageFileFixture(), other = createProject('Other song'); f.storage.projects.set(other.id, other);
+  f.storage.assets.set('elsewhere', { id: 'elsewhere', projectId: other.id, name: 'Other vocal', frames: 10, channels: 1, status: 'complete' });
+  f.storage.estimate = async () => ({ usage: null, quota: null });
+  await f.controller.manageStorage(); assert.equal(f.manager[0].length, 2);
+  assert.deepEqual(f.manager[2].files.map(file => file.id).sort(), ['backing', 'elsewhere']); assert.equal(f.manager[1].usage, null); assert.equal(f.manager[1].quota, null);
+});
+test('permanent file deletion confirms consequences, closes audio and clears Undo before deleting referenced bytes', async () => {
+  const f = storageFileFixture(); let confirmation;
+  f.ui.confirm = async options => { confirmation = options; return true; };
+  f.storage.storedDeleteHook = () => {
+    assert.ok(f.engine.commands.some(command => command.type === 'close')); assert.equal(f.controller.engine, null); assert.equal(f.controller.history.past.length, 0);
+  };
+  await f.controller.handle({ type: 'delete-storage-file', fileKey: 'asset:backing' });
+  assert.match(confirmation.message, /Bass/); assert.match(confirmation.message, /1 loop/); assert.match(confirmation.message, /cannot be undone/);
+  assert.equal(f.storage.assets.has('backing'), false); assert.equal(f.controller.state.project.tracks.length, 0);
+  assert.equal(f.controller.state.selectedTrackId, null); assert.equal(f.controller.state.busy, false); assert.equal(f.controller.fileDeletion, null);
+  await f.controller.handle({ type: 'undo' }); assert.equal(f.controller.state.project.tracks.length, 0); assert.equal(f.manager[2].files.length, 0);
+});
+test('canceling a permanent file deletion leaves storage, playback and history unchanged', async () => {
+  const f = storageFileFixture(), before = clone(f.controller.state.project); f.ui.confirm = async () => false;
+  await f.controller.deleteStorageFile('asset:backing'); assert.ok(f.storage.assets.has('backing')); assert.deepEqual(f.controller.state.project, before);
+  assert.equal(f.controller.engine, f.engine); assert.equal(f.controller.history.past.length, 1); assert.equal(f.controller.fileDeletion, null);
+});
+for (const change of ['bytes', 'project', 'selection', 'capture']) test(`file deletion rechecks ${change} after confirmation`, async () => {
+  const f = storageFileFixture(), gate = deferred(); f.ui.confirm = () => gate.promise;
+  const deleting = f.controller.deleteStorageFile('asset:backing'); await tick();
+  if (change === 'bytes') f.storage.assets.get('backing').frames++;
+  if (change === 'project') f.controller.edit(project => { project.name = 'Changed'; });
+  if (change === 'selection') f.controller.generation++;
+  if (change === 'capture') f.controller.state.capture = { kind: 'loop' };
+  gate.resolve(true);
+  if (change === 'selection') await deleting; else await assert.rejects(deleting, /changed|Finish or cancel/);
+  assert.ok(f.storage.assets.has('backing')); assert.equal(f.controller.fileDeletion, null);
+});
+test('physical deletion failure reloads durable reference pruning and retains the file for retry', async () => {
+  const f = storageFileFixture(); f.storage.storedPhysicalDeleteHook = () => { throw new Error('Disk removal failed'); };
+  await assert.rejects(f.controller.deleteStorageFile('asset:backing'), /Disk removal failed/);
+  assert.equal(f.controller.state.project.tracks.length, 0); assert.equal(f.controller.history.past.length, 0); assert.equal(f.controller.state.busy, false);
+  assert.ok(f.storage.assets.has('backing')); assert.ok(f.controller.state.recovered.some(asset => asset.id === 'backing'));
+  f.storage.storedPhysicalDeleteHook = null; await f.controller.deleteStorageFile('asset:backing'); assert.equal(f.storage.assets.has('backing'), false);
+});
+test('file deletion preserves an unrelated project and blocks competing edits during its commit', async () => {
+  const f = storageFileFixture(), other = createProject('Other song'); f.storage.projects.set(other.id, other);
+  f.storage.assets.set('elsewhere', { id: 'elsewhere', projectId: other.id, name: 'Other file', frames: 10, channels: 1, status: 'complete' });
+  const gate = deferred(), entered = deferred(); f.storage.storedDeleteHook = async () => { entered.resolve(); await gate.promise; };
+  const before = clone(f.controller.state.project), deleting = f.controller.deleteStorageFile('asset:elsewhere'); await entered.promise;
+  await assert.rejects(f.controller.handle({ type: 'remove-track', id: before.tracks[0].id }), /Wait for file deletion/);
+  await assert.rejects(f.controller.openProject(other.id), /Wait for deletion/);
+  await assert.rejects(f.controller.deleteStorageFile('asset:backing'), /current operation/);
+  gate.resolve(); await deleting; assert.deepEqual(f.controller.state.project, before); assert.equal(f.storage.assets.has('backing'), true);
+});
+
+test('an edit during the final storage inventory cannot be lost by permanent file deletion', async () => {
+  const f = storageFileFixture(), gate = deferred(), entered = deferred(), inventory = f.storage.getStorageInventory.bind(f.storage); let calls = 0;
+  f.storage.getStorageInventory = async () => { if (++calls === 3) { entered.resolve(); await gate.promise; } return inventory(); };
+  const deleting = f.controller.deleteStorageFile('asset:backing'); await entered.promise;
+  f.controller.edit(project => { project.name = 'Keep this edit'; }); gate.resolve();
+  await assert.rejects(deleting, /project changed/); assert.equal(f.controller.state.project.name, 'Keep this edit'); assert.ok(f.storage.assets.has('backing')); assert.equal(f.controller.engine, f.engine);
+});
+test('a quota-limited recovery session can permanently delete referenced audio using its durable manifest', async () => {
+  const f = storageFileFixture(); f.controller.state.readonly = true; f.controller.state.recoveryRequired = true; f.controller.state.readonlyReason = 'Recovery could not be saved.';
+  f.storage.saveHook = () => { throw new Error('Do not overwrite the recovery manifest before deletion'); };
+  await f.controller.deleteStorageFile('asset:backing'); assert.equal(f.storage.assets.has('backing'), false); assert.equal(f.controller.state.project.tracks.length, 0);
+  assert.equal(f.storage.saved.length, 0); assert.equal(f.controller.state.readonly, true, 'recovery remains explicit until the user reopens/retries');
+});
+test('Storage includes soft-deleted projects and measures their actual remaining files', async () => {
+  const f = storageFileFixture(), other = createProject('Retained deleted song'); other.deletedAt = new Date().toISOString(); f.storage.projects.set(other.id, other);
+  f.storage.assets.set('retained', { id: 'retained', projectId: other.id, name: 'Retained take', frames: 13, channels: 2, status: 'complete' });
+  const inventory = f.storage.getStorageInventory.bind(f.storage);
+  f.storage.getStorageInventory = async () => ({ ...await inventory(), projects: [...f.storage.projects.values()].map(clone) });
+  f.storage.listProjects = async () => [...f.storage.projects.values()].filter(project => !project.deletedAt).map(clone);
+  await f.controller.manageStorage(); const retained = f.manager[0].find(project => project.id === other.id);
+  assert.ok(retained); assert.equal(retained.deletedAt, other.deletedAt); assert.equal(retained.audioBytes, 104); assert.equal(retained.assetCount, 1);
+  f.storage.purgeProject = async id => { f.storage.projects.delete(id); for (const [assetId, asset] of f.storage.assets) if (asset.projectId === id) f.storage.assets.delete(assetId); };
+  await f.controller.deleteProject(other.id); assert.equal(f.storage.projects.has(other.id), false); assert.equal(f.storage.assets.has('retained'), false); assert.ok(f.storage.assets.has('backing'));
+});
+test('Storage does not turn an incomplete audio inventory into a zero-byte project claim', async () => {
+  const f = storageFileFixture(), inventory = f.storage.getStorageInventory.bind(f.storage);
+  f.storage.getStorageInventory = async () => ({ ...await inventory(), files: [], complete: false, errors: ['Recording index: unavailable'] });
+  await f.controller.manageStorage(); assert.equal(f.manager[0][0].audioBytes, null); assert.equal(f.manager[0][0].knownAudioBytes, 0);
 });

@@ -65,3 +65,13 @@ test('project purge retains safe defaults and forwards explicit unfinished-disca
   assert.deepEqual(worker.messages[1].message.args, ['second', { discardUnfinished: true }]);
   worker.respond(1, { purged: true }); await confirmed;
 });
+
+test('storage inventory and reviewed permanent file deletion have explicit RPCs', async () => {
+  const { worker, client } = fixture();
+  const inventory = client.getStorageInventory(); assert.equal(worker.messages[0].message.method, 'getStorageInventory');
+  worker.respond(0, { files: [], complete: true }); assert.deepEqual(await inventory, { files: [], complete: true });
+  const file = { kind: 'orphan-opfs', id: 'old.pcm', revision: 'observed-revision', discardUnfinished: true };
+  const deletion = client.deleteStoredFile(file);
+  assert.equal(worker.messages[1].message.method, 'deleteStoredFile'); assert.deepEqual(worker.messages[1].message.args, [file]);
+  worker.respond(1, { deleted: true }); assert.deepEqual(await deletion, { deleted: true });
+});

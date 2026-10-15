@@ -155,6 +155,21 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     expect(await page.evaluate(() => window.__unexpectedLoopMicRequests)).toBe(0);
     await expect(page.locator('[data-ref="recovery"], [data-ref="downloads"]')).toHaveCount(0);
     await page.getByTestId('stop').click();
+    // The public deployment must expose the on-demand file manager, with
+    // actual captured audio and its offline shell inside this site's scope.
+    await page.getByTestId('storage').click();
+    const storageDialog = page.getByRole('dialog', { name: 'Storage', exact: true });
+    await expect(storageDialog).toBeVisible();
+    await expect(storageDialog.locator('[data-testid=storage-remaining]')).toBeVisible();
+    const capturedFile = storageDialog.locator('.storage-file-row').filter({ hasText: 'Loop recording 1' });
+    await expect(capturedFile).toHaveCount(1);
+    expect(Number(await capturedFile.getAttribute('data-file-bytes'))).toBeGreaterThan(0);
+    await expect(capturedFile.getByRole('button', { name: 'Permanently delete Loop recording 1', exact: true })).toBeEnabled();
+    await expect(storageDialog.locator('.storage-file-row').filter({ hasText: 'Offline app file' }).first()).toBeVisible();
+    const storageScreenshot = testInfo.outputPath('review-live-storage-manager.png');
+    await page.screenshot({ path: storageScreenshot, animations: 'disabled' });
+    await testInfo.attach('live-storage-manager', { path: storageScreenshot, contentType: 'image/png' });
+    await storageDialog.getByRole('button', { name: 'Done', exact: true }).click();
     // Recheck the network after the recording. A competing branch-root Pages
     // publish must not replace this package while its cached shell still works.
     const finalWorker = await request.get(swURL, { timeout: 10_000, maxRedirects: 0, headers: { 'Cache-Control': 'no-cache' } });
