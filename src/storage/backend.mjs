@@ -409,7 +409,7 @@ export class BrowserBackend {
       if (asset.backend !== 'opfs' && bytes === 0 && asset.byteLength > 0) missing = true;
       const assetMetadataBytes = logicalBytes(asset); metadataBytes += assetMetadataBytes;
       decorate({ key: `asset:${asset.id}`, kind: 'asset', id: asset.id, name: asset.name || 'Untitled recording',
-        backend: asset.backend, status: asset.status, channels: asset.channels, frames: asset.frames, sampleRate: asset.sampleRate,
+        backend: asset.backend, status: asset.status, channels: asset.channels, frames: asset.frames, sampleRate: asset.sampleRate, createdAt: asset.createdAt ?? null,
         bytes, metadataBytes: assetMetadataBytes + (pageGroup?.metadataBytes || 0), missing,
         lastModified: physical?.lastModified ?? null, pageCount: pageGroup?.pages ?? null,
         deletedProject: Boolean(ownerDeleted(asset.projectId)), assetKind: asset.kind || 'audio', source: asset.source || null,

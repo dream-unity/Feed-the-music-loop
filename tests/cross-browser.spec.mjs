@@ -271,13 +271,60 @@ test('generated loops play, mixer edits render, and exact recordings survive rel
     await expect.poll(async () => Number(await page.locator('[data-ref="output-db"]').textContent())).toBeGreaterThan(-60);
     await page.getByTestId('stop').click();
     await screenshot(page, testInfo, 'restored');
+
+    // Exercise each browser's actual OPFS/IndexedDB choice and Web Locks
+    // through the public file manager, after the backup checks have finished.
+    const readStorage = () => page.evaluate(async ({ originalId, restoredId }) => {
+      const clientPath = './src/storage/client.mjs', projectPath = './src/project.mjs';
+      const { StorageClient } = await import(clientPath), { referencedAssets } = await import(projectPath);
+      const storage = new StorageClient();
+      try {
+        const capabilities = await storage.init(), originalProject = await storage.loadProject(originalId), restoredProject = await storage.loadProject(restoredId);
+        const inventory = await storage.getStorageInventory();
+        const originalPCM = await (await storage.getAssetFile(originalProject.tracks[0].assetId)).arrayBuffer();
+        const digest = await crypto.subtle.digest('SHA-256', originalPCM);
+        return { backend: capabilities.backend, originalProject, restoredProject, inventory,
+          restoredReferences: referencedAssets(restoredProject), originalPcmBytes: originalPCM.byteLength,
+          originalPcmSha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') };
+      } finally { await storage.dispose(); }
+    }, { originalId: saved.projectId, restoredId: restored.projectId });
+    const beforeDeletion = await readStorage(), target = beforeDeletion.restoredProject.tracks[0];
+    const targetFile = beforeDeletion.inventory.files.find(file => file.key === `asset:${target.assetId}`);
+    expect(targetFile.bytes).toBe(target.frames * target.channels * 4);
+    await page.getByTestId('storage').click();
+    const storageDialog = page.getByRole('dialog');
+    await expect(storageDialog).toHaveAccessibleName('Storage');
+    const storageRow = storageDialog.locator(`.storage-file-row[data-file-key="${targetFile.key}"]`);
+    await expect(storageRow).toHaveAttribute('data-file-bytes', String(targetFile.bytes));
+    await screenshot(page, testInfo, 'storage-files');
+    await storageRow.locator('[data-action="delete-storage-file"]').click();
+    await expect(storageDialog).toContainText('This cannot be undone');
+    await storageDialog.getByRole('button', { name: 'Delete permanently', exact: true }).click();
+    await expect(storageDialog).toHaveAccessibleName('Storage');
+    await expect(storageRow).toHaveCount(0);
+    const afterDeletion = await readStorage();
+    expect(afterDeletion.inventory.audioBytes).toBe(beforeDeletion.inventory.audioBytes - targetFile.bytes);
+    expect(afterDeletion.restoredReferences).not.toContain(target.assetId);
+    expect(afterDeletion.restoredProject.tracks).toHaveLength(2);
+    expect(afterDeletion.originalProject).toEqual(beforeDeletion.originalProject);
+    expect(afterDeletion.originalPcmBytes).toBe(beforeDeletion.originalPcmBytes);
+    expect(afterDeletion.originalPcmSha256).toBe(beforeDeletion.originalPcmSha256);
+    await storageDialog.getByRole('button', { name: 'Done', exact: true }).click();
+    await page.reload();
+    await expect(tracks(page)).toHaveCount(2);
+    await expect(page.locator('.damaged-panel')).toBeHidden();
+    await page.getByTestId('play').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-playing', 'true');
+    await expect.poll(async () => Number(await page.locator('[data-ref="output-db"]').textContent())).toBeGreaterThan(-60);
+    await page.getByTestId('stop').click();
     expect(workerURLs.some(url => url.endsWith('/src/export/render-worker.mjs'))).toBe(true);
     expect(errors).toEqual([]);
     await expect(page.locator('.toast-error')).toHaveCount(0);
     expect(remoteRequests).toEqual([]);
     expect(uploadRequests).toEqual([]);
     await testInfo.attach('audio-and-backup-results', {
-      body: JSON.stringify({ baseline: baseline.audio, nativeWavPlayback, edited: edited.audio, loops: restored.musicalContent.loops.length, backupBytes: backup.bytes.length }, null, 2),
+      body: JSON.stringify({ baseline: baseline.audio, nativeWavPlayback, edited: edited.audio, loops: restored.musicalContent.loops.length, backupBytes: backup.bytes.length,
+        storageDeletion: { backend: beforeDeletion.backend, deletedBytes: targetFile.bytes, remainingAudioBytes: afterDeletion.inventory.audioBytes, remainingLoops: afterDeletion.restoredProject.tracks.length, originalPcmSha256: afterDeletion.originalPcmSha256 } }, null, 2),
       contentType: 'application/json',
     });
   } finally {

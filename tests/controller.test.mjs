@@ -1775,3 +1775,35 @@ test('Storage does not turn an incomplete audio inventory into a zero-byte proje
   f.storage.getStorageInventory = async () => ({ ...await inventory(), files: [], complete: false, errors: ['Recording index: unavailable'] });
   await f.controller.manageStorage(); assert.equal(f.manager[0][0].audioBytes, null); assert.equal(f.manager[0][0].knownAudioBytes, 0);
 });
+
+test('shared-audio project purge rejection keeps individual file cleanup available without reopening', async () => {
+  const f = storageFileFixture(), project = f.controller.state.project, other = createProject('Other arrangement');
+  other.tracks = clone(project.tracks); f.storage.projects.set(other.id, other);
+  f.storage.purgeProject = async () => { throw Object.assign(new Error('Delete shared files individually in Storage first.'), { code: 'PROJECT_AUDIO_SHARED' }); };
+  await assert.rejects(f.controller.deleteProject(project.id), { code: 'PROJECT_AUDIO_SHARED' });
+  assert.equal(f.controller.engine, null); assert.equal(f.controller.state.playing, false);
+  assert.equal(f.controller.state.readonly, false); assert.equal(f.controller.state.deletionPending, false); assert.equal(f.controller.state.busy, false);
+  assert.equal(f.storage.projects.get(project.id).purgePendingAt, undefined); assert.ok(f.storage.assets.has('backing'));
+  await f.controller.handle({ type: 'delete-storage-file', fileKey: 'asset:backing' });
+  assert.equal(f.storage.assets.has('backing'), false); assert.equal(f.controller.state.project.tracks.length, 0); assert.equal(f.storage.projects.get(other.id).tracks.length, 0);
+});
+test('shared-audio purge preflight preserves pre-existing quota recovery restrictions', async () => {
+  const f = storageFileFixture(); f.controller.state.readonly = true; f.controller.state.recoveryRequired = true; f.controller.state.readonlyReason = 'Recovery could not be saved.';
+  f.storage.purgeProject = async () => { throw Object.assign(new Error('Shared audio'), { code: 'PROJECT_AUDIO_SHARED' }); };
+  await assert.rejects(f.controller.deleteProject(f.controller.state.project.id), { code: 'PROJECT_AUDIO_SHARED' });
+  assert.equal(f.controller.state.readonly, true); assert.equal(f.controller.state.recoveryRequired, true); assert.equal(f.controller.state.readonlyReason, 'Recovery could not be saved.');
+  assert.equal(f.controller.state.deletionPending, false);
+  await f.controller.handle({ type: 'delete-storage-file', fileKey: 'asset:backing' }); assert.equal(f.storage.assets.has('backing'), false);
+});
+for (const existingPartial of ['state', 'manifest', 'unreadable']) test(`shared-audio rejection cannot unfreeze an existing partial purge: ${existingPartial}`, async () => {
+  const f = storageFileFixture(), project = f.controller.state.project;
+  if (existingPartial === 'state') { f.controller.state.deletionPending = true; f.controller.state.readonly = true; }
+  if (existingPartial === 'manifest') f.storage.projects.get(project.id).purgePendingAt = Date.now();
+  f.storage.purgeProject = async () => {
+    if (existingPartial === 'unreadable') f.storage.loadProject = async () => { throw new Error('Manifest unavailable'); };
+    throw Object.assign(new Error('Shared audio'), { code: 'PROJECT_AUDIO_SHARED' });
+  };
+  await assert.rejects(f.controller.deleteProject(project.id), { code: 'PROJECT_AUDIO_SHARED' });
+  assert.equal(f.controller.state.readonly, true); assert.equal(f.controller.state.deletionPending, true);
+  await assert.rejects(f.controller.handle({ type: 'delete-storage-file', fileKey: 'asset:backing' }), /Project deletion is unfinished/); assert.ok(f.storage.assets.has('backing'));
+});

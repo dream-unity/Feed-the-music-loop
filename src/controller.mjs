@@ -1179,7 +1179,7 @@ export class StudioController {
     if (this.state.busy || this.state.exporting || this.projectDeletion) throw new Error('Finish the current operation before deleting a project.');
     const operation = { committing: false }, token = this.generation;
     this.projectDeletion = operation;
-    let project, deletingCurrent = false, purged = false;
+    let project, deletingCurrent = false, purged = false, beforeDeletion = null;
     try {
       project = await this.storage.loadProject(projectId);
       if (!project || token !== this.generation) return;
@@ -1190,6 +1190,8 @@ export class StudioController {
       operation.committing = true; deletingCurrent = project.id === this.state.project?.id;
       this.state.busy = true; this.state.status = 'Freeing project storage…';
       if (deletingCurrent) {
+        beforeDeletion = { readonly: this.state.readonly, readonlyReason: this.state.readonlyReason,
+          recoveryRequired: this.state.recoveryRequired, deletionPending: this.state.deletionPending, savePending: !!this.saveTimer };
         // Quota may prevent even a tiny replacement project from being saved.
         // Freeze this manifest and retire every writer before freeing its data.
         // Retaining the manifest keeps Manage storage reachable after failure.
@@ -1220,11 +1222,23 @@ export class StudioController {
       this.ui.notify(`${project.name} deleted from this device.`, 'success');
     } catch (error) {
       if (deletingCurrent && this.state.project?.id === project.id) {
-        this.state.readonly = true; this.state.recoveryRequired = false; this.state.deletionPending = true;
-        this.state.readonlyReason = purged ? 'This project was deleted. Open another project or create a new one to continue.'
-          : 'Project deletion is unfinished. Playback and editing are paused. Open Manage storage and retry permanent deletion, or open another project.';
-        this.state.status = purged ? 'Project deleted · choose another song' : 'Deletion unfinished · retry in Manage storage';
-        this.state.error = `${this.state.readonlyReason} ${error.message || error}`;
+        const kept = !purged && error.code === 'PROJECT_AUDIO_SHARED' && beforeDeletion && !beforeDeletion.deletionPending
+          ? await this.storage.loadProject(project.id).catch(() => null) : null;
+        if (kept && !kept.purgePendingAt) {
+          // Shared-audio rejection happens before the purge marker or any byte
+          // deletion. Keep per-file cleanup reachable without treating this as
+          // a partial purge; the stopped graph is still safely retired.
+          for (const key of ['readonly', 'readonlyReason', 'recoveryRequired', 'deletionPending']) this.state[key] = beforeDeletion[key];
+          this.state.status = beforeDeletion.readonly ? beforeDeletion.readonlyReason || 'Project kept · read only' : 'Project kept · choose individual files in Storage';
+          this.state.error = error.message || String(error);
+          if (beforeDeletion.savePending && !this.state.readonly) this.scheduleSave();
+        } else {
+          this.state.readonly = true; this.state.recoveryRequired = false; this.state.deletionPending = true;
+          this.state.readonlyReason = purged ? 'This project was deleted. Open another project or create a new one to continue.'
+            : 'Project deletion is unfinished. Playback and editing are paused. Open Manage storage and retry permanent deletion, or open another project.';
+          this.state.status = purged ? 'Project deleted · choose another song' : 'Deletion unfinished · retry in Manage storage';
+          this.state.error = `${this.state.readonlyReason} ${error.message || error}`;
+        }
       }
       this.state.projects = await this.storage.listProjects().catch(() => this.state.projects);
       throw error;

@@ -1032,6 +1032,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 }
 
 /* File management stays inside the on-demand Storage dialog. */
+.header-actions .button.header-storage { min-height: 48px; }
 .studio-dialog.storage-dialog { width: min(960px,calc(100vw - 32px)); max-height: 90dvh; }
 .storage-capacity-grid { display: grid; grid-template-columns: 1.35fr 1fr 1fr; gap: 12px; }
 .storage-capacity-card { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: 13px; background: #14201e; }
