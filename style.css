@@ -1099,7 +1099,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .mixer-header:has([data-action="edit-track"]) > div { margin-right: auto; }
 .studio-dialog.track-editor-dialog { width: min(900px,calc(100vw - 32px)); max-height: 92dvh; }
 .track-editor-dialog .dialog-heading { margin-bottom: 18px; }
-.track-editor-dialog .dialog-actions { position: sticky; bottom: -24px; margin: 18px -24px -24px; padding: 16px 24px; background: #192225f5; border-top: 1px solid var(--line); z-index: 4; }
+.track-editor-dialog .dialog-actions { position: sticky; bottom: 0; margin: 18px -24px -24px; padding: 16px 24px; background: #192225f5; border-top: 1px solid var(--line); z-index: 4; }
 .track-editor-dialog .dialog-actions [data-action="editor-close"] { margin-left: auto; }
 .track-editor { min-width: 0; }
 .editor-intro { display: flex; align-items: end; gap: 20px; justify-content: space-between; }
@@ -1150,7 +1150,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .editor-save-note { color: var(--dim); font-size: 10px; margin-top: 6px; }
 @media (max-width: 640px) {
   .track-editor-dialog form { padding: 18px; }
-  .track-editor-dialog .dialog-actions { bottom: -18px; margin: 18px -18px -18px; padding: 12px 18px; gap: 7px; }
+  .track-editor-dialog .dialog-actions { bottom: 0; margin: 18px -18px -18px; padding: 12px 18px; gap: 7px; }
   .track-editor-dialog .dialog-actions .button { padding: 10px 12px; }
   .track-editor-dialog .dialog-heading .dialog-stop { font-size: 0; gap: 0; min-width: 44px; padding: 10px; }
   .editor-wave { height: 130px; margin-inline: 21px; }
