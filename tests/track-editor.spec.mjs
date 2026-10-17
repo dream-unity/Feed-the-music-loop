@@ -210,6 +210,9 @@ test.describe('Chromium editor interaction checks', () => {
     await tracks(page).first().getByRole('button', { name: 'Edit Mono source', exact: true }).click();
     const waveform = page.getByTestId('editor-waveform');
     await expect(waveform).toBeVisible();
+    // Waveform loading intentionally blocks editing until the selected source
+    // has been read. Pointer input cannot auto-wait for disabled DOM controls.
+    await expect(button(page, 'Copy selection')).toBeEnabled();
     await waveform.scrollIntoViewIfNeeded();
     const rectangle = await waveform.boundingBox();
     await page.mouse.move(rectangle.x + rectangle.width * .2, rectangle.y + rectangle.height / 2);
