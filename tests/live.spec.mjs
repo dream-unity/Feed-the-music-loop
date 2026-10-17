@@ -132,6 +132,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await page.getByTestId('enable-mic').click();
     await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Connect microphone');
     await page.locator('[data-action="view"][data-view="mix"]').click();
+    await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
     const downloading = page.waitForEvent('download');
     await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
     const file = await downloading;
@@ -206,6 +207,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await testInfo.attach('live-track-editor', { path: editorScreenshot, contentType: 'image/png' });
     await page.getByRole('dialog', { name: 'Edit audio', exact: true }).getByRole('button', { name: 'Done', exact: true }).click();
     await page.locator('[data-action="view"][data-view="mix"]').click();
+    await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
     const editedDownload = page.waitForEvent('download');
     await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
     const editedFile = await editedDownload;

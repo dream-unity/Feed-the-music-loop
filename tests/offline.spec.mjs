@@ -79,6 +79,7 @@ test('packaged HTTPS app reopens offline with its saved audio and only caches th
   await expect.poll(() => reopened.locator('[data-ref="output-db"]').textContent()).not.toBe('−∞');
   await reopened.getByTestId('stop').click();
   await reopened.locator('[data-action="view"][data-view="mix"]').click();
+  await reopened.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
   const downloadEvent = reopened.waitForEvent('download');
   await reopened.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
   const exported = await downloadEvent;
