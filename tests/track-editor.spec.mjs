@@ -91,6 +91,16 @@ async function expectTrack(page, trackId, expected, channels, frames = expected.
   await expect(button(page, 'Copy selection')).toBeEnabled();
 }
 
+async function expectFooterInsideDialog(page) {
+  // A clickable centre alone can conceal a clipped lower touch area.
+  const dialogBounds = await page.getByRole('dialog', { name: 'Edit audio', exact: true }).boundingBox();
+  for (const name of ['Undo', 'Redo', 'Done']) {
+    const bounds = await button(page, name).boundingBox();
+    expect(bounds.y).toBeGreaterThanOrEqual(Math.max(0, dialogBounds.y));
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(Math.min(page.viewportSize().height, dialogBounds.y + dialogBounds.height) + 1);
+  }
+}
+
 async function download(page, start) {
   const pending = page.waitForEvent('download'); await start();
   const file = await pending; expect(await file.failure()).toBeNull();
@@ -178,14 +188,7 @@ test('portable editor selects exact PCM, trims, copies to itself and another tra
   expect(current.originals).toEqual({ [monoSource.id]: hash(originalMono), [stereoSource.id]: hash(originalStereo) });
   expect(current.audio[1].hash).toBe(hash(originalStereo));
   expect(current.project.sections).toEqual([fixture.section]);
-  // Sticky footer buttons must fit inside the visible dialog, rather than
-  // merely have a clickable centre while their lower touch area is clipped.
-  const dialogBounds = await page.getByRole('dialog', { name: 'Edit audio', exact: true }).boundingBox();
-  for (const name of ['Undo', 'Redo', 'Done']) {
-    const bounds = await button(page, name).boundingBox();
-    expect(bounds.y).toBeGreaterThanOrEqual(Math.max(0, dialogBounds.y));
-    expect(bounds.y + bounds.height).toBeLessThanOrEqual(Math.min(page.viewportSize().height, dialogBounds.y + dialogBounds.height) + 1);
-  }
+  await expectFooterInsideDialog(page);
   const screenshotPath = testInfo.outputPath(`review-${testInfo.project.name || 'chromium'}-audio-editor.png`);
   await page.screenshot({ path: screenshotPath, fullPage: true, animations: 'disabled' });
   await testInfo.attach('audio-editor', { path: screenshotPath, contentType: 'image/png' });
@@ -265,6 +268,7 @@ test.describe('Chromium editor interaction checks', () => {
     }
     expect(await editor(page).evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await waveform.scrollIntoViewIfNeeded();
+    await expectFooterInsideDialog(page);
     const path = testInfo.outputPath('review-audio-editor-phone.png');
     await page.screenshot({ path, animations: 'disabled' });
     await testInfo.attach('audio-editor-phone', { path, contentType: 'image/png' });
