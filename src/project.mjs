@@ -1,4 +1,5 @@
 /** Immutable project metadata and validation. Audio bytes live in the storage worker. */
+import { normalizeMasterSettings } from './audio/master-settings.mjs';
 export const SCHEMA_VERSION = 1;
 export const PAGE_FRAMES = 16384;
 export const MAX_TRACKS = 512;
@@ -134,6 +135,15 @@ export function validateProject(input, { strict = true } = {}) {
   date(p.createdAt, 'createdAt'); date(p.updatedAt, 'updatedAt');
   number(p.sampleRate, 'sampleRate', 8000, 192000, true); number(p.baseFrames, 'baseFrames', 0, Number.MAX_SAFE_INTEGER, true);
   number(p.revision ?? 0, 'revision', 0, Number.MAX_SAFE_INTEGER, true); p.revision ??= 0;
+  if (p.recordingMixSettings !== undefined) {
+    object(p.recordingMixSettings, 'recording mix settings');
+    if (Object.keys(p.recordingMixSettings).length > 10000) fail('Too many recording sound settings.');
+    for (const [assetId, settings] of Object.entries(p.recordingMixSettings)) {
+      validId(assetId, 'recording sound settings');
+      try { p.recordingMixSettings[assetId] = normalizeMasterSettings(settings); }
+      catch (error) { fail(error.message); }
+    }
+  }
   const tracks = array(p.tracks, 'tracks', MAX_TRACKS);
   for (const t of tracks) {
     object(t, 'track'); validId(t.id, 'track'); validId(t.assetId, 'track audio'); string(t.name, 'track name');

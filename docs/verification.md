@@ -37,6 +37,16 @@ The portable browser scenario runs in Chromium, Firefox and WebKit. It edits det
 
 Original recorded performances remain independent of later loop edits. Export tests verify that current-sound rendering uses edited audio while original-performance rendering retains its historical sources. These checks establish sample selection and persistence; they do not promise click-free creative splice points or a particular musical result. Playback retains the studio's existing loop-edge taper, while saved PCM keeps the selected samples unchanged. Selection preview is limited to 32 MiB; full edits stream up to 24 hours subject to available storage.
 
+## Saved-recording mix and master verification
+
+The recording master processes saved mono or stereo assets independently of loop playback. Tests compare neutral, gain-only and balance-only output sample by sample, including anti-phase stereo and page boundaries. Linked dynamics, EQ, measured sample ceilings, normalization, silence and non-finite source rejection have deterministic checks. Full renders preserve duration and channels and never modify the source. Processing uses bounded audio pages in a worker.
+
+Preview tests compare a chosen interval against the same interval of a full render, including the compression/filter history before that interval and peak analysis over the whole recording. Original comparison bypasses processing. Preparing and cancelling previews must create no stored audio assets; output failure or cancellation must remove only the unfinished new master. Tests also cover changed source bytes between processing passes and worker/direct-render agreement.
+
+Controller and archive tests cover separate source settings, capture/read-only guards, selection races, save failures, recording imports, settings and provenance after backup restoration, and keeping finished versions reachable if a download fails. Browser scenarios select performances, loop-only songs and other saved audio, compare stereo exports, change source, reopen saved settings, restore backups and exercise narrow-screen controls. The public-site check applies a known gain to an actual captured loop song, verifies every exported sample in both channels and confirms the original download is unchanged.
+
+The final-level controls measure sample peaks. They do not measure LUFS or reconstructed true peaks, and test success is not a judgement of a recording's artistic balance. Preview is limited to 20 seconds from a chosen position; full mastering streams recordings up to 24 hours, subject to storage and processing time.
+
 ## What the checks establish
 
 | Area | Evidence | Boundary of the result |

@@ -57,3 +57,18 @@ test('unknown reference shapes fail closed and an unused file leaves project met
   assert.throws(() => removeAssetReferences(source, 'future-audio'), { code: 'UNSUPPORTED_ASSET_REFERENCE' });
   assert.equal(source.futureFeature.assetId, 'future-audio'); assert.deepEqual(source.tracks, before.tracks);
 });
+
+test('permanent deletion removes only that recording sound preference without retaining its audio', () => {
+  const source = populated(); source.recordingMixSettings = { 'master-audio': { gainDb: -4 }, 'saved-mix': { gainDb: 2 }, 'kept-audio': { low: 3 } };
+  const before = clone(source), removed = removeAssetReferences(source, 'saved-mix');
+  assert.equal(removed.changed, true);
+  assert.equal(removed.project.recordingMixSettings['saved-mix'], undefined);
+  assert.equal(removed.project.recordingMixSettings['master-audio'].gainDb, -4);
+  assert.deepEqual(referencedAssets(removed.project), referencedAssets(source));
+  assert.deepEqual(removed.impacts, { tracks: [], takes: [], performances: [], arrangements: [], pendingCapture: false });
+  const master = removeAssetReferences(source, 'master-audio');
+  assert.equal(master.project.recordingMixSettings['master-audio'], undefined);
+  assert.equal(master.project.recordingMixSettings['saved-mix'].gainDb, 2);
+  assert.equal(master.project.performances.length, 0);
+  assert.deepEqual(source, before);
+});

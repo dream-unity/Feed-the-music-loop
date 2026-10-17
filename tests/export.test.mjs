@@ -5,6 +5,7 @@ import { createProject, createTrack, DEFAULT_MIX } from '../src/project.mjs';
 import { SHA256, hashBlob } from '../src/export/sha256.mjs';
 import { exportWav, exportWavParts, verifyAudioSnapshot, VERIFY_CHUNK_BYTES, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, MAX_RANGE_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
 import { exportProject, importProject, inspectProjectArchive, ARCHIVE_HEADER_BYTES, MAX_MANIFEST_BYTES, validateJsonTree } from '../src/export/archive.mjs';
+import { DEFAULT_MASTER_SETTINGS } from '../src/audio/master-settings.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -69,6 +70,61 @@ async function mutateManifest(blob, change) {
   new Uint8Array(header, 32, 32).set(new SHA256().update(metadata).digest());
   return new Blob([header, metadata, blob.slice(64 + length)]);
 }
+
+test('backup restores mastered stereo audio, source provenance, settings and measured levels independently', async () => {
+  const { storage, project, master } = await fixture();
+  const settings = { ...DEFAULT_MASTER_SETTINGS, gainDb: -3, normalize: true, ceilingDb: -2 };
+  const analysis = { inputPeakDb: -8, processedPeakDb: -11, outputPeakDb: -2, inputRmsDb: -12, outputRmsDb: -6, outputGainDb: 9, ceilingDb: -2, peakType: 'sample' };
+  await addAsset(storage, project.id, 'finished-master', master, 2, { kind: 'mix', sourceAssetId: 'master-audio', masterSettings: settings, analysis });
+  project.recordingMixSettings = { 'master-audio': settings, 'finished-master': { ...DEFAULT_MASTER_SETTINGS, balance: .25 }, 'already-deleted': { ...DEFAULT_MASTER_SETTINGS, high: 3 } };
+  const before = structuredClone(project);
+  const { blob } = await exportProject(storage, project);
+  assert.deepEqual(project, before, 'export does not mutate current source preferences');
+  const imported = await importProject(storage, blob), assets = await storage.listAssets(imported.id);
+  const original = assets.find(asset => asset.name === 'master-audio'), version = assets.find(asset => asset.name === 'finished-master');
+  assert.notEqual(version.id, 'finished-master');
+  assert.equal(version.sourceAssetId, original.id);
+  assert.deepEqual(version.masterSettings, settings);
+  assert.deepEqual(version.analysis, analysis);
+  assert.deepEqual(imported.recordingMixSettings, { [original.id]: settings, [version.id]: { ...DEFAULT_MASTER_SETTINGS, balance: .25 } });
+  assert.deepEqual(new Uint8Array(await (await storage.getAssetFile(version.id)).arrayBuffer()), new Uint8Array(master.buffer));
+  assert.equal(version.channels, 2);
+  assert.equal(version.frames, master.length / 2);
+});
+
+test('mastered versions remain portable after their original source is permanently deleted', async () => {
+  const storage = new MemoryStorage(), project = createProject('Only my finished song');
+  const samples = new Float32Array(4);
+  const analysis = { inputPeakDb: null, processedPeakDb: null, outputPeakDb: null, inputRmsDb: null, outputRmsDb: null, outputGainDb: 0, ceilingDb: -1, peakType: 'sample' };
+  await addAsset(storage, project.id, 'kept-version', samples, 2, { kind: 'mix', sourceAssetId: 'deleted-source', masterSettings: DEFAULT_MASTER_SETTINGS, analysis });
+  project.recordingMixSettings = { 'kept-version': { ...DEFAULT_MASTER_SETTINGS }, 'deleted-source': { ...DEFAULT_MASTER_SETTINGS } };
+  const { blob } = await exportProject(storage, project);
+  const imported = await importProject(storage, blob), assets = await storage.listAssets(imported.id);
+  assert.equal(assets.length, 1); assert.equal(assets[0].sourceAssetId, 'deleted-source', 'provenance does not require the original file');
+  assert.deepEqual(assets[0].analysis, analysis);
+  assert.deepEqual(Object.keys(imported.recordingMixSettings), [assets[0].id]);
+});
+
+test('portable saved mixes reject invalid processing metadata before creating any imported file', async () => {
+  const { storage, project, master } = await fixture();
+  const analysis = { inputPeakDb: -6, processedPeakDb: -6, outputPeakDb: -6, inputRmsDb: -9, outputRmsDb: -9, outputGainDb: 0, ceilingDb: -1, peakType: 'sample' };
+  await addAsset(storage, project.id, 'mix-version', master, 2, { kind: 'mix', sourceAssetId: 'master-audio', masterSettings: DEFAULT_MASTER_SETTINGS, analysis });
+  const { blob } = await exportProject(storage, project);
+  for (const change of [
+    asset => { asset.sourceAssetId = '../other'; },
+    asset => { asset.masterSettings.normalize = 'true'; },
+    asset => { asset.masterSettings.ceilingDb = 1; },
+    asset => { asset.analysis.outputPeakDb = 2; },
+    asset => { asset.analysis.peakType = 'true-peak'; },
+    asset => { asset.analysis.outputGainDb = null; },
+    asset => { delete asset.analysis.inputRmsDb; },
+  ]) {
+    const bad = await mutateManifest(blob, manifest => change(manifest.assets.find(asset => asset.id === 'mix-version')));
+    storage.calls = [];
+    await assert.rejects(importProject(storage, bad), { code: 'INVALID_ARCHIVE' });
+    assert.deepEqual(storage.calls, [], 'invalid metadata is rejected before asset creation');
+  }
+});
 
 test('SHA-256 matches independent crypto vectors across padding and arbitrary chunk boundaries', () => {
   for (const bytes of [Buffer.alloc(0), Buffer.from('abc'), Buffer.alloc(1000000, 97), ...[1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 1025].map(n => randomBytes(n))]) {

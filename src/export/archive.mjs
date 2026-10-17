@@ -1,6 +1,7 @@
 import { validateProject, MAX_AUTOMATION_EVENTS } from '../project.mjs';
 import { SHA256, hashBlob, bytesToHex } from './sha256.mjs';
 import { ExportError, safeFilename, validateAudioMetadata, verifyAudioSnapshot } from './wav.mjs';
+import { normalizeMasterSettings } from '../audio/master-settings.mjs';
 
 export const ARCHIVE_MAGIC = 'FMLPACK\n';
 export const ARCHIVE_HEADER_BYTES = 64;
@@ -12,6 +13,9 @@ const PAGE_FRAMES = 16384;
 const ID = /^[A-Za-z0-9_-]{1,120}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const ASSET_KEYS = new Set(['assetId', 'leadAssetId', 'masterAssetId']);
+// Provenance describes a finished version; the source can be deleted while
+// that version remains playable. It is remapped, never required as audio.
+const PROVENANCE_KEYS = new Set(['sourceAssetId']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -98,6 +102,35 @@ function validateAssetSource(asset) {
   if (asset.source === 'loops' && (asset.channels !== 2 || Object.hasOwn(asset, 'leadAssetId'))) fail('A loops-only recording must be stereo without a vocal reference.');
 }
 
+function masteringMetadata(asset) {
+  const metadata = {};
+  for (const key of ['sourceAssetId', 'sourcePerformanceId']) if (asset[key] != null) {
+    if (typeof asset[key] !== 'string' || !ID.test(asset[key]) || FORBIDDEN_KEYS.has(asset[key])) fail('A saved mix has invalid source metadata.');
+    metadata[key] = asset[key];
+  }
+  if (asset.renderMode !== undefined) {
+    if (!['current', 'performance'].includes(asset.renderMode)) fail('A saved mix has an invalid render mode.');
+    metadata.renderMode = asset.renderMode;
+  }
+  if (asset.masterSettings !== undefined) {
+    try { metadata.masterSettings = normalizeMasterSettings(asset.masterSettings); }
+    catch (error) { fail(error.message); }
+  }
+  if (asset.analysis !== undefined) {
+    const analysis = asset.analysis;
+    if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis) || analysis.peakType !== 'sample') fail('A saved mix has invalid audio measurements.');
+    const result = { peakType: 'sample' };
+    for (const key of ['inputPeakDb', 'processedPeakDb', 'outputPeakDb', 'inputRmsDb', 'outputRmsDb']) {
+      if (analysis[key] !== null && !Number.isFinite(analysis[key])) fail('A saved mix has invalid audio measurements.');
+      result[key] = analysis[key];
+    }
+    if (!Number.isFinite(analysis.outputGainDb) || !Number.isFinite(analysis.ceilingDb) || analysis.ceilingDb < -12 || analysis.ceilingDb > 0 || (analysis.outputPeakDb !== null && analysis.outputPeakDb > analysis.ceilingDb + 0.000001)) fail('A saved mix has invalid output level measurements.');
+    result.outputGainDb = analysis.outputGainDb; result.ceilingDb = analysis.ceilingDb;
+    metadata.analysis = result;
+  }
+  return metadata;
+}
+
 function assetMetadata(asset, offset, sha256) {
   if (typeof asset.id !== 'string' || !ID.test(asset.id)) fail('A recording has an invalid id.');
   if (!['complete', 'interrupted', 'recovered'].includes(asset.status)) fail('Finish saving all recordings before creating a backup.', 'RECORDING_NOT_READY');
@@ -108,7 +141,7 @@ function assetMetadata(asset, offset, sha256) {
     sampleRate: asset.sampleRate, channels: asset.channels, frames: asset.frames,
     pageFrames: PAGE_FRAMES, encoding: 'f32le', bytes, offset, sha256,
     status: asset.status === 'recovered' ? 'interrupted' : asset.status,
-    createdAt: asset.createdAt ?? null, updatedAt: asset.updatedAt ?? null,
+    createdAt: asset.createdAt ?? null, updatedAt: asset.updatedAt ?? null, ...masteringMetadata(asset),
   };
   // Sealed recordings not yet attached to a track still need their pairing
   // and role metadata after a backup is restored. They are recovery material,
@@ -128,6 +161,9 @@ export async function exportProject(storage, project, { signal, onProgress, incl
     for (const asset of await storage.listAssets(snapshot.id)) {
       if (asset.frames > 0 && ['complete', 'interrupted', 'recovered'].includes(asset.status)) ids.add(asset.id);
     }
+  }
+  if (snapshot.recordingMixSettings) {
+    for (const assetId of Object.keys(snapshot.recordingMixSettings)) if (!ids.has(assetId)) delete snapshot.recordingMixSettings[assetId];
   }
   if (ids.size > MAX_ARCHIVE_ASSETS) fail('This project has too many recordings for one backup.');
   const files = [], assets = [];
@@ -213,6 +249,7 @@ function validateAssetReferences(project, assets) {
   };
   for (const asset of assets.values()) {
     validateAssetSource(asset);
+    masteringMetadata(asset);
     for (const key of ['captureId', 'leadAssetId', 'performanceId']) if (asset[key] != null && (typeof asset[key] !== 'string' || !ID.test(asset[key]))) fail('A recording has an invalid recovery reference.');
     if (asset.leadAssetId != null) {
       const lead = assets.get(asset.leadAssetId);
@@ -253,7 +290,8 @@ function remapReferences(value, assetIds, oldProjectId, projectId) {
   if (Array.isArray(value)) return value.map(item => remapReferences(item, assetIds, oldProjectId, projectId));
   const next = {};
   for (const [key, item] of Object.entries(value)) {
-    if (ASSET_KEYS.has(key) && typeof item === 'string' && assetIds.has(item)) next[key] = assetIds.get(item);
+    if (key === 'recordingMixSettings' && item && typeof item === 'object' && !Array.isArray(item)) next[key] = Object.fromEntries(Object.entries(item).filter(([id]) => assetIds.has(id)).map(([id, settings]) => [assetIds.get(id), structuredClone(settings)]));
+    else if ((ASSET_KEYS.has(key) || PROVENANCE_KEYS.has(key)) && typeof item === 'string' && assetIds.has(item)) next[key] = assetIds.get(item);
     else if (key === 'projectId' && item === oldProjectId) next[key] = projectId;
     else next[key] = remapReferences(item, assetIds, oldProjectId, projectId);
   }
@@ -295,7 +333,7 @@ export async function importProject(storage, file, { signal, onProgress } = {}) 
       const id = ids.get(asset.id);
       // Register before beginAsset so a partial backend create can be cleaned.
       started.push(id);
-      const recovery = {};
+      const recovery = masteringMetadata(asset);
       for (const key of ['captureId', 'leadAssetId', 'performanceId', 'source', 'track']) if (asset[key] != null) recovery[key] = asset[key];
       await storage.beginAsset({ id, projectId, name: asset.name, kind: asset.kind, sampleRate: asset.sampleRate, channels: asset.channels, createdAt: asset.createdAt,
         ...remapReferences(recovery, ids, original.id, projectId) });

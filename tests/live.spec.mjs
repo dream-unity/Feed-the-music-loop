@@ -51,7 +51,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
   const expectedHash = process.env.FML_EXPECTED_SW_SHA256;
   const swURL = new URL('sw.js', baseURL).href;
   const errors = [], unexpectedRequests = [], indexResponses = [], propagationChecks = [];
-  let servedWorker, finalWorkerHash, registration, recording, loopRecording, originalLoopBytes, editedRecording;
+  let servedWorker, finalWorkerHash, registration, recording, loopRecording, originalLoopBytes, loopRecordingBytes, editedRecording, masteredRecording;
   page.on('pageerror', error => errors.push(error.message));
   context.on('request', incoming => {
     const url = new URL(incoming.url());
@@ -161,7 +161,8 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await recent.getByRole('button', { name: 'Download Loop recording 1', exact: true }).click();
     const loopFile = await loopDownload;
     expect(await loopFile.failure()).toBeNull();
-    loopRecording = inspectRecording(await readFile(await loopFile.path()), 2);
+    loopRecordingBytes = await readFile(await loopFile.path());
+    loopRecording = inspectRecording(loopRecordingBytes, 2);
     expect(await page.evaluate(() => window.__unexpectedLoopMicRequests)).toBe(0);
     await expect(page.locator('[data-ref="recovery"], [data-ref="downloads"]')).toHaveCount(0);
     await page.getByTestId('stop').click();
@@ -217,6 +218,46 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     const expectedPCM = Buffer.concat([copied.subarray(0, pasteByte), copied, copied.subarray(pasteByte)]);
     expect(pcmData(editedBytes).equals(expectedPCM)).toBe(true);
     await page.locator('[data-action="view"][data-view="build"]').click();
+    // A saved loops-only song must be selectable independently of the edited
+    // loop mixer, processed in stereo, and downloaded as a separate version.
+    await recent.getByRole('button', { name: 'Mix and master Loop recording 1', exact: true }).click();
+    const master = page.getByTestId('recording-master');
+    await expect(master).toBeVisible();
+    await expect(master.getByRole('heading', { name: 'Loop recording 1', exact: true })).toBeVisible();
+    const gain = master.locator('input[data-control="recording-master"][data-key="gainDb"]');
+    await gain.focus();
+    for (let step = 0; step < 12; step++) await gain.press('ArrowLeft');
+    await expect(gain).toHaveValue('-6');
+    await expect(master.locator('[data-control="recording-master-normalize"]')).not.toBeChecked();
+    await master.getByLabel('New version name', { exact: true }).fill('Live mastered loop song');
+    await master.getByTestId('preview-master').click();
+    const player = master.locator('#recording-master-player');
+    await expect(player).toHaveAttribute('src', /^blob:/);
+    await expect.poll(() => player.evaluate(audio => audio.readyState)).toBeGreaterThanOrEqual(2);
+    await master.getByRole('button', { name: 'Close preview', exact: true }).click();
+    const masterDownload = page.waitForEvent('download');
+    await master.getByRole('button', { name: 'Save new master', exact: true }).click();
+    const masterFile = await masterDownload;
+    expect(await masterFile.failure()).toBeNull();
+    const masterBytes = await readFile(await masterFile.path());
+    masteredRecording = inspectRecording(masterBytes, 2);
+    expect(masteredRecording.frames).toBe(loopRecording.frames);
+    expect(masteredRecording.sampleRate).toBe(loopRecording.sampleRate);
+    const sourceSongPCM = pcmData(loopRecordingBytes), masterPCM = pcmData(masterBytes);
+    expect(masterPCM.length).toBe(sourceSongPCM.length);
+    const expectedMasterPCM = Buffer.alloc(sourceSongPCM.length);
+    for (let offset = 0; offset < masterPCM.length; offset += 4) {
+      expectedMasterPCM.writeFloatLE(Math.fround(sourceSongPCM.readFloatLE(offset) * 10 ** (-6 / 20)), offset);
+    }
+    expect(masterPCM.equals(expectedMasterPCM)).toBe(true);
+    await expect(master.locator('[data-ref="recording-master-outputs"]')).toContainText('Live mastered loop song');
+    const masterScreenshot = testInfo.outputPath('review-live-recording-master.png');
+    await page.screenshot({ path: masterScreenshot, fullPage: true, animations: 'disabled' });
+    await testInfo.attach('live-recording-master', { path: masterScreenshot, contentType: 'image/png' });
+    await page.locator('[data-action="view"][data-view="build"]').click();
+    const originalAgain = page.waitForEvent('download');
+    await recent.getByRole('button', { name: 'Download Loop recording 1', exact: true }).click();
+    expect(sha256(await readFile(await (await originalAgain).path()))).toBe(loopRecording.sha256);
     // Recheck the network after the recording. A competing branch-root Pages
     // publish must not replace this package while its cached shell still works.
     const finalWorker = await request.get(swURL, { timeout: 10_000, maxRedirects: 0, headers: { 'Cache-Control': 'no-cache' } });
@@ -233,7 +274,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await testInfo.attach('live-pages-studio', { path: screenshot, contentType: 'image/png' });
   } finally {
     await testInfo.attach('live-deployment-evidence', {
-      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, editedRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
+      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, editedRecording, masteredRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',
     });
   }

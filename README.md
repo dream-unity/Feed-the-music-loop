@@ -10,7 +10,7 @@ A vocal looper and song studio that runs entirely in your browser. Record a beat
 2. Choose **Add loop**. Allow microphone access, perform your first beat, then finish the loop. Its length becomes your song's base cycle.
 3. Add another loop. Choose a cycle length to keep layers aligned, or an independent length for evolving patterns. Your existing layers keep playing.
 4. Choose **Sing over loops** and sing for as long as you need. Finish when you are done. The studio keeps the separate vocal and a stereo recording of the complete performance.
-5. Open **Mix** to adjust level, pan, low/mid/high EQ, low cut, compression, room reverb and echo. Try the Beatbox, Bass, Harmony, Lead and Atmosphere starting points, then fine-tune them.
+5. Open **Mix → Layers & vocals** to adjust individual sounds. Use **Songs & recordings**, or a recording's **Mix & master** button, to select a saved performance, loop-only song, vocal, loop or imported recording and render a separate mastered WAV.
 6. Save sections such as an intro and chorus, and launch them at cycle boundaries while performing. Use the Song view to audition takes, export the original performance, or render an edited mix.
 7. Download a **project backup** regularly. It contains your project and original audio and can be restored on another supported browser or device.
 
@@ -30,6 +30,7 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 - Individual layer mute, solo, naming, color, timing adjustment and reversible role presets.
 - Waveform editing for every loop: select precise moments, trim, shorten or extend with repeats/silence, and copy a selection into the same or another track. Each edit saves a separate audio version and supports session Undo/Redo.
 - Per-layer and vocal processing, shared room/echo effects and a master safety soft ceiling.
+- Whole-recording mix/master controls for saved songs, performances and imported audio: gain, stereo balance, EQ, low cut, linked compression, sample-peak normalization and output ceiling. Preview any moment against the original and save separately named WAV versions beside their source.
 - Project undo/redo, saved sections, audio import, local projects and autosave.
 - Discarded takes release their audio storage after the project is safely saved; failed cleanup remains visible with a retry action.
 - Top-right Storage file manager: measured audio/cache file sizes across all projects, estimated remaining recording space, per-file downloads and confirmed permanent deletion.
@@ -49,7 +50,9 @@ The manual recording-offset control compensates input/output delay by aligning c
 
 The original stereo performance is the authoritative record of what the engine rendered during that take. An edited mix reconstructs the stored arrangement with the chosen sound settings. Its finite effect warm-up and tail mean it is not promised to be bit-identical to a long-running live effects state.
 
-The soft ceiling prevents uncontrolled output peaks, but is not a certified true-peak mastering limiter. There is no pitch correction, independent pitch/time stretching, LUFS mastering or cloud collaboration hidden behind the controls.
+Whole-recording mastering processes the saved audio once through its original duration, preserving its mono/stereo channels. The controls affect the complete recording; **Remix individual layers** uses an available recorded arrangement to change its separate parts. Mastered versions never replace the source. Preview uses the same whole-recording peak analysis as the full export, retaining at most 20 seconds of preview audio from the chosen position.
+
+The live soft ceiling prevents uncontrolled output peaks. The separate recording master applies a constant gain after processing to keep its measured sample peak within the chosen ceiling; optional peak normalization also raises quiet material to that ceiling. This is sample-peak processing, not LUFS normalization or a true-peak limiter. There is no pitch correction, independent pitch/time stretching or cloud collaboration hidden behind the controls.
 
 ## Storage, privacy and recovery
 

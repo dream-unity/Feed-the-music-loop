@@ -6,6 +6,8 @@ import { normalizedStorageCapacity, removeAssetReferences } from './storage-mana
 import { listStudioCacheFiles, deleteStudioCacheFile } from './storage/cache-files.mjs';
 import { createAudioSelection, planAudioEdit, renderAudioEdit, summarizeAudioEditSource } from './audio/edit.mjs';
 import { wavHeader } from './export/wav.mjs';
+import { listRecordingSources, selectRecordingSource } from './recording-sources.mjs';
+import { DEFAULT_MASTER_SETTINGS, normalizeMasterSettings } from './audio/master-settings.mjs';
 
 const now = () => new Date().toISOString();
 const nextLoopRecordingName = project => `Loop recording ${project.performances.filter(performance => performance.source === 'loops').length + 1}`;
@@ -36,7 +38,7 @@ export class StudioController {
       inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
       recovered: [], discarded: [], damagedAudio: [], readonly: false, readonlyReason: null, recoveryRequired: false, deletionPending: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
-      micDevices: [], preferredDeviceId: '', micChanging: false, recentRecording: null, trackEditor: null };
+      micDevices: [], preferredDeviceId: '', micChanging: false, recentRecording: null, trackEditor: null, mixMode: 'layers', recordingMix: null, recordingSources: [], recordingMixOutputs: [], remixPerformanceId: null };
     this.ui.addEventListener('action', e => { this.handle(e.detail).catch(error => this.handleError(error)); });
     this.storage.addEventListener('progress', e => this.storageProgress(e.detail));
     this.storage.addEventListener('error', e => {
@@ -46,7 +48,7 @@ export class StudioController {
   }
   render() {
     this.refreshAudioIntegrity(); this.state.undoAvailable = !!this.history.past.length; this.state.redoAvailable = !!this.history.future.length;
-    this.refreshTrackEditor(); this.ui.render(this.state); this.ui.updateTrackEditor?.(this.state.trackEditor);
+    this.refreshTrackEditor(); this.refreshRecordingMix(); this.ui.render(this.state); this.ui.updateTrackEditor?.(this.state.trackEditor);
     const editor = this.state.trackEditor;
     if (editor && !this.trackEditOperation && !editor.waveformLoading && !editor.waveformError && !this.editorWaveforms?.has(editor.assetId)) this.loadEditorWaveform(editor);
   }
@@ -66,11 +68,13 @@ export class StudioController {
   async openProject(projectId = null, supplied = null) {
     this.assertIdle();
     if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish before opening another project.');
+    if (this.recordingMasterOperation?.kind === 'render') throw new Error('Finish or cancel the master before opening another project.');
+    this.stopRecordingMasterPreview();
     if (this.projectDeletion?.committing || this.fileDeletion?.committing) throw new Error('Wait for deletion to finish before opening another project.');
     if (this.openingProject) throw new Error('A project is still opening. Wait for it to finish before switching again.');
     this.openingProject = true;
     try {
-    this.closeTrackEditor(); this.audioClipboard = null; this.editorWaveforms?.clear();
+    this.closeTrackEditor(); this.audioClipboard = null; this.editorWaveforms?.clear(); this.state.recordingMix = null; this.state.remixPerformanceId = null; this.mixModeChosen = false;
     ++this.generation; this.state.busy = true; this.render();
     const previousId = this.state.project?.id;
     if (previousId && !this.state.readonly) await this.flushSave();
@@ -98,13 +102,14 @@ export class StudioController {
     }
     // Only expose a recovery-limited session if its existing metadata is still
     // readable. A dead worker or unreadable asset index remains a fatal open.
-    const assets = await this.storage.listAssets(next.id); const used = new Set(referencedAssets({ ...next, pendingCapture: null }));
+    const assets = await this.storage.listAssets(next.id); this.pruneRecordingMixSettings(next, assets); const used = new Set(referencedAssets({ ...next, pendingCapture: null }));
     this.state.readonly = readonly; this.state.readonlyReason = readonlyReason; this.state.recoveryRequired = recoveryRequired; this.state.deletionPending = deletionPending;
     this.state.project = next; this.state.sampleRate = next.sampleRate; this.state.selectedTrackId = next.tracks[0]?.id || null;
     this.state.capture = null; this.state.recentRecording = latestProjectRecording(next); this.state.audition = null; this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; next.input.monitor = false;
     this.state.transportFrame = 0; this.state.activeSectionId = null; this.state.queuedSectionId = null; this.history.clear();
     this.state.recovered = assets.filter(a => a.frames > 0 && a.status !== 'cancelled' && !used.has(a.id)).map(a => ({ ...a, needsRecovery: a.status === 'recording' }));
     this.state.discarded = assets.filter(isDiscardedCapture);
+    this.state.mixMode = next.performances.some(item => !item.removed) || assets.some(item => item.kind === 'recording' || item.kind === 'mix') ? 'recordings' : 'layers';
     this.updateAudioIntegrity(next, assets);
     this.state.status = deletionPending ? 'Deletion unfinished · retry in Manage storage' : recoveryRequired ? 'Recovery required · read only' : readonly ? 'Read only · another tab is editing' : this.state.damagedAudio.length ? 'Saved audio is incomplete · review Song' : this.state.recovered.length ? `${this.state.recovered.length} recording${this.state.recovered.length === 1 ? '' : 's'} available to recover` : 'Saved on this device';
     this.state.busy = false; this.state.error = recoveryRequired || deletionPending ? readonlyReason : null;
@@ -480,6 +485,9 @@ export class StudioController {
         for (const assetId of ids) assets.set(assetId, await this.storage.getAsset(assetId));
         needsRecovery = [...assets.values()].some(asset => asset.status === 'recording');
       }
+      const knownAssets = new Map((this.recordingAssets || []).map(asset => [asset.id, asset]));
+      for (const asset of assets.values()) knownAssets.set(asset.id, asset);
+      this.recordingAssets = [...knownAssets.values()];
       const raw = assets.get(p.assetId), master = p.masterAssetId ? assets.get(p.masterAssetId) : null;
       const cancelled = p.end.status === 'cancelled';
       const loopComplete = p.kind === 'loop' && !needsRecovery && p.end.status === 'complete' && raw.status === 'complete'
@@ -595,7 +603,7 @@ export class StudioController {
   async storageFailed(message) {
     if (this.state.storageFailed) return;
     ++this.generation; this.state.storageFailed = true;
-    clearTimeout(this.saveTimer); this.saveTimer = null; this.exportAbort?.abort(); this.trackEditOperation?.abort.abort(); this.closeTrackEditor();
+    clearTimeout(this.saveTimer); this.saveTimer = null; this.exportAbort?.abort(); this.recordingMasterOperation?.abort.abort(); this.trackEditOperation?.abort.abort(); this.closeTrackEditor();
     // A dead worker cannot acknowledge seals. Its already committed checkpoints
     // and persisted capture intent are recovered by a fresh page/worker.
     const pending = this.pending; this.pending = null; pending?.resolveDone?.();
@@ -861,6 +869,7 @@ export class StudioController {
   }
   async releaseWake() { await this.wakeLock?.release().catch(() => {}); this.wakeLock = null; }
   closePreview() {
+    this.stopRecordingMasterPreview();
     this.previewAbort?.abort(); this.previewAbort = null; this.state.previewPreparing = null;
     globalThis.document?.querySelector('#performance-player')?.pause();
     if (this.state.preview?.url) { URL.revokeObjectURL(this.state.preview.url); this.urls.delete(this.state.preview.url); }
@@ -938,6 +947,7 @@ export class StudioController {
   }
   updateAudioIntegrity(project, assets) {
     if (this.state.project !== project) return;
+    this.recordingAssets = assets;
     this.audioIntegrityIssues = inspectProjectAudio(project, assets);
     this.refreshAudioIntegrity();
   }
@@ -1274,7 +1284,8 @@ export class StudioController {
           }
           const active = this.state.project, assets = await this.storage.listAssets(active.id), used = new Set(referencedAssets({ ...active, pendingCapture: null }));
           this.state.recovered = assets.filter(asset => asset.frames > 0 && asset.status !== 'cancelled' && !used.has(asset.id)).map(asset => ({ ...asset, needsRecovery: asset.status === 'recording' }));
-          this.state.discarded = assets.filter(isDiscardedCapture); this.updateAudioIntegrity(active, assets);
+          this.state.discarded = assets.filter(isDiscardedCapture);
+          this.pruneRecordingMixSettings(active, assets); this.updateAudioIntegrity(active, assets);
           this.state.projects = await this.storage.listProjects();
         } catch (error) {
           if (currentAffected) { this.state.readonly = true; this.state.readonlyReason = 'Reopen this project to refresh its saved file references before editing.'; }
@@ -1363,6 +1374,7 @@ export class StudioController {
       await this.storage.deleteAsset(assetId);
       this.removeDownloadAsset(assetId);
       this.state.recovered = this.state.recovered.filter(item => item.id !== assetId);
+      if (project.recordingMixSettings && Object.hasOwn(project.recordingMixSettings, assetId)) { delete project.recordingMixSettings[assetId]; await this.saveNow(); }
       const estimate = await this.storage.estimate().catch(() => null);
       if (estimate) this.state.storage = { ...this.state.storage, ...estimate };
       if (current()) { this.state.status = 'Saved mix deleted'; this.ui.notify(`${name} deleted. Your source recordings are still saved.`, 'success'); }
@@ -1447,6 +1459,7 @@ export class StudioController {
     }
   }
   async handle(action = {}) {
+    if (this.recordingMasterOperation && !['cancel-recording-master', 'cancel-export', 'stop-recording-master-preview', 'dismiss-error', 'view', 'close-preview', ...(this.recordingMasterOperation.kind === 'preview' ? ['recording-master-setting', 'recording-master-reset', 'recording-master-name', 'set-recording-preview-start', 'select-recording', 'open-recording-mix', 'mix-mode', 'stop'] : [])].includes(action.type)) throw new Error('Finish or cancel the recording master before starting another operation.');
     if (this.trackEditOperation && !['editor-close', 'editor-stop-preview', 'dismiss-error'].includes(action.type)) throw new Error('Wait for the audio edit to finish, or close the editor to cancel.');
     if (this.state.storageFailed && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview'].includes(action.type)) throw new Error('Reopen the studio to recover saved recordings before continuing.');
     if (this.projectDeletion?.committing && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'stop', 'mic-off'].includes(action.type)) throw new Error('Wait for project deletion to finish before starting another operation.');
@@ -1454,6 +1467,20 @@ export class StudioController {
     if (this.state.deletionPending && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'manage-storage', 'delete-project', 'projects', 'open-project', 'new-project', 'stop', 'mic-off', 'select-track'].includes(action.type)) throw new Error(this.state.readonlyReason || 'Retry permanent deletion in Manage storage, or open another project.');
     const p = this.state.project; if (!p && !['help', 'reload-studio', 'dismiss-error', 'view'].includes(action.type)) return;
     switch (action.type) {
+      case 'mix-mode': this.stopRecordingMasterPreview(); this.state.mixMode = action.mode === 'recordings' ? 'recordings' : 'layers'; this.mixModeChosen = true; this.render(); return;
+      case 'open-recording-mix': return this.selectRecordingMix(`asset:${action.assetId}`);
+      case 'select-recording': return this.selectRecordingMix(action.sourceKey);
+      case 'recording-master-setting': return this.setRecordingMasterSettings(action.settings);
+      case 'recording-master-reset': return this.setRecordingMasterSettings(DEFAULT_MASTER_SETTINGS);
+      case 'recording-master-name': this.stopRecordingMasterPreview(); this.refreshRecordingMix(); if (this.state.recordingMix) this.state.recordingMix.name = cleanName(action.name, 'New master'); this.render(); return;
+      case 'set-recording-preview-start': return this.setRecordingPreviewStart(action.seconds);
+      case 'preview-recording-master': return this.previewRecordingMaster(action);
+      case 'stop-recording-master-preview': this.stopRecordingMasterPreview(); this.render(); return;
+      case 'export-recording-master': return this.exportRecordingMaster();
+      case 'cancel-recording-master': this.recordingMasterOperation?.abort.abort(); this.exportAbort?.abort(); return;
+      case 'remix-recording': return this.remixRecording();
+      case 'import-recording': return this.importRecording(action.file);
+      case 'preview-recorded-asset': return this.previewRecordedAsset(action.id, this.state.recordingSources.find(item => item.assetId === action.id)?.name || 'Saved master');
       case 'edit-track': return this.openTrackEditor(action.id);
       case 'editor-select': return this.editorSelection(action);
       case 'editor-cursor': return this.editorSelection({ cursorFrame: action.frame });
@@ -1477,8 +1504,8 @@ export class StudioController {
       case 'record-all-loops': return this.startCapture('mix', 0);
       case 'finish': this.engine?.finish(); return;
       case 'cancel': { ++this.generation; this.engine?.cancel(); if (!this.pending) { this.state.capture = null; this.state.busy = false; this.render(); } return; }
-      case 'view': this.state.view = ['build', 'song', 'mix'].includes(action.view) ? action.view : 'build'; this.render(); return;
-      case 'select-track': this.state.selectedTrackId = action.id; this.state.view = 'mix'; this.render(); return;
+      case 'view': this.state.view = ['build', 'song', 'mix'].includes(action.view) ? action.view : 'build'; if (this.state.view === 'mix' && !this.mixModeChosen && listRecordingSources(p, this.state.recovered).some(item => ['performance', 'loop-song', 'mix', 'recovered'].includes(item.kind))) this.state.mixMode = 'recordings'; this.render(); return;
+      case 'select-track': this.stopRecordingMasterPreview(); this.state.mixMode = 'layers'; this.mixModeChosen = true; this.state.selectedTrackId = action.id; this.state.view = 'mix'; this.render(); return;
       case 'mix': this.edit(project => { const t = project.tracks.find(t => t.id === action.id) || project.takes.find(t => t.id === action.id); if (t) { t.mix = normalizeMix({ ...t.mix, ...action.mix }); this.engine?.send('mix', { id: t.id, mix: t.mix }); } }, `mix:${action.id}`); return;
       case 'mute': case 'solo': this.edit(project => { const t = project.tracks.find(t => t.id === action.id); if (t) { const key = action.type === 'mute' ? 'muted' : 'solo'; t[key] = !t[key]; this.engine?.send('mix', { id: t.id, [key]: t[key] }); } }); return;
       case 'rename-track': this.edit(project => { const t = project.tracks.find(t => t.id === action.id); if (t) t.name = cleanName(action.name, t.name); }); return;
@@ -1521,7 +1548,7 @@ export class StudioController {
       case 'save-section': { const name = action.name || await this.ui.prompt({ title: 'Save a song section', message: 'This remembers exactly which loops are present and their mix.', value: ['Intro', 'Verse', 'Chorus', 'Bridge'][p.sections.length] || `Section ${p.sections.length + 1}`, label: 'Section name' }); if (name) this.edit(project => { project.sections.push(sectionFromProject(project, name)); }); return; }
       case 'launch-section': { const section = p.sections.find(s => s.id === action.id); if (!section) return; this.assertWritable(); this.history.push(p); if (this.engine) { this.state.queuedSectionId = section.id; this.engine.send('section', { section: clone(section) }); } else { applySection(p, section); this.state.activeSectionId = section.id; this.scheduleSave(); } this.render(); return; }
       case 'delete-section': this.edit(project => { project.sections = project.sections.filter(s => s.id !== action.id); this.engine?.send('cancel-section', { id: action.id }); if (this.state.queuedSectionId === action.id) this.state.queuedSectionId = null; if (this.state.activeSectionId === action.id) this.state.activeSectionId = null; }); return;
-      case 'select-take': this.edit(project => { project.selectedTakeId = action.id; }); return;
+      case 'select-take': this.state.remixPerformanceId = null; this.edit(project => { project.selectedTakeId = action.id; }); return;
       case 'rename-take': this.edit(project => { const t = project.takes.find(t => t.id === action.id); if (t) t.name = cleanName(action.name, t.name); }); return;
       case 'delete-take': this.edit(project => { project.takes = project.takes.filter(t => t.id !== action.id); if (project.selectedTakeId === action.id) project.selectedTakeId = project.takes.at(-1)?.id || null; }); return;
       case 'preview-take': return this.previewTake(action.id);
@@ -1551,13 +1578,186 @@ export class StudioController {
       case 'reload-studio': { if (this.pending) throw new Error('Finish or cancel the current recording before reopening.'); await this.engine?.close(); globalThis.location.reload(); return; }
     }
   }
+  pruneRecordingMixSettings(project, assets) {
+    if (!project.recordingMixSettings) return;
+    const retained = new Set(assets.map(asset => asset.id));
+    for (const assetId of Object.keys(project.recordingMixSettings)) if (!retained.has(assetId)) delete project.recordingMixSettings[assetId];
+  }
+  refreshRecordingMix() {
+    const project = this.state.project;
+    this.state.recordingSources = listRecordingSources(project, this.state.recovered, this.state.damagedAudio, this.recordingAssets);
+    if (!project) { this.state.recordingMix = null; this.state.recordingMixOutputs = []; return; }
+    let model = this.state.recordingMix;
+    let source = this.state.recordingSources.find(item => item.key === model?.sourceKey);
+    if (!source) {
+      this.stopRecordingMasterPreview(); source = this.state.recordingSources[0];
+      this.state.recordingMix = model = source ? { sourceKey: source.key, settings: normalizeMasterSettings(project.recordingMixSettings?.[source.assetId] || {}),
+        name: `${source.name} · mastered`, previewStartSeconds: 0, previewUrl: null, previewBusy: false, busy: false, progress: null, error: null } : null;
+    } else if (!model.busy) {
+      const settings = normalizeMasterSettings(project.recordingMixSettings?.[source.assetId] || {});
+      if (JSON.stringify(settings) !== JSON.stringify(model.settings)) { this.stopRecordingMasterPreview(); model.settings = settings; model.analysis = null; }
+    }
+    this.state.recordingMixOutputs = source ? this.state.recovered.filter(asset => asset.kind === 'mix' && asset.sourceAssetId === source.assetId && ['complete', 'interrupted', 'recovered'].includes(asset.status)) : [];
+    this.state.remixPerformance = project.performances.find(item => item.id === this.state.remixPerformanceId && !item.removed) || null;
+    if (!this.state.remixPerformance) this.state.remixPerformanceId = null;
+  }
+  selectRecordingMix(sourceKey) {
+    this.assertIdle();
+    if (this.recordingMasterOperation?.kind === 'render' || this.state.busy || this.state.exporting || this.projectDeletion || this.fileDeletion) throw new Error('Finish or cancel the current operation before selecting another recording.');
+    const source = this.state.recordingSources.find(item => item.key === sourceKey) || listRecordingSources(this.state.project, this.state.recovered, this.state.damagedAudio, this.recordingAssets).find(item => item.key === sourceKey);
+    if (!source) throw new Error('Choose a saved recording from this project.');
+    this.closePreview(); this.closeTrackEditor();
+    this.state.recordingMix = { sourceKey: source.key, settings: normalizeMasterSettings(this.state.project.recordingMixSettings?.[source.assetId] || {}), name: `${source.name} · mastered`, previewStartSeconds: 0,
+      previewUrl: null, previewBusy: false, busy: false, progress: null, error: null };
+    this.state.mixMode = 'recordings'; this.mixModeChosen = true; this.state.view = 'mix'; this.render();
+  }
+  setRecordingMasterSettings(patch = {}) {
+    this.assertWritable(); this.assertIdle(); this.refreshRecordingMix();
+    const model = this.state.recordingMix;
+    if (!model) throw new Error('Choose a saved recording first.');
+    if (this.recordingMasterOperation?.kind === 'render') throw new Error('Finish or cancel the master before changing its settings.');
+    const source = selectRecordingSource(this.state.project, this.state.recovered, model.sourceKey, this.state.damagedAudio, this.recordingAssets);
+    const settings = normalizeMasterSettings({ ...model.settings, ...patch });
+    this.stopRecordingMasterPreview(); model.settings = settings; model.analysis = null; model.error = null;
+    this.edit(project => { (project.recordingMixSettings ||= {})[source.assetId] = settings; }, `recording-master:${source.assetId}`);
+  }
+  setRecordingPreviewStart(seconds) {
+    this.assertIdle(); this.refreshRecordingMix();
+    if (this.recordingMasterOperation?.kind === 'render') throw new Error('Finish or cancel the master before changing the preview.');
+    const model = this.state.recordingMix, source = selectRecordingSource(this.state.project, this.state.recovered, model?.sourceKey, this.state.damagedAudio, this.recordingAssets);
+    const value = Number(seconds), frame = Math.round(value * source.sampleRate);
+    if (!Number.isFinite(value) || value < 0 || !Number.isSafeInteger(frame) || frame >= source.frames) throw new Error('Choose a preview start within this recording.');
+    this.stopRecordingMasterPreview(); model.previewStartSeconds = frame / source.sampleRate; this.render();
+  }
+  stopRecordingMasterPreview() {
+    if (this.recordingMasterOperation?.kind === 'preview') this.recordingMasterOperation.abort.abort();
+    const model = this.state.recordingMix;
+    globalThis.document?.querySelector('#recording-master-player')?.pause();
+    if (model?.previewUrl) { URL.revokeObjectURL(model.previewUrl); this.urls.delete(model.previewUrl); }
+    if (model) { model.previewUrl = null; model.previewBusy = false; model.previewKind = null; model.previewFrames = null; }
+  }
+  async assertRecordingSource(source, project) {
+    const asset = await this.storage.getAsset(source.assetId);
+    if (!asset || asset.id !== source.assetId || asset.projectId !== project.id || (source.allowLonger ? asset.frames < source.minimumFrames : asset.frames !== source.frames) || asset.channels !== source.channels || asset.sampleRate !== source.sampleRate || !['complete', 'interrupted', 'recovered'].includes(asset.status)) throw new Error('This saved recording changed or is incomplete. Reopen the project before mixing it.');
+    if (source.allowLonger) source.frames = asset.frames;
+    return asset;
+  }
+  silenceRecordingPreviewBacking() {
+    const project = this.state.project;
+    if (project) project.input.monitor = false;
+    this.state.monitor = false; this.engine?.configure(project); this.engine?.stop();
+    this.state.playing = false; this.state.audition = null;
+  }
+  async previewRecordingMaster({ original = false } = {}) {
+    this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.recordingMasterOperation || this.state.deletionPending || this.state.storageFailed || this.trackEditOperation) throw new Error('Finish the current operation before previewing a master.');
+    this.refreshRecordingMix(); const model = this.state.recordingMix, project = this.state.project;
+    const source = selectRecordingSource(project, this.state.recovered, model?.sourceKey, this.state.damagedAudio, this.recordingAssets);
+    this.closePreview(); this.stopEditorPreview(); this.silenceRecordingPreviewBacking();
+    const operation = { kind: 'preview', abort: new AbortController() }, token = this.generation;
+    this.recordingMasterOperation = operation; model.previewBusy = true; model.error = null; model.progress = 0;
+    const settings = clone(model.settings), sourceKey = model.sourceKey, startFrame = Math.round((model.previewStartSeconds || 0) * source.sampleRate);
+    const current = () => { operation.abort.signal.throwIfAborted(); if (this.state.project !== project || this.generation !== token || this.state.recordingMix !== model || model.sourceKey !== sourceKey) throw new DOMException('Preview cancelled.', 'AbortError'); };
+    this.render();
+    try {
+      await this.releaseWake(); current(); await this.assertRecordingSource(source, project); current();
+      const { previewMasteredRecording } = await import('./export/master.mjs'); current();
+      const result = await previewMasteredRecording(this.storage, project, { assetId: source.assetId, settings, original: !!original, startFrame, signal: operation.abort.signal,
+        onProgress: progress => { if (this.recordingMasterOperation === operation) { model.progress = progress; this.render(); } } });
+      current();
+      const url = URL.createObjectURL(result.blob); this.urls.add(url); model.previewUrl = url; model.previewKind = original ? 'original' : 'master'; model.previewFrames = result.frames;
+      model.analysis = result.analysis; this.state.status = original ? 'Original recording preview ready' : 'Master preview ready'; this.render();
+      globalThis.document?.querySelector('#recording-master-player')?.play().catch(() => this.ui.notify('Press Play to listen to the preview.', 'info'));
+    } catch (error) { if (!isAbort(error)) { model.error = error.message; throw error; } }
+    finally { if (this.recordingMasterOperation === operation) this.recordingMasterOperation = null; model.previewBusy = false; model.progress = null; this.render(); }
+  }
+  async exportRecordingMaster() {
+    this.assertWritable(); this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.recordingMasterOperation || this.projectDeletion || this.fileDeletion) throw new Error('Finish the current operation before saving a master.');
+    this.refreshRecordingMix(); const project = this.state.project, model = this.state.recordingMix;
+    const source = selectRecordingSource(project, this.state.recovered, model?.sourceKey, this.state.damagedAudio, this.recordingAssets);
+    const settings = clone(model.settings), name = cleanName(model.name, `${source.name} · mastered`), token = this.generation;
+    this.closePreview(); this.closeTrackEditor(); this.silenceRecordingPreviewBacking();
+    const operation = { kind: 'render', abort: new AbortController() };
+    this.recordingMasterOperation = operation; model.busy = true; model.progress = 0; model.error = null; this.state.busy = true; this.render();
+    const current = () => { operation.abort.signal.throwIfAborted(); if (project !== this.state.project || token !== this.generation || this.state.readonly || this.state.storageFailed) throw new DOMException('Master cancelled.', 'AbortError'); };
+    try {
+      // A master is a new durable file: an unsuccessful project/settings save
+      // must stop before any output is created, unlike a read-only WAV export.
+      await this.flushSave(); current(); await this.assertRecordingSource(source, project); current();
+      await this.withExport(async signal => {
+        const abort = () => operation.abort.abort(); signal.addEventListener('abort', abort, { once: true });
+        try {
+          const { renderMasteredRecording } = await import('./export/master.mjs'); current();
+          const result = await renderMasteredRecording(this.storage, project, { assetId: source.assetId, name, settings, signal: operation.abort.signal,
+            onProgress: progress => { model.progress = progress; this.state.exportProgress = progress; this.ui.updateExportProgress?.(progress); this.render(); } });
+          // Register a successfully sealed result even if download preparation
+          // is subsequently cancelled: it remains beside its source recording.
+          const asset = await this.storage.getAsset(result.assetId);
+          if (project === this.state.project && !this.state.recovered.some(item => item.id === asset.id)) this.state.recovered.push(asset);
+          model.analysis = result.analysis; this.state.status = 'New master saved on this device'; this.render(); current();
+          await this.offerAudioDownload(result.assetId, 'Mastered recording', operation.abort.signal);
+        } finally { signal.removeEventListener('abort', abort); }
+      });
+    } catch (error) { if (!isAbort(error)) { model.error = error.message; throw error; } this.state.status = 'Master cancelled'; }
+    finally {
+      if (this.recordingMasterOperation === operation) this.recordingMasterOperation = null;
+      model.busy = false; model.progress = null; if (project === this.state.project) this.state.busy = false;
+      this.state.storage = { ...this.state.storage, ...await this.storage.estimate?.().catch(() => ({})) }; this.render();
+    }
+  }
+  remixRecording() {
+    this.assertIdle(); this.refreshRecordingMix();
+    const source = selectRecordingSource(this.state.project, this.state.recovered, this.state.recordingMix?.sourceKey, this.state.damagedAudio, this.recordingAssets);
+    if (!source.canRemix) throw new Error('This file has no saved layer arrangement. Use the recording master controls instead.');
+    this.stopRecordingMasterPreview(); this.state.remixPerformanceId = source.performanceId; this.state.mixMode = 'layers'; this.mixModeChosen = true;
+    this.state.selectedTrackId ||= this.state.project.tracks[0]?.id || null; this.state.view = 'mix'; this.render();
+  }
+  async importRecording(file) {
+    this.assertWritable(); this.assertIdle(); if (!file) return;
+    if (this.state.busy || this.state.exporting || this.importOperation || this.recordingMasterOperation) throw new Error('Finish the current operation before importing a recording.');
+    if (file.size > 128 * 1024 * 1024) throw new Error('Audio import supports files up to 128 MB.');
+    const project = this.state.project, token = this.generation, operation = {}; this.importOperation = operation;
+    this.state.busy = true; this.state.status = 'Importing recording…'; this.closePreview(); this.render();
+    let assetId, sealed = false, context;
+    const current = () => { if (project !== this.state.project || token !== this.generation || this.state.storageFailed) throw new DOMException('Import cancelled.', 'AbortError'); };
+    try {
+      await this.flushSave(); current();
+      // Importing a song must work even when unrelated loop audio is damaged.
+      const AudioContext = globalThis.AudioContext || globalThis.webkitAudioContext;
+      if (!AudioContext) throw new Error('This browser cannot decode audio recordings.');
+      context = new AudioContext({ sampleRate: project.sampleRate });
+      const decoded = await context.decodeAudioData(await file.arrayBuffer()); current();
+      if (!decoded.length || decoded.sampleRate !== project.sampleRate) throw new Error('The imported audio could not be decoded at this project’s sample rate.');
+      if (![1, 2].includes(decoded.numberOfChannels)) throw new Error('Import a mono or stereo recording. Surround audio is not supported.');
+      if (decoded.length > project.sampleRate * 60 * 20) throw new Error('Imported recordings are limited to 20 minutes per file.');
+      const channels = decoded.numberOfChannels, name = cleanName(file.name.replace(/\.[^.]+$/, ''), 'Imported recording'); assetId = id('recording-');
+      await this.storage.beginAsset({ id: assetId, projectId: project.id, sampleRate: project.sampleRate, channels, kind: 'recording', name, sourceName: file.name }); current();
+      const planes = Array.from({ length: channels }, (_, channel) => decoded.getChannelData(channel));
+      for (let offset = 0, index = 0; offset < decoded.length; offset += PAGE_FRAMES, index++) {
+        current(); const frames = Math.min(PAGE_FRAMES, decoded.length - offset), pcm = new Float32Array(frames * channels);
+        for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < channels; channel++) pcm[frame * channels + channel] = planes[channel][offset + frame];
+        await this.storage.putPage(assetId, index, pcm.buffer, frames, channels); current();
+      }
+      const asset = await this.storage.finishAsset(assetId, { frames: decoded.length });
+      if (asset.status !== 'complete') throw new Error('The imported recording could not be saved completely.');
+      sealed = true; current(); this.state.recovered.push(asset); this.state.busy = false; this.selectRecordingMix(`asset:${asset.id}`);
+      this.state.status = 'Recording imported · ready to mix and master'; this.ui.notify('Recording imported with its original mono or stereo channels.', 'success');
+    } catch (error) {
+      if (assetId && !sealed) { await this.storage.finishAsset(assetId, { status: 'cancelled' }).catch(() => {}); await this.storage.deleteAsset(assetId).catch(() => {}); }
+      if (!isAbort(error)) throw error;
+    } finally { await context?.close().catch(() => {}); if (this.importOperation === operation) this.importOperation = null; if (project === this.state.project && token === this.generation) this.state.busy = false; this.render(); }
+  }
   async exportMix(action) {
     return this.withExport(async signal => {
       const selected = this.state.project.takes.find(t => t.id === this.state.project.selectedTakeId);
+      const performanceId = action.performanceId || this.state.remixPerformanceId || selected?.performanceId;
+      const performance = this.state.project.performances.find(item => item.id === performanceId);
+      if ((action.performanceId || this.state.remixPerformanceId) && !performance) throw new Error('The selected arrangement is no longer available.');
       const explicitDuration = action.durationSeconds !== undefined && action.durationSeconds !== null && action.durationSeconds !== '';
-      const durationSeconds = explicitDuration ? Number(action.durationSeconds) : selected ? undefined : this.state.project.baseFrames / this.state.sampleRate * 4;
+      const durationSeconds = explicitDuration ? Number(action.durationSeconds) : performance || selected ? undefined : this.state.project.baseFrames / this.state.sampleRate * 4;
       if (durationSeconds !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds <= 0)) throw new Error('Choose a positive export duration, or add a loop or vocal take.');
-      const result = await this.renderMix(this.state.project, { performanceId: selected?.performanceId, ...(durationSeconds === undefined ? {} : { durationSeconds }), tailSeconds: 2, mode: 'current', signal,
+      const result = await this.renderMix(this.state.project, { performanceId, ...(durationSeconds === undefined ? {} : { durationSeconds }), tailSeconds: 2, mode: 'current', signal,
         onProgress: progress => { this.state.exportProgress = progress; this.ui.updateExportProgress?.(progress); } });
       // The saved mix remains reachable even if preparing its download fails.
       const savedMix = await this.storage.getAsset(result.assetId);
@@ -1571,6 +1771,7 @@ export class StudioController {
     return renderEditedMix(this.storage, project, options);
   }
   async previewMix(action = {}) {
+    if (this.state.remixPerformanceId) throw new Error('Render the recorded arrangement to hear this version.');
     this.assertIdle(); if (this.state.exporting) throw new Error('Finish or cancel the export before auditioning.'); this.closePreview();
     const token = this.generation;
     const take = this.state.project.takes.find(t => t.id === this.state.project.selectedTakeId);
@@ -1582,5 +1783,5 @@ export class StudioController {
     engine.send('audition', { take: { ...take, mix: take.mix || roleMix('lead') }, startFrame: take.startFrame, tailFrames: this.state.sampleRate * 2 });
     this.state.status = 'Loading live mix audition…'; this.keepAwake(); this.render();
   }
-  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); if (!this.trackEditOperation) this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
+  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); if (!this.trackEditOperation && this.recordingMasterOperation?.kind !== 'render') this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
 }
