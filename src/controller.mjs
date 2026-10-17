@@ -4,6 +4,8 @@ import { exportWav, exportWavParts, exportProject, importProject } from './expor
 import { inspectProjectAudio } from './audio-integrity.mjs';
 import { normalizedStorageCapacity, removeAssetReferences } from './storage-management.mjs';
 import { listStudioCacheFiles, deleteStudioCacheFile } from './storage/cache-files.mjs';
+import { createAudioSelection, planAudioEdit, renderAudioEdit, summarizeAudioEditSource } from './audio/edit.mjs';
+import { wavHeader } from './export/wav.mjs';
 
 const now = () => new Date().toISOString();
 const nextLoopRecordingName = project => `Loop recording ${project.performances.filter(performance => performance.source === 'loops').length + 1}`;
@@ -34,7 +36,7 @@ export class StudioController {
       inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
       recovered: [], discarded: [], damagedAudio: [], readonly: false, readonlyReason: null, recoveryRequired: false, deletionPending: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
-      micDevices: [], preferredDeviceId: '', micChanging: false, recentRecording: null };
+      micDevices: [], preferredDeviceId: '', micChanging: false, recentRecording: null, trackEditor: null };
     this.ui.addEventListener('action', e => { this.handle(e.detail).catch(error => this.handleError(error)); });
     this.storage.addEventListener('progress', e => this.storageProgress(e.detail));
     this.storage.addEventListener('error', e => {
@@ -42,7 +44,12 @@ export class StudioController {
       else { this.state.status = 'Recording interrupted'; this.handleError(new Error(e.detail.message)); }
     });
   }
-  render() { this.refreshAudioIntegrity(); this.state.undoAvailable = !!this.history.past.length; this.state.redoAvailable = !!this.history.future.length; this.ui.render(this.state); }
+  render() {
+    this.refreshAudioIntegrity(); this.state.undoAvailable = !!this.history.past.length; this.state.redoAvailable = !!this.history.future.length;
+    this.refreshTrackEditor(); this.ui.render(this.state); this.ui.updateTrackEditor?.(this.state.trackEditor);
+    const editor = this.state.trackEditor;
+    if (editor && !this.trackEditOperation && !editor.waveformLoading && !editor.waveformError && !this.editorWaveforms?.has(editor.assetId)) this.loadEditorWaveform(editor);
+  }
   async init() {
     this.render(); this.state.storage = await this.storage.init();
     this.state.projects = await this.storage.listProjects();
@@ -50,18 +57,20 @@ export class StudioController {
     const available = this.state.projects.filter(p => !p.purgePendingAt);
     const selected = available.find(p => p.id === previous) || available[0] || this.state.projects[0];
     await this.openProject(selected?.id || null);
-    globalThis.addEventListener?.('beforeunload', e => { if (this.pending || this.state.status === 'Saving…') { e.preventDefault(); e.returnValue = ''; } });
+    globalThis.addEventListener?.('beforeunload', e => { if (this.pending || this.trackEditOperation || this.state.status === 'Saving…') { e.preventDefault(); e.returnValue = ''; } });
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && (this.state.playing || this.pending)) this.keepAwake(); });
     return this;
   }
-  assertWritable() { if (this.fileDeletion?.committing) throw new Error('Wait for file deletion to finish before editing.'); if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error(this.state.readonlyReason || 'This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
+  assertWritable() { if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish before changing the project.'); if (this.fileDeletion?.committing) throw new Error('Wait for file deletion to finish before editing.'); if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error(this.state.readonlyReason || 'This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
   assertIdle() { if (this.pending || this.state.capture) throw new Error('Finish or cancel the recording before changing projects or exporting.'); }
   async openProject(projectId = null, supplied = null) {
     this.assertIdle();
+    if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish before opening another project.');
     if (this.projectDeletion?.committing || this.fileDeletion?.committing) throw new Error('Wait for deletion to finish before opening another project.');
     if (this.openingProject) throw new Error('A project is still opening. Wait for it to finish before switching again.');
     this.openingProject = true;
     try {
+    this.closeTrackEditor(); this.audioClipboard = null; this.editorWaveforms?.clear();
     ++this.generation; this.state.busy = true; this.render();
     const previousId = this.state.project?.id;
     if (previousId && !this.state.readonly) await this.flushSave();
@@ -221,6 +230,9 @@ export class StudioController {
     }
     if (type === 'asset-sealed') { this.sealed.set(data.assetId, data); this.tryFinalize().catch(e => this.handleError(e)); return; }
     if (type === 'section') {
+      // The editor stopped the graph and cancelled queued section launches.
+      // Ignore acknowledgements already in flight; its save uses a fixed mix.
+      if (this.trackEditOperation) return;
       const section = data.section || this.state.project.sections.find(s => s.id === data.id);
       if (section) { applySection(this.state.project, section); this.state.activeSectionId = section.id; this.state.queuedSectionId = null; this.recordEvent({ frame: data.projectFrame, type: 'section', section: clone(section) }); this.scheduleSave(); this.render(); }
       return;
@@ -583,7 +595,7 @@ export class StudioController {
   async storageFailed(message) {
     if (this.state.storageFailed) return;
     ++this.generation; this.state.storageFailed = true;
-    clearTimeout(this.saveTimer); this.saveTimer = null; this.exportAbort?.abort();
+    clearTimeout(this.saveTimer); this.saveTimer = null; this.exportAbort?.abort(); this.trackEditOperation?.abort.abort(); this.closeTrackEditor();
     // A dead worker cannot acknowledge seals. Its already committed checkpoints
     // and persisted capture intent are recovered by a fresh page/worker.
     const pending = this.pending; this.pending = null; pending?.resolveDone?.();
@@ -648,6 +660,188 @@ export class StudioController {
   }
   async flushSave() { if (this.saveTimer) await this.saveNow(); else await this.saveChain; }
   edit(action, key = null) { this.assertWritable(); this.history.push(this.state.project, key); action(this.state.project); touch(this.state.project); this.scheduleSave(); this.render(); }
+  refreshTrackEditor() {
+    const editor = this.state.trackEditor;
+    if (!editor) return;
+    const track = this.state.project?.tracks.find(item => item.id === editor.trackId);
+    if (!track) { this.closeTrackEditor(); return; }
+    if (editor.assetId !== track.assetId || editor.frames !== track.frames) {
+      this.stopEditorPreview();
+      this.editorWaveformAbort?.abort(); this.editorWaveformAbort = null;
+      Object.assign(editor, { startFrame: 0, endFrame: track.frames, cursorFrame: 0, error: null, waveformLoading: false, waveformError: null });
+    }
+    Object.assign(editor, { assetId: track.assetId, name: track.name, frames: track.frames, sampleRate: this.state.project.sampleRate,
+      channels: track.channels, peaks: this.editorWaveforms?.get(track.assetId) || [], busy: !!this.trackEditOperation || !!editor.waveformLoading,
+      undoAvailable: this.state.undoAvailable, redoAvailable: this.state.redoAvailable,
+      tracks: this.state.project.tracks.map(item => ({ id: item.id, name: item.name, frames: item.frames })),
+      clipboard: this.audioClipboard ? { name: this.audioClipboard.name, frames: this.audioClipboard.frames, sampleRate: this.audioClipboard.sampleRate, channels: this.audioClipboard.channels } : null });
+  }
+  async loadEditorWaveform(editor) {
+    const abort = new AbortController(), assetId = editor.assetId, project = this.state.project;
+    this.editorWaveformAbort?.abort(); this.editorWaveformAbort = abort;
+    editor.waveformLoading = true; editor.busy = true; this.ui.updateTrackEditor?.(editor);
+    try {
+      const asset = await this.storage.getAsset(assetId); abort.signal.throwIfAborted();
+      if (asset.projectId !== project.id || asset.frames !== editor.frames || asset.channels !== editor.channels || asset.sampleRate !== project.sampleRate) throw new Error('The saved audio does not match this loop. Reopen the project before editing.');
+      const peaks = await summarizeAudioEditSource(this.storage, asset, { signal: abort.signal }); abort.signal.throwIfAborted();
+      if (this.state.trackEditor === editor && editor.assetId === assetId && this.state.project === project) {
+        (this.editorWaveforms ||= new Map()).set(assetId, peaks);
+      }
+    } catch (error) {
+      if (!isAbort(error) && this.state.trackEditor === editor && editor.assetId === assetId) editor.waveformError = error.message;
+    } finally {
+      if (this.editorWaveformAbort === abort) {
+        this.editorWaveformAbort = null;
+        if (this.state.trackEditor === editor) editor.waveformLoading = false;
+        this.render();
+      }
+    }
+  }
+  stopEditorPreview() {
+    this.editorPreviewAbort?.abort(); this.editorPreviewAbort = null;
+    globalThis.document?.querySelector('[data-editor-ref="audio"]')?.pause();
+    const editor = this.state.trackEditor;
+    if (editor?.previewUrl) { URL.revokeObjectURL(editor.previewUrl); this.urls.delete(editor.previewUrl); }
+    if (editor) { editor.previewUrl = null; editor.previewBusy = false; }
+  }
+  closeTrackEditor() {
+    // Closing during rendering cancels its uncommitted copy. Once metadata is
+    // committing, let that atomic save settle even if the dialog is closed.
+    if (this.trackEditOperation && !this.trackEditOperation.committing) this.trackEditOperation.abort.abort();
+    this.editorWaveformAbort?.abort(); this.editorWaveformAbort = null;
+    this.stopEditorPreview(); this.state.trackEditor = null; this.ui.closeTrackEditor?.();
+  }
+  openTrackEditor(trackId) {
+    this.assertWritable(); this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.projectDeletion || this.fileDeletion) throw new Error('Finish the current operation before editing audio.');
+    const track = this.state.project.tracks.find(item => item.id === trackId);
+    if (!track) throw new Error('Choose a loop to edit.');
+    this.assertAudioSources([track.assetId]);
+    this.stopEditorPreview(); this.closePreview();
+    this.engine?.stop(); this.engine?.send('cancel-section');
+    this.state.playing = false; this.state.audition = null; this.state.queuedSectionId = null;
+    this.state.project.input.monitor = false; this.state.monitor = false; this.engine?.configure(this.state.project);
+    this.releaseWake();
+    this.state.trackEditor = { trackId, startFrame: 0, endFrame: track.frames, cursorFrame: 0, previewUrl: null, previewBusy: false, progress: null, error: null, waveformLoading: false, waveformError: null };
+    this.refreshTrackEditor(); this.ui.showTrackEditor?.(this.state.trackEditor); this.render();
+  }
+  editorSelection(action = {}) {
+    const editor = this.state.trackEditor;
+    if (!editor) throw new Error('Open a loop in the audio editor first.');
+    if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish.');
+    const startFrame = action.startFrame ?? editor.startFrame, endFrame = action.endFrame ?? editor.endFrame;
+    const cursorFrame = action.cursorFrame ?? editor.cursorFrame;
+    if (![startFrame, endFrame, cursorFrame].every(Number.isSafeInteger) || startFrame < 0 || endFrame > editor.frames || startFrame >= endFrame || cursorFrame < 0 || cursorFrame > editor.frames) throw new Error('Choose a non-empty selection and a paste position within this loop.');
+    this.stopEditorPreview(); Object.assign(editor, { startFrame, endFrame, cursorFrame, error: null }); this.render();
+    return editor;
+  }
+  async copyEditorSelection() {
+    const editor = this.editorSelection(), project = this.state.project;
+    const copySerial = this.editorCopySerial = (this.editorCopySerial || 0) + 1;
+    const selected = { assetId: editor.assetId, startFrame: editor.startFrame, endFrame: editor.endFrame, frames: editor.frames, channels: editor.channels, sampleRate: editor.sampleRate, name: editor.name };
+    const asset = await this.storage.getAsset(selected.assetId);
+    if (this.state.trackEditor !== editor || this.state.project !== project || this.editorCopySerial !== copySerial) return;
+    if (asset.projectId !== project.id || asset.frames !== selected.frames || asset.channels !== selected.channels || asset.sampleRate !== selected.sampleRate) throw new Error('This loop changed. Reopen its audio editor before copying.');
+    this.audioClipboard = Object.freeze({ ...createAudioSelection(asset, selected), name: selected.name });
+    this.render(); this.ui.notify('Selected audio copied. Choose any loop and paste at its cursor or replace its selection.', 'success');
+  }
+  async previewEditorSelection() {
+    const editor = this.editorSelection(), project = this.state.project, token = this.generation;
+    const abort = new AbortController(); this.editorPreviewAbort = abort; editor.previewBusy = true; this.render();
+    const current = () => { abort.signal.throwIfAborted(); if (this.state.trackEditor !== editor || this.state.project !== project || this.generation !== token) throw Object.assign(new Error('Preview cancelled.'), { name: 'AbortError' }); };
+    try {
+      const asset = await this.storage.getAsset(editor.assetId); current();
+      if (asset.projectId !== project.id || asset.frames !== editor.frames || asset.channels !== editor.channels || asset.sampleRate !== editor.sampleRate) throw new Error('This loop changed. Reopen its audio editor before listening.');
+      const selection = createAudioSelection(asset, editor), parts = [wavHeader({ ...asset, frames: selection.frames })];
+      if (selection.frames * asset.channels * 4 > 32 * 1024 * 1024) throw new Error('Choose a shorter selection to listen here. Longer selections can still be copied and edited.');
+      const chunkFrames = Math.floor(1024 * 1024 / (asset.channels * 4));
+      for (let frame = selection.startFrame; frame < selection.endFrame; frame += chunkFrames) {
+        const frames = Math.min(chunkFrames, selection.endFrame - frame);
+        const part = await this.storage.getAssetRange(asset.id, { startFrame: frame, frames }); current();
+        if (!(part instanceof Blob) || part.size !== frames * asset.channels * 4) throw new Error('The selected audio could not be read completely.');
+        parts.push(part);
+      }
+      current(); const url = URL.createObjectURL(new Blob(parts, { type: 'audio/wav' })); this.urls.add(url); editor.previewUrl = url;
+      this.render(); globalThis.document?.querySelector('[data-editor-ref="audio"]')?.play().catch(() => {});
+    } catch (error) { if (!isAbort(error)) { if (this.state.trackEditor === editor) editor.error = error.message; throw error; } }
+    finally { if (this.editorPreviewAbort === abort) { this.editorPreviewAbort = null; editor.previewBusy = false; this.render(); } }
+  }
+  async applyTrackAudioEdit(edit) {
+    this.assertWritable(); this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.projectDeletion || this.fileDeletion) throw new Error('Finish the current operation before editing audio.');
+    const editor = this.state.trackEditor;
+    if (!editor) throw new Error('Open a loop in the audio editor first.');
+    const project = this.state.project, sourceTrack = project.tracks.find(track => track.id === editor.trackId);
+    if (!sourceTrack) throw new Error('This loop is no longer in the project.');
+    this.assertAudioSources([sourceTrack.assetId]);
+    const token = this.generation, operation = { abort: new AbortController(), committing: false };
+    this.trackEditOperation = operation; this.state.busy = true; editor.error = null; editor.progress = { ratio: 0 };
+    this.editorWaveformAbort?.abort(); this.editorWaveformAbort = null; editor.waveformLoading = false;
+    this.stopEditorPreview(); this.closePreview(); this.engine?.stop(); this.engine?.send('cancel-section');
+    this.state.playing = false; this.state.audition = null; this.state.queuedSectionId = null;
+    this.state.status = 'Saving audio edit…'; this.render();
+    let output = null, saved = false, saveAttempted = false, safeToDelete = true, candidateSave = null;
+    const current = () => { operation.abort.signal.throwIfAborted(); if (this.trackEditOperation !== operation || this.state.project !== project || this.generation !== token || this.state.storageFailed) throw Object.assign(new Error('Audio edit cancelled.'), { name: 'AbortError' }); };
+    try {
+      await this.flushSave(); current();
+      const baseline = JSON.stringify(project), asset = await this.storage.getAsset(sourceTrack.assetId); current();
+      if (asset.projectId !== project.id || asset.frames !== sourceTrack.frames || asset.channels !== sourceTrack.channels || asset.sampleRate !== project.sampleRate) throw new Error('The saved audio does not match this loop. Reopen the project before editing.');
+      const plan = planAudioEdit(asset, edit), next = clone(project), nextTrack = next.tracks.find(track => track.id === sourceTrack.id);
+      if (plan.frames > project.sampleRate * 24 * 60 * 60) throw new Error('An edited loop can be at most 24 hours long. Choose a shorter length or selection.');
+      const outputId = id('edit-');
+      // Stable track IDs preserve section controls; historical performances and
+      // Undo keep their original asset IDs. The groove grid is never resized.
+      Object.assign(nextTrack, { assetId: outputId, frames: plan.frames, channels: plan.channels,
+        offsetFrames: ((sourceTrack.offsetFrames % plan.frames) + plan.frames) % plan.frames });
+      let lastProgressAt = 0;
+      output = await renderAudioEdit(this.storage, { asset, edit, metadata: { id: outputId, projectId: project.id, name: sourceTrack.name, kind: 'edit', track: clone(nextTrack) },
+        signal: operation.abort.signal, onProgress: progress => { if (this.state.trackEditor === editor) { editor.progress = progress; if (progress.ratio === 1 || Date.now() - lastProgressAt >= 100) { lastProgressAt = Date.now(); this.render(); } } } });
+      current(); nextTrack.peaks = (output.peaks || await summarizeAudioEditSource(this.storage, output, { signal: operation.abort.signal })).map(peak => Math.min(128, peak)); current();
+      if (JSON.stringify(project) !== baseline) throw new Error('The project changed while preparing this edit. Try again.');
+      touch(next); const candidate = validateProject(next); current();
+      operation.committing = true; saveAttempted = true; safeToDelete = false;
+      candidateSave = this.saveChain = this.saveChain.catch(() => {}).then(() => this.storage.saveProject(candidate));
+      try { await candidateSave; saved = true; }
+      catch (error) {
+        // A lost acknowledgement can follow a successful database transaction.
+        // Never remove new PCM unless a fresh durable read proves it is unused.
+        try { const durable = await this.storage.loadProject(project.id); saved = referencedAssets(durable).includes(output.id); safeToDelete = !saved; }
+        catch { safeToDelete = false; }
+        if (!saved) throw error;
+      }
+      if (this.state.project !== project || this.state.storageFailed) return;
+      this.history.push(project); this.state.project = candidate; ++this.saveSerial;
+      (this.editorWaveforms ||= new Map()).set(output.id, nextTrack.peaks);
+      this.state.selectedTrackId = nextTrack.id; this.state.activeSectionId = null; this.state.queuedSectionId = null;
+      this.engine?.configure(candidate); this.engine?.syncTracks(candidate.tracks);
+      this.state.error = null; this.state.status = 'Saved on this device';
+      if (this.state.trackEditor === editor) Object.assign(editor, { assetId: output.id, frames: output.frames, startFrame: 0, endFrame: output.frames, cursorFrame: output.frames, error: null });
+      this.ui.notify('Audio edit saved. Undo restores the previous version.', 'success');
+    } catch (error) {
+      if (output && !saved && safeToDelete) {
+        try { await this.storage.deleteAsset(output.id); }
+        catch { this.retainRecoverable([output]); }
+      } else if (output && !saved && saveAttempted) {
+        this.retainRecoverable([output]);
+        // With neither a commit acknowledgement nor a readable manifest, pause
+        // further writes so autosave cannot overwrite a possibly saved edit.
+        if (this.state.project === project) {
+          this.state.readonly = true;
+          this.state.readonlyReason = 'The audio edit could not be verified. Reopen this project to check its saved version before editing again. Your original and edited audio are retained.';
+        }
+      }
+      if (this.state.trackEditor === editor && !isAbort(error)) editor.error = error.message;
+      if (!isAbort(error)) throw error;
+      if (this.state.project === project) this.state.status = 'Audio edit cancelled · original loop kept';
+    } finally {
+      // This operation already surfaced and reconciled the save error. Do not
+      // let a rejected acknowledgement poison every later flushSave call.
+      if (candidateSave && this.saveChain === candidateSave) this.saveChain = candidateSave.catch(() => {});
+      if (this.trackEditOperation === operation) { this.trackEditOperation = null; this.state.busy = false; }
+      if (this.state.trackEditor === editor) editor.progress = null;
+      this.render();
+    }
+  }
   async summarize(asset, points = 96) {
     const pages = Math.ceil(asset.frames / PAGE_FRAMES); if (!pages) return [];
     const peaks = [];
@@ -1046,7 +1240,8 @@ export class StudioController {
         // Retire all queued audio reads and prevent any in-flight project save
         // from restoring references after the worker has detached them.
         if (currentAffected) { clearTimeout(this.saveTimer); this.saveTimer = null; }
-        this.history.clear();
+        this.history.clear(); this.closeTrackEditor();
+        if (this.audioClipboard?.assetId === sourceAssetId) this.audioClipboard = null;
         this.closePreview(); this.microphoneOperation = null; this.state.micChanging = false;
         const engine = this.engine; this.engine = null;
         this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; this.state.audition = null;
@@ -1249,12 +1444,25 @@ export class StudioController {
     }
   }
   async handle(action = {}) {
+    if (this.trackEditOperation && !['editor-close', 'editor-stop-preview', 'dismiss-error'].includes(action.type)) throw new Error('Wait for the audio edit to finish, or close the editor to cancel.');
     if (this.state.storageFailed && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview'].includes(action.type)) throw new Error('Reopen the studio to recover saved recordings before continuing.');
     if (this.projectDeletion?.committing && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'stop', 'mic-off'].includes(action.type)) throw new Error('Wait for project deletion to finish before starting another operation.');
     if (this.fileDeletion?.committing && !['help', 'view', 'dismiss-error', 'close-preview'].includes(action.type)) throw new Error('Wait for file deletion to finish before starting another operation.');
     if (this.state.deletionPending && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'manage-storage', 'delete-project', 'projects', 'open-project', 'new-project', 'stop', 'mic-off', 'select-track'].includes(action.type)) throw new Error(this.state.readonlyReason || 'Retry permanent deletion in Manage storage, or open another project.');
     const p = this.state.project; if (!p && !['help', 'reload-studio', 'dismiss-error', 'view'].includes(action.type)) return;
     switch (action.type) {
+      case 'edit-track': return this.openTrackEditor(action.id);
+      case 'editor-select': return this.editorSelection(action);
+      case 'editor-cursor': return this.editorSelection({ cursorFrame: action.frame });
+      case 'editor-copy': return this.copyEditorSelection();
+      case 'editor-preview': return this.previewEditorSelection();
+      case 'editor-stop-preview': this.stopEditorPreview(); this.render(); return;
+      case 'editor-close': this.closeTrackEditor(); this.render(); return;
+      case 'editor-trim': { const editor = this.state.trackEditor; return this.applyTrackAudioEdit({ type: 'trim', startFrame: editor?.startFrame, endFrame: editor?.endFrame }); }
+      case 'editor-resize': return this.applyTrackAudioEdit({ type: 'resize', frames: action.frames, extension: action.extension || action.mode });
+      case 'editor-paste': { const editor = this.state.trackEditor; if (!this.audioClipboard) throw new Error('Copy a selection before pasting.'); return this.applyTrackAudioEdit({ type: 'paste', selection: this.audioClipboard, mode: action.mode, startFrame: action.mode === 'replace' ? editor?.startFrame : editor?.cursorFrame, endFrame: action.mode === 'replace' ? editor?.endFrame : editor?.cursorFrame }); }
+      case 'editor-undo': return this.handle({ type: 'undo' });
+      case 'editor-redo': return this.handle({ type: 'redo' });
       case 'enable-mic': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; await engine.enableMic(this.state.preferredDeviceId); return; }
       case 'select-microphone': return this.selectMicrophone(action.deviceId);
       case 'mic-off': { const loopsOnly = (this.pending?.kind || this.state.capture?.kind) === 'mix'; if (!loopsOnly) ++this.generation; if (this.pending && !loopsOnly) { this.pending.interrupted = true; this.engine?.send('interrupt', { reason: 'Microphone switched off' }); } this.engine?.disableMic(); if (!this.pending && !loopsOnly) { this.state.capture = null; if (!this.projectDeletion?.committing) this.state.busy = false; } p.input.monitor = false; this.state.monitor = false; this.render(); return; }
@@ -1274,7 +1482,7 @@ export class StudioController {
       case 'remove-track': this.edit(project => { project.tracks = project.tracks.filter(t => t.id !== action.id); this.engine?.send('remove-track', { id: action.id }); if (this.state.selectedTrackId === action.id) this.state.selectedTrackId = project.tracks[0]?.id || null; }); return;
       case 'role': { if (!Object.hasOwn(COLORS, action.role)) throw new Error('Choose one of the available sound presets.'); this.edit(project => { const t = project.tracks.find(t => t.id === action.id) || project.takes.find(t => t.id === action.id); if (t) { t.role = action.role; t.mix = roleMix(action.role, t.mix); t.color = COLORS[action.role]; this.engine?.send('mix', { id: t.id, mix: t.mix }); } }); return; }
       case 'nudge': this.edit(project => { const t = project.tracks.find(t => t.id === action.id); if (t) { t.offsetFrames += Math.round(Number(action.frames) || 0); this.engine?.send('track', { track: t }); } }); return;
-      case 'undo': case 'redo': { this.assertWritable(); this.assertIdle(); const restored = this.history[action.type](p); if (restored) { delete restored.pendingCapture; this.state.project = restored; touch(restored); this.engine?.send('cancel-section'); this.state.queuedSectionId = null; this.state.activeSectionId = null; const damaged = new Set((this.audioIntegrityIssues || this.state.damagedAudio).map(asset => asset.assetId)); const playable = restored.tracks.filter(track => !damaged.has(track.assetId)); if (playable.length !== restored.tracks.length) { this.engine?.stop(); this.state.playing = false; this.releaseWake(); } this.engine?.configure(restored); this.engine?.syncTracks(playable); this.scheduleSave(); this.render(); } return; }
+      case 'undo': case 'redo': { this.assertWritable(); this.assertIdle(); this.stopEditorPreview(); const restored = this.history[action.type](p); if (restored) { delete restored.pendingCapture; this.state.project = restored; touch(restored); this.engine?.send('cancel-section'); this.state.queuedSectionId = null; this.state.activeSectionId = null; const damaged = new Set((this.audioIntegrityIssues || this.state.damagedAudio).map(asset => asset.assetId)); const playable = restored.tracks.filter(track => !damaged.has(track.assetId)); if (playable.length !== restored.tracks.length) { this.engine?.stop(); this.state.playing = false; this.releaseWake(); } this.engine?.configure(restored); this.engine?.syncTracks(playable); this.scheduleSave(); this.render(); } return; }
       case 'set-input': this.edit(project => { if (action.gain !== undefined) project.input.gain = Math.max(0, Math.min(4, Number(action.gain))); if (action.compensationMs !== undefined) { if (this.pending) throw new Error('Finish recording before changing timing compensation.'); project.input.compensationMs = Math.max(0, Math.min(1000, Number(action.compensationMs))); } this.engine?.configure(project); }, 'input'); return;
       case 'set-master': this.edit(project => { project.master.volume = Math.max(0, Math.min(2, Number(action.volume))); this.engine?.configure(project); }, 'master'); return;
       case 'set-metronome': {
@@ -1371,5 +1579,5 @@ export class StudioController {
     engine.send('audition', { take: { ...take, mix: take.mix || roleMix('lead') }, startFrame: take.startFrame, tailFrames: this.state.sampleRate * 2 });
     this.state.status = 'Loading live mix audition…'; this.keepAwake(); this.render();
   }
-  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
+  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); if (!this.trackEditOperation) this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
 }
