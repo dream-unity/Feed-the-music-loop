@@ -451,6 +451,7 @@ test('retained recordings stay out of the studio and are recoverable beside thei
   await expect(page.locator('[data-ref="capture-panel"]')).toBeInViewport();
 
   await view(page, 'mix');
+  await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
   const original = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${fixture.originalTrackId}"]`).click());
   expect(inspectWav(original.bytes).peak).toBeGreaterThan(0.005);
   await view(page, 'build');

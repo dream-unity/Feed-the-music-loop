@@ -133,6 +133,13 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page.addInitScript(() => {
     window.__masterMicRequests = 0;
     navigator.mediaDevices.getUserMedia = async () => { window.__masterMicRequests++; throw new DOMException('Mastering saved audio does not need a microphone.', 'NotAllowedError'); };
+    // The app permits blob media playback, but its connect-src policy does not
+    // permit fetch(blob:). Retain the actual preview Blob for byte inspection
+    // while preserving the browser's create/revoke behavior and URL lifetime.
+    window.__masterPreviewBlobs = new Map();
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = blob => { const url = create(blob); window.__masterPreviewBlobs.set(url, blob); return url; };
+    URL.revokeObjectURL = url => { window.__masterPreviewBlobs.delete(url); return revoke(url); };
   });
 });
 test.afterEach(async ({ page }, testInfo) => {
@@ -192,7 +199,9 @@ test('saved songs, performances, takes and mixes can be mastered as independent 
   const remixed = await download(page, () => target.getByRole('button', { name: 'Render new mix', exact: true }).click());
   const remixedPcm = wav(remixed.bytes);
   expect(remixedPcm.length).toBe((source.frames + 2 * RATE) * 8);
-  expect(new Float32Array(remixedPcm.buffer, remixedPcm.byteOffset, remixedPcm.byteLength / 4).every(value => value === 0)).toBe(true);
+  let nonzero = 0;
+  for (let offset = 0; offset < remixedPcm.length; offset += 4) if (remixedPcm.readFloatLE(offset) !== 0) nonzero++;
+  expect(nonzero).toBe(0);
   const remixState = await snapshot(page), remix = remixState.assets.find(asset => asset.sourcePerformanceId === fixture.loopPerformanceId);
   expect(remix).toBeDefined(); expect(remixState.project.selectedTakeId).toBe(fixture.takeId);
   await page.getByRole('button', { name: 'Songs & recordings', exact: true }).click();
@@ -248,7 +257,9 @@ test('recording import preserves stereo; previews stay temporary and the masteri
   await expect(preview).toBeVisible();
   await expect.poll(() => preview.evaluate(audio => audio.duration)).toBeCloseTo(1.5, 5);
   const tailHash = await preview.evaluate(async audio => {
-    const blob = await (await fetch(audio.currentSrc || audio.src)).arrayBuffer();
+    const recording = window.__masterPreviewBlobs.get(audio.getAttribute('src'));
+    if (!(recording instanceof Blob)) throw new Error('The active preview Blob was revoked or replaced.');
+    const blob = await recording.arrayBuffer();
     const data = new DataView(blob); let offset = 12;
     while (offset + 8 <= data.byteLength) {
       const length = data.getUint32(offset + 4, true);
