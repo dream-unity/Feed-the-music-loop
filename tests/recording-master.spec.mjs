@@ -112,12 +112,15 @@ function wav(bytes) {
 }
 
 function importWav() {
-  const pcm = samples(RATE, 2, 229), data = Buffer.alloc(44 + pcm.length * 2);
+  // Float32 WAV avoids browsers' differing PCM16 full-scale conventions:
+  // Firefox divides positive integers by 32767; Chromium/WebKit use 32768.
+  // This fixture therefore permits an exact source-to-import PCM assertion.
+  const pcm = samples(RATE, 2, 229), data = Buffer.alloc(44 + pcm.length * 4);
   data.write('RIFF', 0); data.writeUInt32LE(data.length - 8, 4); data.write('WAVEfmt ', 8);
-  data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(2, 22);
-  data.writeUInt32LE(RATE, 24); data.writeUInt32LE(RATE * 4, 28); data.writeUInt16LE(4, 32); data.writeUInt16LE(16, 34);
-  data.write('data', 36); data.writeUInt32LE(pcm.length * 2, 40);
-  for (let i = 0; i < pcm.length; i++) data.writeInt16LE(Math.round(pcm[i] * 32768), 44 + i * 2);
+  data.writeUInt32LE(16, 16); data.writeUInt16LE(3, 20); data.writeUInt16LE(2, 22);
+  data.writeUInt32LE(RATE, 24); data.writeUInt32LE(RATE * 8, 28); data.writeUInt16LE(8, 32); data.writeUInt16LE(32, 34);
+  data.write('data', 36); data.writeUInt32LE(pcm.length * 4, 40);
+  bytes(pcm).copy(data, 44);
   return { data, expected: bytes(pcm) };
 }
 
