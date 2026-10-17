@@ -831,7 +831,10 @@ export class StudioController {
         }
       }
       if (this.state.trackEditor === editor && !isAbort(error)) editor.error = error.message;
-      if (!isAbort(error)) throw error;
+      if (!isAbort(error)) {
+        if (this.state.project === project) this.state.status = safeToDelete ? 'Audio edit not saved · original loop kept' : 'Audio edit needs verification · read only';
+        throw error;
+      }
       if (this.state.project === project) this.state.status = 'Audio edit cancelled · original loop kept';
     } finally {
       // This operation already surfaced and reconciled the save error. Do not
