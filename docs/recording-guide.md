@@ -52,7 +52,7 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
    **Export → Hear current mix** auditions the selected vocal with the layers as they are now; it does not replay the section sequence. **Render WAV**, under **Current sound, recorded arrangement**, follows the selected take’s recorded entrances, mutes, solos and section changes using your current sound settings. It adds a short effect tail. Download and listen to that render when checking the complete revised arrangement.
 
-   **Recorded performances** downloads the original stereo capture, preserving the performed sound and changes. Later mixer edits do not rewrite it. In **Mix**, **Download original vocal** or **Download original layer** preserves the separate source without playback effects; captured input gain and recording alignment remain part of that source.
+   **Recorded performances** downloads the original stereo capture, preserving the performed sound and changes. Later mixer or loop edits do not rewrite it. In **Mix**, **Download original vocal** keeps the separate vocal, while **Download layer WAV** keeps the current layer, including any audio edits. These downloads exclude playback effects; captured input gain remains part of the audio.
 
 9. **Keep a copy outside the browser.**
 
@@ -61,6 +61,24 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
    Long recordings depend on available storage and device performance. If an export produces numbered WAV parts, download every part before closing the page. Some browser storage fallbacks cannot preview or bundle very large individual recordings; keep their numbered original WAVs when prompted.
 
    On a phone, keep the studio visible and the screen awake. Calls, screen locking or another app taking the microphone can interrupt a take. Test a short complete recording and export on your device first. If an interruption occurs, follow the recovery notice and listen to the retained audio before relying on it.
+
+## Edit a loop or reuse a selected moment
+
+Choose **Edit** on a loop card, or **Edit audio** for a loop in **Mix**. The studio stops playback and reads the whole track to display its waveform; longer recordings can take a moment. Finish or discard an active recording before opening the editor.
+
+- **Keep only a moment:** drag across the waveform, or enter **Selection start** and **Selection end** in seconds. **Listen to selection** checks the chosen audio. **Trim to selection** makes that interval the whole loop.
+- **Shorten or lengthen:** enter **New length**, then choose **Set length**. A shorter length removes audio from the end. For a longer length, **Repeat this track** repeats its existing audio up to the requested ending; **Add silence** preserves the audio and adds a silent ending. Playback speed and pitch stay the same.
+- **Copy part of a loop:** select the desired interval and choose **Copy selection**. Use **Track to edit** to choose the destination, including the original loop. The copied interval stays fixed even if you subsequently edit the source.
+- **Insert copied audio:** choose **Insert at cursor**, tap the waveform or enter **Paste position**, then choose **Paste**. Audio after the cursor moves later, so the loop becomes longer. A cursor at the track ending appends the copied audio.
+- **Replace a moment:** select the destination interval, choose **Replace selection**, then **Paste**. The copied audio replaces that interval; later audio follows it. The resulting length depends on the difference between the selected interval and the copied interval.
+
+The editor shows the resulting paste length before you apply it. Times are rounded to the nearest audio sample; a selection includes its starting sample and stops just before its ending sample. You can also focus either waveform selection handle and use the arrow keys to move it one sample at a time.
+
+Each edit saves immediately. **Undo** and **Redo** restore earlier versions during the current session; **Done** closes the editor. Copying does not change the source. The clipboard is available within the current project and clears when you change projects or reload the studio.
+
+Editing keeps the loop's mix, section membership and starting alignment. Its new duration does not resize the shared groove cycle or other loops. The chosen interval starts at the loop's existing entrance, so trimming the beginning can change which sound lands there. Existing vocal takes and recorded stereo performances stay intact. To edit a separate vocal take as a repeating layer, choose **Turn into a loop** first.
+
+Previous audio stays in **Storage**, so shortening a loop does not automatically reclaim recording space. Only permanent deletion removes those saved bytes. Edited loops are limited to 24 hours per operation and available storage. Selection listening has a 32 MiB audio limit to keep memory use bounded; a longer selection can still be copied and edited.
 
 ## Make a full song using only your loops
 

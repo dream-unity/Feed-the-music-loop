@@ -111,6 +111,31 @@ test('current mix keeps performed sections while original mode replays recorded 
   assert.ok(rms(b, 40000, 50000) > rms(a, 40000, 50000) * 3);
 });
 
+test('replacing a loop with edited stereo audio changes current rendering while recorded arrangements keep original PCM', async () => {
+  const { storage, project } = await fixture();
+  const options = { mode: 'performance', tailSeconds: 0, prerollSeconds: 0 };
+  const originalTrack = structuredClone(project.tracks[0]);
+  const originalSource = storage.samples(originalTrack.assetId).slice();
+  const before = await renderEditedMix(storage, project, options);
+  const recorded = storage.samples(before.assetId).slice();
+  await addAudio(storage, project, 'edited-loop', 7003, 2, (frame, channel) => Math.sin(frame * (channel ? .081 : .037)) * .12);
+  Object.assign(project.tracks[0], { assetId: 'edited-loop', frames: 7003, channels: 2 });
+  const currentPlan = await prepareRenderPlan(storage, project, { ...options, mode: 'current' });
+  const originalPlan = await prepareRenderPlan(storage, project, options);
+  assert.equal(currentPlan.tracks[0].assetId, 'edited-loop');
+  assert.equal(currentPlan.tracks[0].frames, 7003);
+  assert.equal(currentPlan.tracks[0].channels, 2);
+  assert.equal(originalPlan.tracks[0].assetId, originalTrack.assetId);
+  assert.equal(originalPlan.tracks[0].frames, originalTrack.frames);
+  assert.equal(currentPlan.baseFrames, 17003, 'editing one loop must not move the recorded groove boundaries');
+  const after = await renderEditedMix(storage, project, options);
+  assert.deepEqual(storage.samples(after.assetId), recorded, 'original arrangement rendering must remain byte-for-byte reproducible');
+  const edited = await renderEditedMix(storage, project, { ...options, mode: 'current' });
+  assert.notDeepEqual(storage.samples(edited.assetId), recorded);
+  assert.deepEqual(storage.samples(originalTrack.assetId), originalSource);
+  assert.deepEqual(project.performances[0].initialState.tracks[0], originalTrack);
+});
+
 test('natural FX tail continues after source cutoff and ends with a taper', async () => {
   const { storage, project } = await fixture({ vocal: false });
   project.tracks[0].mix.reverb = .6; project.tracks[0].mix.delay = .5;

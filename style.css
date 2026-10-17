@@ -1091,3 +1091,86 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .storage-accounting dl > div { flex-wrap: wrap; gap: 5px; }
   .storage-accounting dd { text-align: left; }
 }
+
+/* Selection edits stay with the track and share the studio's local save history. */
+.track-audio-edit { min-height: 44px; padding: 8px 11px; color: var(--mint); font-size: 11px; }
+.track-audio-edit .icon { width: 16px; height: 16px; }
+.mixer-header:has([data-action="edit-track"]) { flex-wrap: wrap; }
+.mixer-header:has([data-action="edit-track"]) > div { margin-right: auto; }
+.studio-dialog.track-editor-dialog { width: min(900px,calc(100vw - 32px)); max-height: 92dvh; }
+.track-editor-dialog .dialog-heading { margin-bottom: 18px; }
+.track-editor-dialog .dialog-actions { position: sticky; bottom: 0; margin: 18px -24px -24px; padding: 16px 24px; background: #192225f5; border-top: 1px solid var(--line); z-index: 4; }
+.track-editor-dialog .dialog-actions [data-action="editor-close"] { margin-left: auto; }
+.track-editor { min-width: 0; }
+.editor-intro { display: flex; align-items: end; gap: 20px; justify-content: space-between; }
+.editor-track-picker { display: grid; gap: 8px; font-size: 11px; color: var(--muted); width: min(380px,65%); }
+.editor-track-picker select { min-height: 48px; font-size: 13px; }
+.editor-track-info { text-align: right; }
+.editor-track-info span, .editor-selected-time > span { display: block; color: var(--dim); font-size: 8px; letter-spacing: 1px; margin-bottom: 6px; }
+.editor-track-info strong { font-size: 18px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.editor-instructions { color: var(--muted); font-size: 11px; margin: 18px 0 12px; }
+.editor-wave { position: relative; height: 152px; border-radius: 11px; background: #10181a; border: 1px solid var(--line); touch-action: none; user-select: none; margin: 0 21px; cursor: crosshair; }
+.editor-wave > svg { width: 100%; height: 100%; display: block; fill: var(--mint); color: var(--mint); opacity: .7; border-radius: 11px; }
+.editor-selection { position: absolute; top: 0; bottom: 0; background: #a5e5cf19; border-block: 1px solid #a5e5cf5e; pointer-events: none; }
+.editor-handle, .editor-cursor { position: absolute; width: 44px; min-height: 44px; left: 0; transform: translateX(-50%); padding: 0; touch-action: none; background: transparent; color: var(--mint); }
+.editor-handle { top: 0; bottom: 0; cursor: ew-resize; z-index: 2; }
+.editor-handle > span { position: absolute; top: 0; bottom: 0; width: 2px; left: 21px; background: var(--mint); }
+.editor-handle > span::after { content: ''; position: absolute; height: 31px; width: 8px; border-radius: 3px; background: var(--mint); top: calc(50% - 15px); left: -3px; box-shadow: 0 0 0 3px #10181a; }
+.editor-handle:active:not(:disabled), .editor-cursor:active:not(:disabled) { transform: translateX(-50%); }
+.editor-handle:focus-visible { outline-offset: 0; border-radius: 6px; background: #a5e5cf12; }
+.editor-cursor { bottom: -9px; height: 44px; color: var(--coral); z-index: 3; cursor: ew-resize; }
+.editor-cursor > span { position: absolute; bottom: 9px; left: 21px; width: 1px; height: 139px; background: var(--coral); pointer-events: none; }
+.editor-cursor > span::after { content: ''; position: absolute; bottom: 0; left: -5px; border-bottom: 9px solid var(--coral); border-inline: 5px solid transparent; }
+.editor-cursor:focus-visible { outline-color: var(--coral); border-radius: 5px; }
+.editor-ruler { display: flex; justify-content: space-between; padding: 9px 21px 0; color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; }
+.editor-selection-fields { margin: 19px 0 12px; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) minmax(95px,.7fr); gap: 14px; align-items: end; }
+.editor-field { min-width: 0; display: grid; gap: 8px; color: var(--muted); font-size: 10px; }
+.editor-number { position: relative; display: flex; min-width: 0; }
+.editor-number input { width: 100%; min-height: 48px; padding-right: 25px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.editor-number > span { position: absolute; right: 12px; top: 16px; font-size: 12px; pointer-events: none; color: var(--dim); }
+.editor-field select { min-height: 48px; }
+.editor-selected-time { padding: 9px 0 12px; text-align: right; }
+.editor-selected-time output { color: var(--mint); font-size: 18px; font-variant-numeric: tabular-nums; }
+.editor-selection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.editor-selection-actions .button { min-height: 48px; }
+.editor-selection-actions [data-editor-action="trim"] { margin-left: auto; }
+.editor-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; padding: 12px; border: 1px solid #3d554a; border-radius: 10px; background: #23322c; }
+.editor-preview audio { width: min(100%,420px); flex: 1; min-width: 220px; height: 42px; }
+.editor-tools { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.editor-tool { display: flex; flex-direction: column; min-width: 0; padding: 16px; background: #11191b66; border: 1px solid var(--line); border-radius: 12px; }
+.editor-tool h3 { font-size: 13px; margin-bottom: 7px; }
+.editor-tool p { color: var(--muted); font-size: 10px; min-height: 49px; }
+.editor-length-fields, .editor-paste-fields { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.25fr); gap: 10px; margin: 14px 0; }
+.editor-tool .button { align-self: flex-start; min-height: 48px; margin-top: auto; }
+.editor-tool .editor-paste-result { margin-bottom: 12px; min-height: 0; color: var(--dim); }
+.editor-tool .editor-clipboard { color: var(--mint); overflow-wrap: anywhere; }
+.editor-error { color: var(--danger); font-size: 12px; margin-top: 14px; }
+.editor-error:empty { display: none; }
+.editor-status { font-size: 11px; color: var(--mint); margin-top: 16px; min-height: 18px; }
+.editor-save-note { color: var(--dim); font-size: 10px; margin-top: 6px; }
+@media (max-width: 640px) {
+  .track-editor-dialog form { padding: 18px; }
+  .track-editor-dialog .dialog-actions { bottom: 0; margin: 18px -18px -18px; padding: 12px 18px; gap: 7px; }
+  .track-editor-dialog .dialog-actions .button { padding: 10px 12px; }
+  .track-editor-dialog .dialog-heading .dialog-stop { font-size: 0; gap: 0; min-width: 44px; padding: 10px; }
+  .editor-wave { height: 130px; margin-inline: 21px; }
+  .editor-cursor > span { height: 117px; }
+  .editor-track-picker { width: 64%; }
+  .editor-track-info strong { font-size: 15px; }
+  .editor-selection-fields { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+  .editor-selected-time { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; padding: 2px 0 1px; }
+  .editor-selected-time > span { margin: 0; }
+  .editor-selected-time output { font-size: 15px; }
+  .editor-selection-actions { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .editor-selection-actions .button { min-width: 0; padding: 10px 7px; font-size: 10px; }
+  .editor-selection-actions [data-editor-action="trim"] { margin: 0; }
+  .editor-tools { grid-template-columns: minmax(0,1fr); gap: 12px; margin-top: 18px; padding-top: 16px; }
+  .editor-tool { padding: 14px; }
+  .editor-tool p { min-height: 0; }
+  .editor-preview audio { min-width: 0; flex-basis: 100%; }
+  .editor-preview .button { min-height: 44px; }
+  .track-audio-edit { padding: 8px 10px; }
+  .track-audio-edit .icon { display: none; }
+}
+.editor-wave-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; z-index: 1; }
+.editor-wave.is-loading > svg, .editor-wave.is-loading .editor-selection, .editor-wave.is-loading .editor-handle, .editor-wave.is-loading .editor-cursor { visibility: hidden; }

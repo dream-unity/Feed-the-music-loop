@@ -28,6 +28,7 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 - Sample-frame transport, loop boundaries and queued section changes in an `AudioWorklet`.
 - Live audition of a selected lead with the current mixer, plus the original performance player.
 - Individual layer mute, solo, naming, color, timing adjustment and reversible role presets.
+- Waveform editing for every loop: select precise moments, trim, shorten or extend with repeats/silence, and copy a selection into the same or another track. Each edit saves a separate audio version and supports session Undo/Redo.
 - Per-layer and vocal processing, shared room/echo effects and a master safety soft ceiling.
 - Project undo/redo, saved sections, audio import, local projects and autosave.
 - Discarded takes release their audio storage after the project is safely saved; failed cleanup remains visible with a retry action.

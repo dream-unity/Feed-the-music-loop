@@ -27,6 +27,16 @@ The WebKit test environment uses IndexedDB and cannot inspect OPFS. The test req
 
 Browser usage, quota and remaining recording time are estimates. File rows report measured PCM or cached-response bytes; metadata reports encoded size. These are intentionally not described as exact physical disk allocation. The app cannot inspect downloaded files or other apps’ private storage.
 
+## Track editor verification
+
+The editor checks selected intervals as integer, half-open sample ranges. Deterministic tests compare trimmed, repeated, silence-extended, inserted and replaced audio against exact expected PCM, including page boundaries, single-sample ranges, self-paste and mono/stereo combinations. An independent seeded oracle checks 120 additional combinations against a direct sample-array implementation. The renderer keeps bounded source and output pages rather than allocating an entire edited recording. Waveform tests place transients across the whole source, verify time-proportional bins and ensure cancellation stops the scan without modifying audio.
+
+Controller tests verify immediate durable saves, stable track IDs and groove timing, Undo/Redo, unchanged source audio, clipboard selection races, cancelled edits, capture/read-only exclusions and interrupted work. A failed save must leave the original working track and history intact. A lost acknowledgement is reconciled against the saved manifest; if neither the acknowledgement nor manifest can establish what was saved, further writes pause and both audio versions are retained. The suite also verifies that a handled save failure does not prevent a later retry.
+
+The portable browser scenario runs in Chromium, Firefox and WebKit. It edits deterministic stored audio through the interface, compares PCM hashes, previews a selection, pastes within the source and into another track, changes lengths, reloads the project, checks its backup and preserves original audio. Responsive checks cover editor controls on narrow screens. The public-site scenario additionally trims and pastes a real recorded source, downloads the result and compares its exact samples with the expected concatenation.
+
+Original recorded performances remain independent of later loop edits. Export tests verify that current-sound rendering uses edited audio while original-performance rendering retains its historical sources. These checks establish sample selection and persistence; they do not promise click-free creative splice points or a particular musical result. Playback retains the studio's existing loop-edge taper, while saved PCM keeps the selected samples unchanged. Selection preview is limited to 32 MiB; full edits stream up to 24 hours subject to available storage.
+
 ## What the checks establish
 
 | Area | Evidence | Boundary of the result |

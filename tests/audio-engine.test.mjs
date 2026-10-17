@@ -120,6 +120,38 @@ test('same-asset reconciliation preserves DSP state and reports actual command f
   const h=harness();h.arm({lengthFrames:1000});h.run(1100,()=>.1);const dsp=h.engine.tracks.get('track').dsp;h.engine.command({type:'track',track:{...h.engine.tracks.get('track').track,name:'renamed'}});assert.equal(h.engine.tracks.get('track').dsp,dsp);const ack=h.events.filter(e=>e.type==='command').at(-1);assert.equal(ack.command,'track');assert.equal(ack.frame,1100);
 });
 
+test('an edited replacement changes the same loop from mono to stereo and wraps at its new length',()=>{
+  const h=harness({pageFrames:256});
+  function source(id,frames,channels){
+    const pages=new Map();
+    for(let start=0,index=0;start<frames;start+=256,index++){
+      const count=Math.min(256,frames-start),pcm=new Float32Array(count*channels);
+      for(let frame=0;frame<count;frame++)for(let channel=0;channel<channels;channel++)pcm[frame*channels+channel]=Math.sin((start+frame)*(channel?.07:.03)+channel)*.1;
+      pages.set(index,{buffer:pcm.buffer,frames:count,channels});
+    }
+    h.assets.set(id,{pages,frames,channels,status:'complete'});
+  }
+  source('original',1003,1);source('edited',613,2);
+  const track={id:'same-loop',assetId:'original',frames:1003,channels:1,offsetFrames:97,mix:{volume:1,pan:0,highpass:0,compression:0,reverb:0,delay:0}};
+  h.engine.command({type:'configure',baseFrames:1003});
+  h.engine.command({type:'track',track});h.engine.command({type:'play'});h.run(1500);
+  h.engine.command({type:'stop'});
+  h.engine.command({type:'track',track:{...track,assetId:'edited',frames:613,channels:2}});
+  assert.equal(h.engine.tracks.size,1);
+  assert.equal(h.engine.tracks.get(track.id).cache.channels,2);
+  assert.equal(h.engine.baseFrames,1003);
+  h.engine.command({type:'play'});const sound=h.run(613*4,()=>0,73);
+  assert(sound.l.some(sample=>Math.abs(sample)>.01));
+  // Loop playback deliberately downmixes stereo sources before the per-layer
+  // vocal DSP; both channels must reach its new cache without stale mono data.
+  assert(sound.r.some(sample=>Math.abs(sample)>.01));
+  assert(h.reads.some(read=>read.assetId==='edited'&&read.index===2));
+  assert.equal(h.engine.tracks.get(track.id).cache.sample(612,1),new Float32Array(h.assets.get('edited').pages.get(2).buffer)[201]);
+  assert(!h.events.some(event=>event.type==='underrun'));
+  assert.equal(h.samples('original').length,1003);
+  assert.equal(h.engine.tracks.get(track.id).track.frames,613);
+});
+
 test('first loop establishes zero origin after an empty transport and cancelled capture',()=>{
   const h=harness();h.engine.command({type:'play'});h.run(333);h.arm();assert.equal(h.engine.frame,0);h.run(511);h.engine.command({type:'cancel'});h.run(99);h.arm({id:'second',assetId:'second-raw',lengthFrames:1003});assert.equal(h.engine.frame,0);h.run(1004);const end=h.events.find(e=>e.type==='capture-end'&&e.captureId==='second');assert.equal(end.startFrame,0);assert.equal(end.track.offsetFrames,0);assert.equal(h.engine.baseFrames,1003);
 });

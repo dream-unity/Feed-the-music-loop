@@ -4,6 +4,15 @@ import { readFile } from 'node:fs/promises';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
+function pcmData(bytes) {
+  for (let offset = 12; offset + 8 <= bytes.length;) {
+    const length = bytes.readUInt32LE(offset + 4);
+    if (bytes.subarray(offset, offset + 4).toString() === 'data') return bytes.subarray(offset + 8, offset + 8 + length);
+    offset += 8 + length + length % 2;
+  }
+  throw new Error('WAV contains no audio data');
+}
+
 function inspectRecording(bytes, channels = 1) {
   expect(bytes.subarray(0, 4).toString()).toBe('RIFF');
   expect(bytes.subarray(8, 12).toString()).toBe('WAVE');
@@ -42,7 +51,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
   const expectedHash = process.env.FML_EXPECTED_SW_SHA256;
   const swURL = new URL('sw.js', baseURL).href;
   const errors = [], unexpectedRequests = [], indexResponses = [], propagationChecks = [];
-  let servedWorker, finalWorkerHash, registration, recording, loopRecording;
+  let servedWorker, finalWorkerHash, registration, recording, loopRecording, originalLoopBytes, editedRecording;
   page.on('pageerror', error => errors.push(error.message));
   context.on('request', incoming => {
     const url = new URL(incoming.url());
@@ -128,7 +137,8 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     const file = await downloading;
     expect(await file.failure()).toBeNull();
     expect(file.suggestedFilename()).toMatch(/\.wav$/i);
-    recording = inspectRecording(await readFile(await file.path()));
+    originalLoopBytes = await readFile(await file.path());
+    recording = inspectRecording(originalLoopBytes);
     // Prove the deployed loop-only action works after disconnecting the mic.
     await page.locator('[data-action="view"][data-view="build"]').click();
     await page.evaluate(() => {
@@ -170,6 +180,43 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await page.screenshot({ path: storageScreenshot, animations: 'disabled' });
     await testInfo.attach('live-storage-manager', { path: storageScreenshot, contentType: 'image/png' });
     await storageDialog.getByRole('button', { name: 'Done', exact: true }).click();
+    // Exercise the editor in the exact deployed shell, using real recorded
+    // samples rather than a mocked model. The copied selection must survive
+    // trimming its source and paste at the requested sample position.
+    await page.locator('.loop-card [data-action="edit-track"]').first().click();
+    const editor = page.getByTestId('track-editor');
+    await expect(editor).toBeVisible();
+    await editor.getByLabel('Selection end in seconds', { exact: true }).fill('0.875');
+    await editor.getByLabel('Selection end in seconds', { exact: true }).press('Tab');
+    await editor.getByLabel('Selection start in seconds', { exact: true }).fill('0.125');
+    await editor.getByLabel('Selection start in seconds', { exact: true }).press('Tab');
+    await editor.getByRole('button', { name: 'Copy selection', exact: true }).click();
+    await expect(editor.locator('[data-editor-ref="clipboard"]')).toContainText('0.75 s copied.');
+    await editor.getByRole('button', { name: 'Trim to selection', exact: true }).click();
+    const editorLength = editor.getByLabel('Track length in seconds', { exact: true });
+    await expect.poll(async () => Number(await editorLength.inputValue())).toBe(.75);
+    await editor.getByLabel('Paste position in seconds', { exact: true }).fill('0.25');
+    await editor.getByLabel('Paste position in seconds', { exact: true }).press('Tab');
+    await editor.getByRole('button', { name: 'Paste', exact: true }).click();
+    await expect.poll(async () => Number(await editorLength.inputValue())).toBe(1.5);
+    await expect(page.locator('[data-ref="save-state"]')).toHaveText('Saved on this device');
+    const editorScreenshot = testInfo.outputPath('review-live-track-editor.png');
+    await page.screenshot({ path: editorScreenshot, animations: 'disabled' });
+    await testInfo.attach('live-track-editor', { path: editorScreenshot, contentType: 'image/png' });
+    await page.getByRole('dialog', { name: 'Edit audio', exact: true }).getByRole('button', { name: 'Done', exact: true }).click();
+    await page.locator('[data-action="view"][data-view="mix"]').click();
+    const editedDownload = page.waitForEvent('download');
+    await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
+    const editedFile = await editedDownload;
+    expect(await editedFile.failure()).toBeNull();
+    const editedBytes = await readFile(await editedFile.path());
+    editedRecording = inspectRecording(editedBytes);
+    const originalPCM = pcmData(originalLoopBytes), rate = recording.sampleRate;
+    const copied = originalPCM.subarray(Math.round(.125 * rate) * 4, Math.round(.875 * rate) * 4);
+    const pasteByte = Math.round(.25 * rate) * 4;
+    const expectedPCM = Buffer.concat([copied.subarray(0, pasteByte), copied, copied.subarray(pasteByte)]);
+    expect(pcmData(editedBytes).equals(expectedPCM)).toBe(true);
+    await page.locator('[data-action="view"][data-view="build"]').click();
     // Recheck the network after the recording. A competing branch-root Pages
     // publish must not replace this package while its cached shell still works.
     const finalWorker = await request.get(swURL, { timeout: 10_000, maxRedirects: 0, headers: { 'Cache-Control': 'no-cache' } });
@@ -186,7 +233,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await testInfo.attach('live-pages-studio', { path: screenshot, contentType: 'image/png' });
   } finally {
     await testInfo.attach('live-deployment-evidence', {
-      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
+      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, editedRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',
     });
   }
