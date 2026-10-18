@@ -7,8 +7,8 @@ A vocal looper and song studio that runs entirely in your browser. Record a beat
 ## Make your first song
 
 1. Open the studio over HTTPS and use headphones. Wired headphones avoid the extra delay common with Bluetooth.
-2. Choose **Add loop**. Allow microphone access, perform your first beat, then finish the loop. Its length becomes your song's base cycle.
-3. Add another loop. Choose a cycle length to keep layers aligned, or an independent length for evolving patterns. Your existing layers keep playing.
+2. Under **New loop length**, keep **Free** to finish when ready, or choose **Custom duration** and enter seconds. Choose **Add loop** and allow microphone access. The finished first loop sets your song's base cycle.
+3. Add another loop using free length, custom seconds or a chosen number of cycles. Recording starts immediately by default; choose **Next cycle** explicitly when you want to enter on the groove's boundary. Your existing layers keep playing.
 4. Choose **Sing over loops** and sing for as long as you need. Finish when you are done. The studio keeps the separate vocal and a stereo recording of the complete performance.
 5. Open **Mix → Layers & vocals** to adjust individual sounds. Use **Songs & recordings**, or a recording's **Mix & master** button, to select a saved performance, loop-only song, vocal, loop or imported recording and render a separate mastered WAV.
 6. Save sections such as an intro and chorus, and launch them at cycle boundaries while performing. Use the Song view to audition takes, export the original performance, or render an edited mix.
@@ -20,7 +20,7 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 
 ## What is included
 
-- Free-length first loop; additional synchronized or independent loops.
+- Free-length or custom timed loops, including the first recording; optional cycle multiples for synchronized lengths. Duration and start preferences are saved with the project.
 - Optional click and four- or eight-beat first-loop count-in. The click follows your loop's subdivisions and stays out of the recorded mix.
 - Microphone input selection for built-in, USB and headset inputs after permission is granted. Switching is blocked during recording and keeps the previous input if the replacement fails.
 - Separate continuous lead recordings while loops play.
@@ -43,6 +43,8 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 ## Audio and recording behavior
 
 Audio runs on the browser's audio rendering thread. Interface redraws do not set loop timing. The engine uses actual render-block lengths rather than assuming every block contains 128 frames.
+
+New projects and older projects without recording preferences default to free length and an immediate start. A two-second demo cycle does not limit new recordings. Custom seconds are rounded to the nearest audio sample; choosing a cycle count makes the duration that many times the existing base cycle. **Finish recording** can end either kind early. **Next cycle** controls only when recording starts, and the optional first-loop count-in works for both free and timed loops. With a ready microphone, immediate capture starts on the next audio render block after preparation; first-use permission, hardware startup and deliberate recording compensation remain separate from that setting.
 
 Microphone input is recorded separately from the loop mix. Playback is not captured through the microphone intentionally: headphones prevent speaker bleed. Monitoring is off by default because software monitoring adds device latency and speakers can feed back.
 

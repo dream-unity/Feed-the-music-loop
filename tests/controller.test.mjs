@@ -1529,7 +1529,7 @@ test('record all loops never requests a microphone and prepares one stereo maste
   const asset = f.storage.beginCalls[0], pending = f.controller.pending, capture = f.engine.commands.find(command => command.type === 'arm').capture;
   assert.equal(asset.channels, 2); assert.equal(asset.kind, 'master'); assert.equal(asset.source, 'loops');
   assert.equal(asset.name, 'Loop recording 1'); assert.equal(asset.leadAssetId, undefined); assert.equal(asset.track, undefined);
-  assert.equal(capture.kind, 'mix'); assert.equal(capture.masterAssetId, null); assert.equal(capture.lengthFrames, 0); assert.equal(capture.quantized, true);
+  assert.equal(capture.kind, 'mix'); assert.equal(capture.masterAssetId, null); assert.equal(capture.lengthFrames, 0); assert.equal(capture.quantized, false);
   assert.equal(pending.takeId, null); assert.equal(project.takes.length, 0); assert.deepEqual(project.tracks, before);
   assert.equal(project.pendingCapture.kind, 'mix'); assert.equal(project.pendingCapture.masterAssetId, null);
   f.controller.state.transportFrame = 5000; f.controller.updateCaptureIntent();
@@ -1672,14 +1672,14 @@ test('a loop-only performance can be removed, undone and reopened without losing
 });
 
 for (const capacity of [{ usage: 1, quota: 1 }, { usage: null, quota: 500 }, { usage: 0, quota: 0 }, { usage: NaN, quota: 1000 }]) test(`recording uses actual writes rather than rejecting the browser quota estimate ${JSON.stringify(capacity)}`, async () => {
-  const f = loopMixFixture(); f.storage.estimate = async () => capacity;
+  const f = loopMixFixture(); f.controller.state.storage = capacity; f.storage.estimate = async () => capacity;
   await f.controller.startCapture('mix', 0);
   assert.equal(f.storage.beginCalls.length, 1); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
   assert.equal(f.ui.notifications.some(item => /browser estimates/.test(item.message)), Number.isFinite(capacity.usage) && capacity.usage >= 0 && capacity.quota > 0);
 });
 test('unavailable quota estimation does not block recording but an actual storage write failure does', async () => {
   const f = loopMixFixture(); f.storage.estimate = async () => { throw new Error('Estimate unavailable'); };
-  await f.controller.startCapture('mix', 0); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+  await f.controller.startCapture('mix', 0); assert.ok(f.engine.commands.some(command => command.type === 'arm')); await tick();
   assert.equal(f.controller.state.storage.usage, null); assert.equal(f.controller.state.storage.quota, null);
   const blocked = loopMixFixture(); blocked.storage.beginHook = () => { throw Object.assign(new Error('Device storage is full'), { name: 'QuotaExceededError' }); };
   await assert.rejects(blocked.controller.startCapture('mix', 0), /Device storage is full/);
@@ -1806,4 +1806,93 @@ for (const existingPartial of ['state', 'manifest', 'unreadable']) test(`shared-
   await assert.rejects(f.controller.deleteProject(project.id), { code: 'PROJECT_AUDIO_SHARED' });
   assert.equal(f.controller.state.readonly, true); assert.equal(f.controller.state.deletionPending, true);
   await assert.rejects(f.controller.handle({ type: 'delete-storage-file', fileKey: 'asset:backing' }), /Project deletion is unfinished/); assert.ok(f.storage.assets.has('backing'));
+});
+
+test('first and later loops default to free recording with immediate start', async () => {
+  for (const baseFrames of [0, 96000]) {
+    const f = fixture(); f.controller.state.project.baseFrames = baseFrames; f.controller.state.playing = !!baseFrames;
+    await f.controller.handle({ type: 'add-loop' });
+    const armed = f.engine.commands.find(command => command.type === 'arm').capture;
+    assert.equal(armed.lengthFrames, 0); assert.equal(armed.quantized, false);
+    assert.equal(f.controller.pending.lengthMode, 'free'); assert.equal(f.controller.pending.startMode, 'immediate');
+    assert.doesNotMatch(f.controller.state.status, /next cycle/i);
+    await f.controller.cancelPrepared(f.controller.pending);
+  }
+});
+
+test('custom seconds creates exact frame targets for both the first loop and later loops', async () => {
+  for (const baseFrames of [0, 96000]) {
+    const f = fixture(), p = f.controller.state.project; p.baseFrames = baseFrames;
+    await f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'seconds', seconds: 3.2500209 } });
+    await f.controller.handle({ type: 'add-loop' });
+    const armed = f.engine.commands.find(command => command.type === 'arm').capture;
+    assert.equal(armed.lengthFrames, Math.round(3.2500209 * p.sampleRate)); assert.equal(armed.quantized, false);
+    assert.equal(f.controller.state.capture.lengthMode, 'seconds'); assert.equal(f.controller.state.capture.targetFrames, 156001);
+    assert.deepEqual(f.storage.saved.at(-1).loopRecording, { mode: 'seconds', seconds: 3.2500209, cycles: 1, start: 'immediate' });
+    await f.controller.cancelPrepared(f.controller.pending);
+  }
+});
+
+test('cycle duration and next-cycle start are separate choices without the old 64-cycle cap', async () => {
+  const f = fixture(), p = f.controller.state.project; p.baseFrames = 48000; f.controller.state.playing = true;
+  await f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'cycles', cycles: 100, start: 'next-cycle' } });
+  await f.controller.handle({ type: 'add-loop' });
+  let armed = f.engine.commands.find(command => command.type === 'arm').capture;
+  assert.equal(armed.lengthFrames, 4800000); assert.equal(armed.quantized, true); assert.match(f.controller.state.status, /next cycle/i);
+  await f.controller.cancelPrepared(f.controller.pending); f.engine.commands = [];
+  await f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'free' } });
+  await f.controller.handle({ type: 'add-loop' }); armed = f.engine.commands.find(command => command.type === 'arm').capture;
+  assert.equal(armed.lengthFrames, 0); assert.equal(armed.quantized, true); await f.controller.cancelPrepared(f.controller.pending);
+});
+
+test('vocal and loops-only recording start immediately unless next-cycle is explicitly selected', async () => {
+  for (const kind of ['vocal', 'mix']) for (const start of ['immediate', 'next-cycle']) {
+    const f = loopMixFixture(); f.controller.state.playing = true;
+    await f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'seconds', seconds: 8, start } });
+    await f.controller.handle({ type: kind === 'vocal' ? 'sing' : 'record-all-loops' });
+    const armed = f.engine.commands.find(command => command.type === 'arm').capture;
+    assert.equal(armed.lengthFrames, 0); assert.equal(armed.quantized, start === 'next-cycle');
+    await f.controller.cancelPrepared(f.controller.pending);
+  }
+});
+
+test('invalid custom duration and first-loop cycle mode reject before microphone permission or storage creation', async () => {
+  for (const settings of [{ mode: 'seconds', seconds: Number.MIN_VALUE }, { mode: 'seconds', seconds: .001 }, { mode: 'seconds', seconds: Number.MAX_VALUE }, { mode: 'cycles', cycles: 1 }]) {
+    const f = fixture(); let micCalls = 0; f.engine.micHook = () => { micCalls++; };
+    await f.controller.handle({ type: 'set-loop-recording', settings });
+    await assert.rejects(f.controller.handle({ type: 'add-loop' }), /valid recording length|longer than|first loop/);
+    assert.equal(micCalls, 0); assert.equal(f.storage.beginCalls.length, 0); assert.equal(f.controller.pending, null); assert.equal(f.controller.state.busy, false);
+  }
+  const f = fixture(); f.controller.state.project.baseFrames = 48000;
+  await f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'cycles', cycles: Number.MAX_SAFE_INTEGER } });
+  await assert.rejects(f.controller.handle({ type: 'add-loop' }), /valid recording length/);
+});
+
+test('recording options cannot change while capture is preparing or active', async () => {
+  const f = fixture(), permission = deferred(); f.engine.micHook = () => permission.promise;
+  const start = f.controller.handle({ type: 'add-loop' });
+  await assert.rejects(f.controller.handle({ type: 'set-loop-recording', settings: { mode: 'seconds', seconds: 5 } }), /Finish or cancel/);
+  permission.resolve(); await start;
+  await assert.rejects(f.controller.handle({ type: 'set-loop-recording', settings: { start: 'next-cycle' } }), /Finish or cancel/);
+  assert.equal(f.controller.state.project.loopRecording.mode, 'free'); await f.controller.cancelPrepared(f.controller.pending);
+});
+
+test('advisory storage estimates never delay arming and cannot overwrite a newer session', async () => {
+  const f = fixture(), estimate = deferred(); let estimateCalls = 0; f.storage.estimate = () => { estimateCalls++; return estimate.promise; };
+  await f.controller.handle({ type: 'add-loop' });
+  assert.equal(estimateCalls, 1); assert.ok(f.engine.commands.some(command => command.type === 'arm')); assert.equal(f.controller.state.busy, false);
+  const pending = f.controller.pending; await f.controller.handle({ type: 'cancel' });
+  f.controller.state.storage = { usage: 50, quota: 100 };
+  estimate.resolve({ usage: 1, quota: 999 }); await tick();
+  assert.deepEqual(f.controller.state.storage, { usage: 50, quota: 100 }); await f.controller.cancelPrepared(pending);
+});
+
+test('background capacity refresh occurs only after durable capture metadata and assets are prepared', async () => {
+  const f = fixture(), order = [];
+  f.storage.saveHook = () => { order.push('save'); }; f.storage.beginHook = () => { order.push('asset'); };
+  const arm = f.engine.arm.bind(f.engine); f.engine.arm = capture => { order.push('arm'); arm(capture); };
+  f.storage.estimate = async () => { order.push('estimate'); return { usage: 10, quota: 5000 }; };
+  await f.controller.handle({ type: 'sing' }); await tick();
+  assert.deepEqual(order, ['save', 'asset', 'asset', 'arm', 'estimate']); assert.equal(f.controller.state.storage.usage, 10);
+  await f.controller.cancelPrepared(f.controller.pending);
 });

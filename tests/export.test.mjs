@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, webcrypto } from 'node:crypto';
-import { createProject, createTrack, DEFAULT_MIX } from '../src/project.mjs';
+import { createProject, createTrack, DEFAULT_MIX, DEFAULT_LOOP_RECORDING } from '../src/project.mjs';
 import { SHA256, hashBlob } from '../src/export/sha256.mjs';
 import { exportWav, exportWavParts, verifyAudioSnapshot, VERIFY_CHUNK_BYTES, wavHeader, WAV_HEADER_BYTES, MAX_RIFF_DATA_BYTES, MAX_RANGE_DATA_BYTES, safeFilename } from '../src/export/wav.mjs';
 import { exportProject, importProject, inspectProjectArchive, ARCHIVE_HEADER_BYTES, MAX_MANIFEST_BYTES, validateJsonTree } from '../src/export/archive.mjs';
@@ -70,6 +70,25 @@ async function mutateManifest(blob, change) {
   new Uint8Array(header, 32, 32).set(new SHA256().update(metadata).digest());
   return new Blob([header, metadata, blob.slice(64 + length)]);
 }
+
+test('project backups preserve independent loop duration and recording start preferences', async () => {
+  const { storage, project } = await fixture();
+  project.loopRecording = { mode: 'seconds', seconds: 13.275, cycles: 128, start: 'immediate' };
+  const originalTiming = { baseFrames: project.baseFrames, frames: project.tracks[0].frames };
+  const { blob } = await exportProject(storage, project);
+  const restored = await importProject(storage, blob);
+  assert.deepEqual(restored.loopRecording, project.loopRecording);
+  assert.equal(restored.baseFrames, originalTiming.baseFrames);
+  assert.equal(restored.tracks[0].frames, originalTiming.frames);
+  const legacy = await mutateManifest(blob, manifest => { delete manifest.project.loopRecording; });
+  const migrated = await importProject(storage, legacy);
+  assert.deepEqual(migrated.loopRecording, DEFAULT_LOOP_RECORDING);
+  assert.equal(migrated.baseFrames, originalTiming.baseFrames);
+  const invalid = await mutateManifest(blob, manifest => { manifest.project.loopRecording = { mode: 'cycles', seconds: 8, cycles: 1.5, start: 'immediate' }; });
+  storage.calls = [];
+  await assert.rejects(importProject(storage, invalid), /loop recording cycles/);
+  assert.deepEqual(storage.calls, [], 'invalid preferences are rejected before restoring any file');
+});
 
 test('backup restores mastered stereo audio, source provenance, settings and measured levels independently', async () => {
   const { storage, project, master } = await fixture();

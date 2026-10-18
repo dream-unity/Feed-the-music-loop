@@ -12,15 +12,15 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
 2. **Make your first loop.**
 
-   Choose **Add loop**, perform a beat, hum or phrase, then choose **Finish recording** where the phrase should repeat. The first loop is always free length: your finish sets the base cycle. Listen through several repetitions before adding more.
+   Under **New loop length**, leave **Free** selected to record until you choose **Finish recording**. To set the ending in advance, choose **Custom duration** and enter the seconds you want, including fractions. Then choose **Add loop** and perform your beat, hum or phrase. The first loop's actual length sets the base cycle. Listen through several repetitions before adding more.
 
-   For preparation time, open **Timing & recording → Click & count-in**, set **Tempo**, and choose **4 beats** or **8 beats** under **First-loop count-in** before recording. **Play a reference click** adds a guide through your headphones; it stays out of the internal recording. The count-in does not set the first loop’s ending. Once a loop exists, the click follows its length and **Beats per cycle**; changing that setting does not stretch the recording.
+   Recording starts immediately by default once the microphone and audio engine are ready. Connect the microphone first if you want to handle permission and device startup before performing. For preparation time, open **Timing & recording → Click & count-in**, set **Tempo**, and choose **4 beats** or **8 beats** under **First-loop count-in** before recording. This works for free or custom timed first loops. **Play a reference click** adds a guide through your headphones; it stays out of the internal recording. Once a loop exists, the click follows its length and **Beats per cycle**; changing that setting does not stretch the recording.
 
 3. **Add layers that fit.**
 
-   Under **New loop length**, choose **1 cycle · stay in sync**, **2 cycles**, **4 cycles**, or **Custom cycles**. Choose **Add loop**, wait for the next cycle, and perform. These recordings finish automatically after the chosen length. **Finish at boundary** retains that scheduled ending. **Cancel** discards the current attempt while your existing groove continues.
+   **New loop length** offers **Free**, **Custom duration** in seconds, or **Cycles**. Free keeps recording until you finish; a custom duration or cycle count finishes automatically. You can also choose **Finish recording** to end a timed loop early. There is no two-second cap or fixed list of allowed durations. Settings are saved with the project, and changing them does not resize existing loops.
 
-   Choose **Free · finish when ready** for an independent length. Different lengths gradually change their relationship, which can be interesting for textures but less predictable for a tight beat. For a first song, keep percussion aligned and try longer cycles for bass or harmony.
+   **Recording starts** is separate from length: **Immediately** records without waiting for a loop boundary; **Next cycle** waits for the next boundary while the groove is playing. Choose Cycles and Next cycle together when you want aligned layers. Different custom or free lengths retain their own repeat periods. **Discard** removes the current attempt while your existing groove continues.
 
 4. **Check timing before a long session.**
 
@@ -30,7 +30,7 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
 5. **Sing a continuous vocal.**
 
-   Choose **Sing over loops**. With an established groove, recording starts at the next cycle while the backing keeps its place. Sing through as many cycles as you need, then choose **Finish recording**. The loops continue while the studio finishes saving.
+   Choose **Sing over loops**. Recording follows your **Recording starts** preference, immediately by default, while the backing keeps its place. Sing through as many cycles as you need, then choose **Finish recording**. The loop-duration setting does not limit a continuous vocal. The loops continue while the studio finishes saving.
 
    **Song** keeps both a **Vocal take** and its full stereo **Performance**. Another take preserves earlier takes without automatically playing them into the new backing. Select **Use in edited song** for the vocal you want to remix. **Turn into a loop** deliberately creates another repeating layer from a take.
 
@@ -102,7 +102,7 @@ Choose **Record all the loops** in the bottom recording bar. This is a separate 
 
 No microphone permission is needed. A connected microphone, microphone monitoring, a selected vocal take and the metronome are excluded from the recording. A vocal that you previously turned into a loop is included like any other unmuted loop.
 
-If your groove is playing, recording starts on the next cycle. Change mutes, launch sections and adjust the mix while recording to build the song. Choose **Finish recording** when ready; your groove keeps playing. **Stop** saves the recording and stops playback. **Discard** removes the current attempt. The finished **Loop recording** appears immediately below the recorder with Listen, WAV and trash controls, and remains in **Song → Performances**. No separate vocal take is created.
+Recording follows your **Recording starts** preference, immediately by default. It has no automatic ending from the loop-duration setting. Change mutes, launch sections and adjust the mix while recording to build the song. Choose **Finish recording** when ready; your groove keeps playing. **Stop** saves the recording and stops playback. **Discard** removes the current attempt. The finished **Loop recording** appears immediately below the recorder with Listen, WAV and trash controls, and remains in **Song → Performances**. No separate vocal take is created.
 
 During microphone recording, the live microphone history rises and falls with your actual input, including quiet or silent moments. During **Record all the loops**, the same display shows the captured stereo loop levels instead of microphone input.
 

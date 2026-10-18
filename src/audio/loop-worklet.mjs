@@ -213,14 +213,17 @@ export class LoopEngine {
     const loopsOnly=capture.kind==='mix',compensation=loopsOnly?0:this.compensationFrames,minFrames=compensation+128+1,lengthFrames=integer(capture.lengthFrames||0);
     if(loopsOnly&&capture.masterAssetId)throw new Error('Loop-only capture uses one stereo asset.');
     if(lengthFrames&&lengthFrames<minFrames)throw new Error(`This loop must be longer than ${Math.ceil(minFrames/this.sampleRate*1000)} ms for the selected alignment.`);
-    const firstFreeLoop=capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size&&!lengthFrames;
-    if(capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size)this.frame=0;
+    const firstLoop=capture.kind==='loop'&&!this.baseFrames&&!this.tracks.size;
+    // An empty studio can establish a fresh origin. Existing loops retain their
+    // exact transport phase, even if a project has no shared cycle configured.
+    if(firstLoop)this.frame=0;
     const targetFrame=capture.quantized&&this.baseFrames&&this.playing?this.nextBoundary():this.frame;
+    if(!Number.isSafeInteger(targetFrame)||!Number.isSafeInteger(targetFrame+lengthFrames))throw new Error('This recording extends beyond the audio timeline. Choose a shorter duration or return to the start.');
     // Stereo captures go directly to storage; only future mono loops need a live cache.
     const cache=loopsOnly?null:this.ensureCache(capture.assetId,1);
     // All capture-time memory and the future loop's DSP are reserved before process().
     const preparedTrack=loopsOnly?null:{track:{...capture.track,id:capture.track?.id||capture.id,assetId:capture.assetId,kind:'loop',channels:1,frames:1,offsetFrames:0,mix:{...capture.track?.mix}},cache,dsp:new TrackDSP(this.sampleRate,capture.track?.mix),ready:true};
-    const countInBeats=firstFreeLoop?this.metronome.countInBeats:0,countBeatFrames=this.sampleRate*60/this.metronome.bpm;
+    const countInBeats=firstLoop?this.metronome.countInBeats:0,countBeatFrames=this.sampleRate*60/this.metronome.bpm;
     this.capture={...capture,compensation,lengthFrames,minFrames,targetFrame,status:countInBeats?'counting':'arming',countInBeats,countBeatFrames,countInStartClock:this.clock,startAtClock:this.clock+Math.round(countInBeats*countBeatFrames),startFrame:targetFrame,startClock:null,endFrame:null,endClock:null,raw:new CaptureWriter(this,capture.assetId,loopsOnly?2:1),master:capture.masterAssetId?new CaptureWriter(this,capture.masterAssetId,2):null,cache,preparedTrack};
     if(countInBeats){this.clickRemaining=0;this.lastClickClock=-Infinity;}
     if(capture.kind==='vocal'&&capture.track?.mix)this.setInputMix(capture.track.mix);
@@ -234,9 +237,10 @@ export class LoopEngine {
   finishCapture(stopping=false){
     const c=this.capture;if(!c)return;if(c.status==='arming'||c.status==='counting'){this.cancelCapture();return;}if(c.status==='finishing')return;
     if(stopping){this.endMusicalCapture(c,this.frame);return;}
-    if(c.lengthFrames){c.targetEndFrame=c.startFrame+c.lengthFrames;return;}
-    if(c.kind==='loop'&&this.baseFrames&&c.quantized)c.targetEndFrame=Math.max(this.nextBoundary(),c.startFrame+c.minFrames);
-    else c.targetEndFrame=Math.max(this.frame,c.startFrame+c.minFrames);
+    // Start quantization is independent of finishing. An explicit Finish must
+    // shorten a timed recording immediately, not wait for its scheduled end or
+    // another cycle. Only the minimum safe loop length and alignment tail remain.
+    c.targetEndFrame=Math.max(this.frame,c.startFrame+c.minFrames);
     if(this.frame>=c.targetEndFrame)this.endMusicalCapture(c,this.frame);
   }
   endMusicalCapture(c,endFrame){
@@ -269,7 +273,7 @@ export class LoopEngine {
       while(this.inputMixQueue.length&&this.inputMixQueue[0].clock<=this.clock)this.vocalDSP.setMix(this.inputMixQueue.shift().mix);
       if(this.audition?.status==='playing'&&this.frame>=this.audition.endFrame+this.audition.tailFrames)this.endAudition();
       let c=this.capture;const loopsOnly=c?.kind==='mix';
-      if(c?.status==='counting'&&this.clock>=c.startAtClock){this.frame=0;c.status='arming';c.targetFrame=0;}
+      if(c?.status==='counting'&&this.clock>=c.startAtClock){c.status='arming';c.targetFrame=this.frame;}
       // Sections and capture share one boundary. Snapshot the settings actually
       // used by the first sample, including a section queued for this boundary.
       if(this.pendingSection&&this.frame>=this.pendingSection.frame){this.applySection(this.pendingSection.section);anySolo=false;for(let ti=0;ti<this.trackList.length;ti++)if(this.trackList[ti].track.solo)anySolo=true;}
