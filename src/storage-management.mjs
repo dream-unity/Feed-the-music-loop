@@ -19,7 +19,9 @@ export function normalizedStorageCapacity(storage = {}) {
 export function removeAssetReferences(input, assetId) {
   if (typeof assetId !== 'string' || !assetId) throw new TypeError('Choose an audio file to delete.');
   const project = clone(input), impacts = { tracks: [], takes: [], performances: [], arrangements: [], pendingCapture: false };
-  if (!referencedAssets(project).includes(assetId)) return { project, changed: false, impacts };
+  const hadSettings = Object.hasOwn(project.recordingMixSettings || {}, assetId);
+  if (hadSettings) delete project.recordingMixSettings[assetId];
+  if (!referencedAssets(project).includes(assetId)) return { project: hadSettings ? validateProject(project) : project, changed: hadSettings, impacts };
   const removedTrackIds = new Set();
   const matches = item => item?.assetId === assetId;
   const gatherTracks = value => {

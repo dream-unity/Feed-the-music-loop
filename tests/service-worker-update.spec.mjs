@@ -72,6 +72,7 @@ async function playSavedLoop(page) {
 
 async function originalRecording(page) {
   await page.locator('[data-action="view"][data-view="mix"]').click();
+  await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
   const event = page.waitForEvent('download');
   await page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click();
   const download = await event;

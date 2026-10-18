@@ -451,6 +451,7 @@ test('retained recordings stay out of the studio and are recoverable beside thei
   await expect(page.locator('[data-ref="capture-panel"]')).toBeInViewport();
 
   await view(page, 'mix');
+  await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
   const original = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${fixture.originalTrackId}"]`).click());
   expect(inspectWav(original.bytes).peak).toBeGreaterThan(0.005);
   await view(page, 'build');
@@ -482,6 +483,7 @@ test('retained recordings stay out of the studio and are recoverable beside thei
   const recovered = tracks(page).filter({ hasText: 'Retained loop 12' });
   const recoveredTrackId = await recovered.getAttribute('data-track-id');
   await view(page, 'mix');
+  await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
   await page.locator(`[data-view-panel="mix"] [data-action="select-track"][data-id="${recoveredTrackId}"]`).click();
   const recoveredWav = await download(page, () => page.locator(`[data-view-panel="mix"] [data-action="export-track"][data-id="${recoveredTrackId}"]`).click());
   expect(recoveredWav.bytes).toEqual(retainedWav.bytes);

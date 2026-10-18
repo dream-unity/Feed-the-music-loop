@@ -62,6 +62,22 @@ Start with a short groove, then build around it. Your loop layers, continuous vo
 
    On a phone, keep the studio visible and the screen awake. Calls, screen locking or another app taking the microphone can interrupt a take. Test a short complete recording and export on your device first. If an interruption occurs, follow the recovery notice and listen to the retained audio before relying on it.
 
+## Mix and master a saved song or recording
+
+Open **Mix → Songs & recordings**. You can also choose **Mix & master** beside a saved performance, vocal take, latest recording or saved mix. Choose the recording you want: loop-only songs and vocal performances use their saved stereo audio, so their complete recorded sound is available even when their arrangement cannot be reconstructed.
+
+Use **Input gain**, **Balance**, the three EQ bands, **Low cut** and **Compression** to shape the whole recording. Stereo channels remain separate; compression uses a linked response to retain their relationship. These controls do not change the source file or the separate loop mixer.
+
+Set a **Sample peak ceiling** for the new version. The studio reduces the overall level if the processed audio would exceed that ceiling. Enable **Normalize peak** if you also want quieter material raised to the ceiling. This measures sample peaks; it does not target a streaming service's LUFS value or measure reconstructed true peaks.
+
+Set **Preview from** to the moment you want to check, then compare the original with the processed preview. Each preview covers up to 20 seconds and does not create a saved recording. The processed preview scans the whole recording first so normalization matches the full export; long songs can take time, and you can cancel preparation. After changing a control, prepare another preview to hear the new settings.
+
+Give the version a name and render its new WAV. The complete result keeps the original duration and channels. Its own Listen and WAV controls appear with that recording's versions, and it also remains available in **Song → Saved mixes** after reopening. Each new render is independent, so you can keep several versions and compare them. Downloads remain beside the specific recording.
+
+If the performance has a retained editable arrangement, **Remix individual layers** opens its loops and vocal controls. The arrangement target stays identified above the mixer; rendering follows that performance's recorded entrances, mutes and section changes with the current sound settings. This also works for recordings made with **Record all the loops**. Use whole-recording processing when you want to shape the saved sound directly.
+
+**Import recording** brings an external song into this area without turning it into a loop. It preserves mono or stereo audio and converts its sample rate to the project's rate. The import limit is 128 MiB and 20 minutes because decoding uses a full audio buffer. A previously imported file that was converted to mono cannot regain its original stereo channels; import the original stereo file here for a stereo master.
+
 ## Edit a loop or reuse a selected moment
 
 Choose **Edit** on a loop card, or **Edit audio** for a loop in **Mix**. The studio stops playback and reads the whole track to display its waveform; longer recordings can take a moment. Finish or discard an active recording before opening the editor.

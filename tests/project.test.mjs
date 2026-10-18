@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProject, createTrack, validateProject, sectionFromProject, applySection, ProjectHistory, referencedAssets } from '../src/project.mjs';
+import { DEFAULT_MASTER_SETTINGS, MASTER_RANGES } from '../src/audio/master-settings.mjs';
 
 test('project validation is complete and non-destructive', () => {
   const p = createProject('First song', 44100); p.tracks.push(createTrack({assetId:'audio-1',frames:44100})); p.baseFrames=44100;
@@ -84,4 +85,46 @@ test('optional click settings preserve older backups and reject unsafe timing', 
   }
   delete p.metronome;
   assert.equal(validateProject(p).metronome,undefined);
+});
+
+test('recording sound settings round trip per source without creating audio dependencies', () => {
+  const project = createProject();
+  assert.equal(validateProject(project).recordingMixSettings, undefined, 'older projects do not acquire new metadata');
+  project.recordingMixSettings = { 'stereo-performance': { gainDb: -3, normalize: true }, 'retained-mix': { balance: .4, highpass: 90 } };
+  const before = structuredClone(project), validated = validateProject(project);
+  assert.deepEqual(project, before);
+  assert.deepEqual(validated.recordingMixSettings['stereo-performance'], { ...DEFAULT_MASTER_SETTINGS, gainDb: -3, normalize: true });
+  assert.deepEqual(validated.recordingMixSettings['retained-mix'], { ...DEFAULT_MASTER_SETTINGS, balance: .4, highpass: 90 });
+  assert.deepEqual(validateProject(JSON.parse(JSON.stringify(validated))), validated);
+  assert.deepEqual(referencedAssets(validated), [], 'sound preferences cannot retain an otherwise deletable audio file');
+  const history = new ProjectHistory(); history.push(validated);
+  validated.recordingMixSettings['stereo-performance'].gainDb = 2;
+  assert.equal(history.undo(validated).recordingMixSettings['stereo-performance'].gainDb, -3);
+});
+
+test('saved recording sound controls reject unsafe shapes, identifiers, booleans and numeric ranges', () => {
+  const project = createProject();
+  for (const value of [null, [], 'invalid', 4]) {
+    project.recordingMixSettings = value;
+    assert.throws(() => validateProject(project), /recording mix settings/);
+  }
+  project.recordingMixSettings = { 'not/a/recording': {} };
+  assert.throws(() => validateProject(project), /identifier/);
+  project.recordingMixSettings = { audio: {} };
+  for (const [key, [minimum, maximum]] of Object.entries(MASTER_RANGES)) {
+    for (const value of [minimum - .01, maximum + .01, null, String(minimum), NaN, Infinity]) {
+      project.recordingMixSettings.audio = { [key]: value };
+      assert.throws(() => validateProject(project), /Invalid project/);
+    }
+    for (const value of [minimum, maximum]) {
+      project.recordingMixSettings.audio = { [key]: value };
+      assert.equal(validateProject(project).recordingMixSettings.audio[key], value);
+    }
+  }
+  for (const normalize of [null, 0, 1, 'false']) {
+    project.recordingMixSettings.audio = { normalize };
+    assert.throws(() => validateProject(project), /normalization/);
+  }
+  project.recordingMixSettings = Object.fromEntries(Array.from({ length: 10001 }, (_, index) => [`asset-${index}`, {}]));
+  assert.throws(() => validateProject(project), /too many properties|Too many recording/);
 });

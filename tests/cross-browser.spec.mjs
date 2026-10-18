@@ -6,7 +6,10 @@ import { createHash } from 'node:crypto';
 // the built-in generated demo enters the production storage/worklet paths.
 const tracks = page => page.locator('.loop-card[data-track-id]');
 const action = (page, name) => page.locator(`[data-action="${name}"]:visible`).first();
-const view = (page, name) => page.locator(`[data-action="view"][data-view="${name}"]`).click();
+const view = async (page, name) => {
+  await page.locator(`[data-action="view"][data-view="${name}"]`).click();
+  if (name === 'mix') await page.getByRole('button', { name: 'Layers & vocals', exact: true }).click();
+};
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function download(page, start) {
