@@ -51,7 +51,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
   const expectedHash = process.env.FML_EXPECTED_SW_SHA256;
   const swURL = new URL('sw.js', baseURL).href;
   const errors = [], unexpectedRequests = [], indexResponses = [], propagationChecks = [];
-  let servedWorker, finalWorkerHash, registration, recording, loopRecording, originalLoopBytes, loopRecordingBytes, editedRecording, masteredRecording;
+  let servedWorker, finalWorkerHash, registration, recording, loopRecording, originalLoopBytes, loopRecordingBytes, editedRecording, masteredRecording, loopStartTiming;
   page.on('pageerror', error => errors.push(error.message));
   context.on('request', incoming => {
     const url = new URL(incoming.url());
@@ -118,10 +118,28 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await page.reload();
     await expect(page.getByTestId('add-loop')).toBeEnabled();
     await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller?.scriptURL)).toBe(swURL);
+    await expect(page.getByRole('combobox', { name: 'New loop length', exact: true })).toHaveValue('free');
+    await expect(page.getByRole('combobox', { name: 'Recording starts', exact: true })).toHaveValue('immediate');
+    await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('seconds');
+    const duration = page.getByRole('spinbutton', { name: 'Loop duration in seconds', exact: true });
+    await duration.fill('3.25'); await duration.press('Tab');
+    await page.getByTestId('enable-mic').click();
+    await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Disconnect microphone');
+    await page.evaluate(() => {
+      const root = document.querySelector('#app'), button = document.querySelector('[data-testid="add-loop"]');
+      const timing = window.__liveLoopOnset = { clickedAt: null, recordingAt: null };
+      button.addEventListener('click', () => { timing.clickedAt = performance.now(); }, { once: true, capture: true });
+      const observer = new MutationObserver(() => {
+        if (root.dataset.captureState === 'recording' && timing.clickedAt !== null) { timing.recordingAt = performance.now(); observer.disconnect(); }
+      });
+      observer.observe(root, { attributes: true, attributeFilter: ['data-capture-state'] });
+    });
     await page.getByTestId('add-loop').click();
     await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
-    await page.waitForTimeout(1100); // A real recording needs elapsed audio time.
-    await page.getByTestId('finish').click();
+    loopStartTiming = await page.evaluate(() => window.__liveLoopOnset);
+    expect(loopStartTiming.clickedAt).toEqual(expect.any(Number)); expect(loopStartTiming.recordingAt).toEqual(expect.any(Number));
+    expect(loopStartTiming.recordingAt - loopStartTiming.clickedAt).toBeLessThan(500);
+    // Timed first-loop capture finishes itself at the selected exact duration.
     await expect(page.locator('.loop-card[data-track-id]')).toHaveCount(1);
     await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'idle');
     await expect(page.locator('[data-ref="save-state"]')).toHaveText('Saved on this device');
@@ -140,6 +158,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     expect(file.suggestedFilename()).toMatch(/\.wav$/i);
     originalLoopBytes = await readFile(await file.path());
     recording = inspectRecording(originalLoopBytes);
+    expect(recording.frames).toBe(Math.round(recording.sampleRate * 3.25));
     // Prove the deployed loop-only action works after disconnecting the mic.
     await page.locator('[data-action="view"][data-view="build"]').click();
     await page.evaluate(() => {
@@ -276,7 +295,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await testInfo.attach('live-pages-studio', { path: screenshot, contentType: 'image/png' });
   } finally {
     await testInfo.attach('live-deployment-evidence', {
-      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, editedRecording, masteredRecording, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
+      body: JSON.stringify({ expectedSwSha256: expectedHash, servedSwSha256: servedWorker ? sha256(Buffer.from(servedWorker.source, 'utf8')) : null, finalSwSha256: finalWorkerHash, registration, recording, loopRecording, editedRecording, masteredRecording, loopStartTiming, indexResponses, propagationChecks, errors, unexpectedRequests }, null, 2),
       contentType: 'application/json',
     });
   }

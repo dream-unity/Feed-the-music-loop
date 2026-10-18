@@ -117,3 +117,11 @@ test('failed or cancelled provisional loops release their protection of an old p
     assert.equal(f.engine.baseFrames, 0); assert.equal(f.engine.provisionalLoops.size, 0);
   }
 });
+
+test('an early-finished timed loop seals its shortened duration without restarting or invalidating its provisional audio',()=>{
+  const f=fixture();f.engine.command({type:'configure',compensationFrames:200});f.arm('shortened',6000);f.run(713);f.engine.command({type:'finish'});
+  const track=f.engine.tracks.get('shortened-track');assert.equal(track.track.frames,713);assert.equal(f.engine.baseFrames,713);assert.equal(f.engine.provisionalLoops.get('shortened-raw').frames,713);
+  f.engine.command({type:'configure',baseFrames:0});assert.equal(f.engine.baseFrames,713);f.run(201);assert.equal(f.engine.capture,null);assert.equal(f.engine.provisionalLoops.size,1);
+  const frame=f.engine.frame;f.seal('shortened');assert.equal(f.engine.provisionalLoops.size,0);assert.equal(f.engine.tracks.get('shortened-track'),track);assert.equal(f.engine.frame,frame);
+  const ended=f.events.find(event=>event.type==='capture-end');assert.equal(ended.frames,713);assert.equal(ended.endFrame,713);assert.equal(ended.clockFrame,913);assert.equal(f.events.some(event=>event.type==='underrun'||event.type==='loop-invalidated'),false);
+});

@@ -49,6 +49,10 @@ The final-level controls measure sample peaks. They do not measure LUFS or recon
 
 ## What the checks establish
 
+Studio 2026.10.18.2 adds free, custom-second and cycle-based loop durations with independent immediate or next-cycle starts. Deterministic tests verify the first captured sample, exact timed lengths across render-block sizes, timed first-loop count-in, early Finish with compensation, and provisional playback before a durable seal. Controller tests cover invalid durations before microphone access, saved preferences and delayed storage estimates that must not delay recording.
+
+The Chromium scenario records a 3.25-second first loop, verifies its exact saved frame count, starts another recording away from a cycle boundary with an already connected microphone, continues free recording beyond two seconds, and ends an eight-second preset early. It measures click-to-recording-state time against a 500 ms regression threshold and retains that measurement in the report. This detects the former deliberate cycle wait; it is not a hardware-latency guarantee. The public-site check also records an exact 3.25-second first loop and verifies the immediate/free defaults before selecting its duration.
+
 | Area | Evidence | Boundary of the result |
 | --- | --- | --- |
 | Looping and capture | Sample-boundary tests and Chromium microphone capture, synchronized layers, continuous vocals and separate stereo recordings | The automated microphone supplies deterministic audio; it does not measure an actual microphone's sound or delay |

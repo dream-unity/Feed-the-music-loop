@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createProject, createTrack, validateProject, sectionFromProject, applySection, ProjectHistory, referencedAssets } from '../src/project.mjs';
+import { createProject, createTrack, validateProject, sectionFromProject, applySection, ProjectHistory, referencedAssets, DEFAULT_LOOP_RECORDING, normalizeLoopRecording } from '../src/project.mjs';
 import { DEFAULT_MASTER_SETTINGS, MASTER_RANGES } from '../src/audio/master-settings.mjs';
 
 test('project validation is complete and non-destructive', () => {
@@ -85,6 +85,51 @@ test('optional click settings preserve older backups and reject unsafe timing', 
   }
   delete p.metronome;
   assert.equal(validateProject(p).metronome,undefined);
+});
+
+test('new and legacy projects default to free-length loops starting immediately, independently of cycle length', () => {
+  const fresh = createProject(), legacy = createProject(); delete legacy.loopRecording;
+  legacy.baseFrames = 96000;
+  legacy.tracks.push(createTrack({ assetId: 'two-second-loop', frames: 96000 }));
+  assert.deepEqual(fresh.loopRecording, { mode: 'free', seconds: 8, cycles: 1, start: 'immediate' });
+  assert.deepEqual(validateProject(legacy).loopRecording, fresh.loopRecording);
+  assert.equal(legacy.loopRecording, undefined, 'migration does not mutate the input project');
+  assert.equal(validateProject(legacy).baseFrames, 96000, 'recording preference migration does not change existing song timing');
+  fresh.loopRecording.seconds = 13.25;
+  assert.equal(createProject().loopRecording.seconds, 8, 'each project owns its preferences');
+  assert.equal(DEFAULT_LOOP_RECORDING.seconds, 8);
+});
+
+test('custom duration and cycle recording preferences round trip without a two-second or 64-cycle cap', () => {
+  const project = createProject(), history = new ProjectHistory();
+  for (const settings of [
+    { mode: 'seconds', seconds: 13.275, cycles: 1, start: 'immediate' },
+    { mode: 'cycles', seconds: .25, cycles: 257, start: 'next-cycle' },
+    { mode: 'free', seconds: 86400.125, cycles: Number.MAX_SAFE_INTEGER, start: 'immediate' },
+  ]) {
+    project.loopRecording = settings;
+    const restored = validateProject(JSON.parse(JSON.stringify(project)));
+    assert.deepEqual(restored.loopRecording, settings);
+    assert.notEqual(restored.loopRecording, settings);
+  }
+  history.push(project); project.loopRecording = normalizeLoopRecording({ mode: 'seconds', seconds: 7.5 });
+  const original = history.undo(project);
+  assert.equal(original.loopRecording.mode, 'free');
+  assert.equal(history.redo(original).loopRecording.seconds, 7.5);
+  assert.deepEqual(normalizeLoopRecording(), DEFAULT_LOOP_RECORDING);
+});
+
+test('loop recording settings reject invalid numeric values, choices and shapes', () => {
+  const project = createProject();
+  for (const settings of [null, [], 'free', 1, { mode: 'fixed' }, { mode: null }, { start: 'delayed' }, { start: null },
+    ...[0, -1, NaN, Infinity, '8', null].map(seconds => ({ seconds })),
+    ...[0, -1, .5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, '2', null].map(cycles => ({ cycles })),
+  ]) {
+    project.loopRecording = settings;
+    assert.throws(() => validateProject(project), /Invalid project/);
+  }
+  assert.equal(normalizeLoopRecording({ seconds: Number.MIN_VALUE }).seconds, Number.MIN_VALUE, 'controller validates conversion to at least one frame');
+  assert.equal(normalizeLoopRecording({ seconds: Number.MAX_VALUE }).seconds, Number.MAX_VALUE, 'controller validates safe frame addressing');
 });
 
 test('recording sound settings round trip per source without creating audio dependencies', () => {
