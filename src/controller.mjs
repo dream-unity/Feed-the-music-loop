@@ -1,5 +1,5 @@
 import { AudioEngine } from './audio/client.mjs';
-import { createProject, createTrack, validateProject, roleMix, normalizeMix, sectionFromProject, applySection, ProjectHistory, CaptureMetadataBudget, MAX_AUTOMATION_EVENTS, referencedAssets, cleanName, id, clone, touch, PAGE_FRAMES, MAX_TRACKS, COLORS, DEFAULT_METRONOME } from './project.mjs';
+import { createProject, createTrack, validateProject, normalizeLoopRecording, roleMix, normalizeMix, sectionFromProject, applySection, ProjectHistory, CaptureMetadataBudget, MAX_AUTOMATION_EVENTS, referencedAssets, cleanName, id, clone, touch, PAGE_FRAMES, MAX_TRACKS, COLORS, DEFAULT_METRONOME } from './project.mjs';
 import { exportWav, exportWavParts, exportProject, importProject } from './export/index.mjs';
 import { inspectProjectAudio } from './audio-integrity.mjs';
 import { normalizedStorageCapacity, removeAssetReferences } from './storage-management.mjs';
@@ -180,7 +180,7 @@ export class StudioController {
       this.state.playing = !!data.playing; this.state.transportFrame = data.transportFrame || 0;
       this.state.audition = data.audition || null;
       this.state.liveBaseFrames = data.baseFrames || this.state.project.baseFrames;
-      if (this.pending) this.state.capture = data.capture || { id: this.pending.id, kind: this.pending.kind, status: this.pending.ended ? 'finishing' : 'arming', elapsedFrames: this.pending.end?.frames || 0 };
+      if (this.pending) this.state.capture = { startMode: this.pending.startMode, lengthMode: this.pending.lengthMode, ...(data.capture || { id: this.pending.id, kind: this.pending.kind, status: this.pending.ended ? 'finishing' : 'arming', elapsedFrames: this.pending.end?.frames || 0 }) };
       else if (!this.state.busy) this.state.capture = data.capture;
       if (type === 'meter') {
         this.state.inputLevel = data.inputLevel || 0; this.state.outputLevel = data.outputLevel || 0;
@@ -225,7 +225,7 @@ export class StudioController {
       this.pending.initialState = { ...clone(initialState), frame: data.startFrame };
       if (initialState.inputMix) this.pending.track.mix = normalizeMix(initialState.inputMix);
       this.pending.startFrame = data.startFrame; this.pending.started = true;
-      this.state.capture = { id: data.captureId, kind: data.kind, status: 'recording', elapsedFrames: 0, startFrame: data.startFrame, targetFrames: this.pending.lengthFrames };
+      this.state.capture = { id: data.captureId, kind: data.kind, status: 'recording', elapsedFrames: 0, startFrame: data.startFrame, targetFrames: this.pending.lengthFrames, startMode: this.pending.startMode, lengthMode: this.pending.lengthMode };
       this.state.status = 'Recording · saving audio continuously'; this.updateCaptureIntent(); this.scheduleSave(0); this.render(); return;
     }
     if (type === 'capture-end') {
@@ -310,23 +310,50 @@ export class StudioController {
       catch { this.finishAtMetadataLimit(this.state.transportFrame); }
     }
   }
-  async startCapture(kind, cycles = 1) {
+  captureRecordingOptions(kind, legacyCycles) {
+    const project = this.state.project, preferences = normalizeLoopRecording(project.loopRecording);
+    let mode = preferences.mode, lengthFrames = 0;
+    if (kind === 'loop' && legacyCycles !== undefined) {
+      if (!Number.isSafeInteger(legacyCycles) || legacyCycles < 0) throw new Error('Choose a valid number of recording cycles.');
+      mode = legacyCycles && project.baseFrames ? 'cycles' : 'free';
+      if (mode === 'cycles') preferences.cycles = legacyCycles;
+    }
+    if (kind === 'loop') {
+      if (mode === 'seconds') lengthFrames = Math.round(preferences.seconds * project.sampleRate);
+      else if (mode === 'cycles') {
+        if (!project.baseFrames) throw new Error('Record the first loop before choosing a number of cycles, or choose a duration in seconds.');
+        lengthFrames = project.baseFrames * preferences.cycles;
+      }
+      if (!Number.isSafeInteger(lengthFrames) || lengthFrames < 0 || (mode !== 'free' && !lengthFrames)) throw new Error('Choose a valid recording length that fits this project’s sample rate.');
+      const minimumFrames = Math.round(project.input.compensationMs * project.sampleRate / 1000) + 129;
+      if (lengthFrames && lengthFrames < minimumFrames) throw new Error(`Choose a loop longer than ${Math.ceil(minimumFrames / project.sampleRate * 1000)} ms, or reduce Recording compensation before recording.`);
+    }
+    return { lengthFrames, lengthMode: kind === 'loop' ? mode : 'free', startMode: preferences.start === 'next-cycle' && project.baseFrames ? 'next-cycle' : 'immediate' };
+  }
+  refreshCaptureCapacity(token, projectId, captureId) {
+    // Advisory storage estimates must never delay microphone capture. An old
+    // request also cannot replace capacity information in a later session.
+    return Promise.resolve().then(() => this.storage.estimate()).catch(() => ({ usage: null, quota: null })).then(capacity => {
+      if (token !== this.generation || this.state.project?.id !== projectId || this.pending?.id !== captureId || this.state.storageFailed) return;
+      this.state.storage = { ...this.state.storage, ...capacity }; this.render();
+    }).catch(() => {});
+  }
+  async startCapture(kind, legacyCycles) {
     this.assertWritable(); if (this.pending || this.state.capture) throw new Error('A recording is already active.');
     if (this.state.busy) throw new Error('Finish the current operation before recording.');
     if (this.state.exporting) throw new Error('Finish or cancel the export before recording.');
     if (!['loop', 'vocal', 'mix'].includes(kind)) throw new Error('Choose a supported recording mode.');
     if (kind === 'mix' && !this.state.project.tracks.some(track => !track.muted && track.frames > 0)) throw new Error('Unmute at least one saved loop before recording all the loops.');
     if (kind === 'loop' && this.state.project.tracks.length >= MAX_TRACKS) throw new Error(`This project has reached ${MAX_TRACKS} layers. Start another project or remove unused layers.`);
+    const recordingOptions = this.captureRecordingOptions(kind, legacyCycles);
     this.closePreview(); this.state.error = null;
     if (this.state.audition) { this.engine?.stop(); this.state.audition = null; this.state.playing = false; }
-    const token = ++this.generation; this.state.capture = { kind, status: 'arming', preparing: true, waitingForMic: kind !== 'mix', elapsedFrames: 0 }; this.state.busy = true; this.render();
+    const token = ++this.generation; this.state.capture = { kind, status: 'arming', preparing: true, waitingForMic: kind !== 'mix', elapsedFrames: 0, ...recordingOptions, targetFrames: recordingOptions.lengthFrames }; this.state.busy = true; this.state.status = 'Preparing recording…'; this.render();
     let pending = null;
     try {
       const engine = await this.ensureAudio(); if (token !== this.generation) return;
       if (kind !== 'mix') { await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return; }
-      const capacity = await this.storage.estimate().catch(() => ({ usage: null, quota: null })); if (token !== this.generation) return;
-      this.state.storage = { ...this.state.storage, ...capacity };
-      const available = normalizedStorageCapacity(capacity);
+      const available = normalizedStorageCapacity(this.state.storage);
       // An origin quota estimate is advisory, and can lag behind deletions.
       // The actual journal writes decide whether recording can continue.
       if (available.low) this.ui.notify(`The browser estimates ${available.remaining.toLocaleString('en-US')} bytes remaining for this site. Open Storage at the top right to review files and free space. Recording will continue while saving is possible.`, 'info');
@@ -334,12 +361,9 @@ export class StudioController {
       const role = kind === 'vocal' ? 'lead' : project.tracks.length === 0 ? 'beat' : project.tracks.length === 1 ? 'bass' : 'harmony';
       const label = kind === 'mix' ? nextLoopRecordingName(project) : kind === 'vocal' ? `Vocal take ${project.takes.length + 1}` : `${role[0].toUpperCase()}${role.slice(1)} ${project.tracks.length + 1}`;
       const track = createTrack({ assetId, name: label, role });
-      const lengthFrames = kind === 'loop' && project.baseFrames && cycles ? Math.round(project.baseFrames * cycles) : 0;
-      if (!Number.isSafeInteger(lengthFrames) || lengthFrames < 0) throw new Error('Choose a valid recording length.');
-      const minimumFrames = Math.round(project.input.compensationMs * project.sampleRate / 1000) + 129;
-      if (lengthFrames && lengthFrames < minimumFrames) throw new Error(`Choose a loop longer than ${Math.ceil(minimumFrames / project.sampleRate * 1000)} ms, or reduce Recording compensation before recording.`);
+      const { lengthFrames, lengthMode, startMode } = recordingOptions;
       let resolveDone; const done = new Promise(resolve => { resolveDone = resolve; });
-      pending = { id: captureId, projectId: project.id, kind, assetId, masterAssetId, track, lengthFrames, events: [], startFrame: 0, createdAt: now(),
+      pending = { id: captureId, projectId: project.id, kind, assetId, masterAssetId, track, lengthFrames, lengthMode, startMode, events: [], startFrame: 0, createdAt: now(),
         performanceId: kind !== 'loop' ? id('performance-') : null, takeId: kind === 'vocal' ? id('take-') : null,
         initialState: { tracks: clone(project.tracks), baseFrames: project.baseFrames, master: clone(project.master), input: clone(project.input), inputMix: clone(track.mix), frame: this.state.transportFrame, engineVersion: 1 }, done, resolveDone };
       this.pending = pending; this.updateCaptureIntent();
@@ -349,9 +373,9 @@ export class StudioController {
       await this.storage.beginAsset({ id: assetId, projectId: project.id, sampleRate: project.sampleRate, channels: kind === 'mix' ? 2 : 1, kind: kind === 'mix' ? 'master' : kind, ...(kind === 'mix' ? { source: 'loops' } : { track }), name: label, captureId, performanceId: pending.performanceId, createdAt: Date.now() });
       if (masterAssetId) await this.storage.beginAsset({ id: masterAssetId, projectId: project.id, sampleRate: project.sampleRate, channels: 2, kind: 'master', name: `Performance ${project.performances.length + 1}`, captureId, leadAssetId: assetId, performanceId: pending.performanceId });
       if (token !== this.generation) { await this.cancelPrepared(pending); return; }
-      engine.configure(project); engine.arm({ id: captureId, kind, assetId, masterAssetId, track, lengthFrames, quantized: !!project.baseFrames && (kind !== 'loop' || !!cycles) });
-      this.state.busy = false; this.state.capture = { kind, status: 'arming', elapsedFrames: 0, targetFrames: lengthFrames }; this.state.status = project.baseFrames ? 'Ready at the next cycle' : 'Recording…';
-      this.keepAwake(); this.render();
+      engine.configure(project); engine.arm({ id: captureId, kind, assetId, masterAssetId, track, lengthFrames, quantized: startMode === 'next-cycle' });
+      this.state.busy = false; this.state.capture = { kind, status: 'arming', elapsedFrames: 0, targetFrames: lengthFrames, lengthMode, startMode }; this.state.status = startMode === 'next-cycle' && this.state.playing ? 'Ready at the next cycle' : 'Starting recording…';
+      this.keepAwake(); this.render(); this.refreshCaptureCapacity(token, project.id, captureId);
     } catch (error) {
       if (pending && !pending.started) await this.cancelPrepared(pending).catch(() => {});
       if (token === this.generation) { this.state.capture = null; this.state.busy = false; this.render(); }
@@ -1499,9 +1523,10 @@ export class StudioController {
       case 'monitor': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; if (!this.state.micEnabled) await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return; p.input.monitor = action.enabled ?? !p.input.monitor; this.state.monitor = p.input.monitor; engine.configure(p); this.scheduleSave(); this.render(); return; }
       case 'play': { if (this.state.playing) return this.handle({ type: 'stop' }); this.closePreview(); const token = this.generation, e = await this.ensureAudio(); if (token !== this.generation) return; e.play(); this.keepAwake(); return; }
       case 'stop': { ++this.generation; this.closePreview(); this.microphoneOperation = null; this.state.micChanging = false; p.input.monitor = false; this.state.monitor = false; this.engine?.configure(p); this.engine?.stop(); this.state.audition = null; if (!this.pending) { this.state.capture = null; if (!this.projectDeletion?.committing) this.state.busy = false; } this.state.playing = false; await this.releaseWake(); this.render(); return; }
-      case 'add-loop': { const cycles = action.cycles === 'custom' ? Math.max(1, Math.min(64, Number(action.customCycles) || 1)) : action.cycles === 0 ? 0 : Number(action.cycles) || 1; return this.startCapture('loop', cycles); }
-      case 'sing': return this.startCapture('vocal', 0);
-      case 'record-all-loops': return this.startCapture('mix', 0);
+      case 'set-loop-recording': { this.assertWritable(); this.assertIdle(); if (this.state.busy || this.state.exporting) throw new Error('Finish the current operation before changing recording options.'); const settings = normalizeLoopRecording({ ...normalizeLoopRecording(p.loopRecording), ...action.settings }); this.edit(project => { project.loopRecording = settings; }, 'loop-recording'); return; }
+      case 'add-loop': return this.startCapture('loop', action.cycles === undefined ? undefined : Number(action.cycles === 'custom' ? action.customCycles : action.cycles));
+      case 'sing': return this.startCapture('vocal');
+      case 'record-all-loops': return this.startCapture('mix');
       case 'finish': this.engine?.finish(); return;
       case 'cancel': { ++this.generation; this.engine?.cancel(); if (!this.pending) { this.state.capture = null; this.state.busy = false; this.render(); } return; }
       case 'view': this.state.view = ['build', 'song', 'mix'].includes(action.view) ? action.view : 'build'; if (this.state.view === 'mix' && !this.mixModeChosen && listRecordingSources(p, this.state.recovered).some(item => ['performance', 'loop-song', 'mix', 'recovered'].includes(item.kind))) this.state.mixMode = 'recordings'; this.render(); return;

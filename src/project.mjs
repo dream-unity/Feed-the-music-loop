@@ -10,6 +10,7 @@ export const CAPTURE_RESERVE_NODES = 20000;
 export const CAPTURE_RESERVE_BYTES = 256 * 1024;
 const metadataEncoder = new TextEncoder();
 export const DEFAULT_METRONOME = Object.freeze({ enabled: false, bpm: 100, beatsPerCycle: 4, countInBeats: 0, volume: 0.25 });
+export const DEFAULT_LOOP_RECORDING = Object.freeze({ mode: 'free', seconds: 8, cycles: 1, start: 'immediate' });
 export const ROLES = ['beat', 'bass', 'harmony', 'lead', 'texture'];
 export const COLORS = { beat: '#fa987e', bass: '#dfbc6e', harmony: '#94cbb7', lead: '#d5a2d9', texture: '#85b7df' };
 export const DEFAULT_MIX = Object.freeze({ volume: 0.8, pan: 0, low: 0, mid: 0, high: 0, highpass: 40, compression: 0.25, reverb: 0.08, delay: 0 });
@@ -33,12 +34,25 @@ export function normalizeMix(mix = {}) {
   for (const [key, [min, max]] of Object.entries(MIX_RANGES)) if (key in mix) out[key] = clamp(mix[key], min, max);
   return out;
 }
+/** Recording length is independent of the playback cycle. Old projects begin
+ * with the same free-length, immediate recording choice as new projects. */
+export function normalizeLoopRecording(input = {}) {
+  object(input, 'loop recording settings');
+  const settings = { ...DEFAULT_LOOP_RECORDING, ...input };
+  if (!['free', 'seconds', 'cycles'].includes(settings.mode)) fail('Unknown loop recording length mode.');
+  if (!['immediate', 'next-cycle'].includes(settings.start)) fail('Unknown loop recording start mode.');
+  number(settings.seconds, 'loop recording seconds', Number.MIN_VALUE, Number.MAX_VALUE);
+  number(settings.cycles, 'loop recording cycles', 1, Number.MAX_SAFE_INTEGER, true);
+  // The controller checks conversion to frames using the current sample rate
+  // and cycle. Preferences carry no arbitrary duration or cycle-count ceiling.
+  return { mode: settings.mode, seconds: settings.seconds, cycles: settings.cycles, start: settings.start };
+}
 export function createProject(name = 'Untitled session', sampleRate = 48000) {
   const now = new Date().toISOString();
   return {
     schemaVersion: SCHEMA_VERSION, id: id('project-'), name: cleanName(name, 'Untitled session'),
     createdAt: now, updatedAt: now, sampleRate, baseFrames: 0, tracks: [], takes: [], sections: [], performances: [],
-    selectedTakeId: null, master: { volume: 0.8 }, input: { gain: 1, monitor: false, compensationMs: 0 }, metronome: { ...DEFAULT_METRONOME }, events: [], revision: 0,
+    selectedTakeId: null, master: { volume: 0.8 }, input: { gain: 1, monitor: false, compensationMs: 0 }, metronome: { ...DEFAULT_METRONOME }, loopRecording: { ...DEFAULT_LOOP_RECORDING }, events: [], revision: 0,
   };
 }
 export function createTrack({ assetId, name, role = 'beat', frames = 0, offsetFrames = 0, ...rest } = {}) {
@@ -135,6 +149,7 @@ export function validateProject(input, { strict = true } = {}) {
   date(p.createdAt, 'createdAt'); date(p.updatedAt, 'updatedAt');
   number(p.sampleRate, 'sampleRate', 8000, 192000, true); number(p.baseFrames, 'baseFrames', 0, Number.MAX_SAFE_INTEGER, true);
   number(p.revision ?? 0, 'revision', 0, Number.MAX_SAFE_INTEGER, true); p.revision ??= 0;
+  p.loopRecording = normalizeLoopRecording(p.loopRecording);
   if (p.recordingMixSettings !== undefined) {
     object(p.recordingMixSettings, 'recording mix settings');
     if (Object.keys(p.recordingMixSettings).length > 10000) fail('Too many recording sound settings.');

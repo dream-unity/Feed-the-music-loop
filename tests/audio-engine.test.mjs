@@ -421,3 +421,77 @@ test('loop-only capture preserves a valid stereo prefix on storage backpressure'
   assert.equal(h.assets.get('prefix').channels,2);assert.equal(h.samples('prefix').length,1024);assert(h.samples('prefix').some(x=>Math.abs(x)>.01));
   assert.equal(h.engine.tracks.size,1);assert.equal(h.engine.capture,null);assert.equal(h.engine.playing,true);
 });
+
+for(const kind of ['loop','vocal','mix'])test(`immediate ${kind} capture starts on the next quantum first sample without waiting for a playing loop boundary`,()=>{
+  const h=harness();h.arm({lengthFrames:1003});h.run(1337,()=>.1);const startFrame=h.engine.frame,startClock=h.engine.clock;
+  h.arm({id:'immediate',assetId:'immediate',kind,quantized:false,lengthFrames:0,track:{id:'immediate-track',mix:{volume:1,highpass:0,compression:0,reverb:0,delay:0}}});
+  assert.equal(h.engine.frame,startFrame);assert.equal(h.engine.capture.status,'arming');
+  h.run(1,()=>.875,1);const start=h.events.find(e=>e.type==='capture-start'&&e.captureId==='immediate');
+  assert.equal(start.startFrame,startFrame);assert.equal(start.clockFrame,startClock);assert.equal(h.engine.capture.raw.frames,1);
+  if(kind!=='mix')assert.equal(h.engine.capture.cache.sample(0),.875,'The first microphone sample must be retained without a fade or artificial wait.');
+  assert.equal(h.engine.baseFrames,1003);assert.equal(h.engine.frame,startFrame+1);
+});
+
+test('arbitrary timed first loop starts immediately and establishes its exact duration at any render quantum size',()=>{
+  for(const quantum of [1,61,128,237,513]){
+    const h=harness();h.engine.command({type:'play'});h.run(421);const startClock=h.engine.clock;
+    h.arm({lengthFrames:2347});assert.equal(h.engine.frame,0);h.run(2348,(_,clock)=>(clock-startClock)/10000,quantum);
+    const start=h.events.find(e=>e.type==='capture-start'),end=h.events.find(e=>e.type==='capture-end');
+    assert.equal(start.clockFrame,startClock);assert.equal(start.startFrame,0);assert.equal(end.frames,2347);assert.equal(end.endFrame,2347);assert.equal(h.engine.baseFrames,2347);
+    assert.equal(h.samples('raw')[0],0);assert.equal(h.samples('raw').at(-1),Math.fround(.2346));assert(!h.events.some(e=>e.type==='underrun'));
+  }
+});
+
+test('an immediate arbitrary length layer keeps existing backing phase and its own offset',()=>{
+  const h=harness();h.arm({lengthFrames:1003});h.run(1471,()=>.1);const backing=h.engine.tracks.get('track'),start=h.engine.frame;
+  h.arm({id:'custom',assetId:'custom',lengthFrames:761,track:{id:'custom-track',mix:{volume:1,highpass:0,compression:0,reverb:0,delay:0}}});
+  h.run(762,()=>.3,113);const end=h.events.find(e=>e.type==='capture-end'&&e.captureId==='custom');
+  assert.equal(end.startFrame,start);assert.equal(end.frames,761);assert.equal(end.endFrame,start+761);assert.equal(end.track.offsetFrames,start%761);
+  assert.equal(h.engine.tracks.get('track'),backing);assert.equal(backing.track.offsetFrames,0);assert.equal(h.engine.baseFrames,1003);assert.equal(h.engine.frame,start+762);
+});
+
+test('existing loops without a shared base never have their transport reset by a new timed loop',()=>{
+  const h=harness();h.arm({lengthFrames:1003});h.run(1471,()=>.1);h.engine.command({type:'configure',baseFrames:0});const start=h.engine.frame;
+  h.arm({id:'custom',assetId:'custom',lengthFrames:761,track:{id:'custom-track',mix:{volume:1}}});h.run(1,()=>.2);
+  assert.equal(h.events.find(e=>e.type==='capture-start'&&e.captureId==='custom').startFrame,start);assert.equal(h.engine.frame,start+1);
+});
+
+for(const quantized of [false,true])for(const lengthFrames of [0,6000])test(`Finish ends ${lengthFrames?'timed':'free'} ${quantized?'next-cycle':'immediate'} recording at its requested frame`,()=>{
+  const h=harness();h.engine.command({type:'configure',baseFrames:1003});h.engine.command({type:'play'});h.run(421);h.arm({lengthFrames,quantized});
+  if(quantized)h.run(1003-421);const start=h.engine.frame;h.run(713,(_,clock)=>clock/10000,61);const stop=h.engine.frame;
+  h.engine.command({type:'finish'});assert.equal(h.engine.capture.status,'finishing');assert.equal(h.engine.capture.endFrame,stop);h.run(1);
+  const end=h.events.find(e=>e.type==='capture-end');assert.equal(end.startFrame,start);assert.equal(end.frames,713);assert.equal(end.endFrame,stop);assert.equal(end.track.offsetFrames,start%713);
+  assert.equal(h.samples('raw').length,713);assert.equal(h.engine.baseFrames,1003);assert.equal(h.engine.playing,true);
+});
+
+test('early Finish on a timed first loop drains exactly the frozen compensation and plays the shortened loop immediately',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:200});h.arm({lengthFrames:6000});h.run(713,(_,clock)=>clock/10000,61);
+  h.engine.command({type:'finish'});const track=h.engine.tracks.get('track');assert.equal(track.track.frames,713);assert.equal(h.engine.baseFrames,713);assert.equal(h.engine.capture.status,'finishing');
+  h.run(201,(_,clock)=>clock/10000,73);const pcm=h.samples('raw'),end=h.events.find(e=>e.type==='capture-end');
+  assert.equal(pcm.length,713);for(let i=0;i<pcm.length;i++)assert.equal(pcm[i],Math.fround((i+200)/10000));
+  assert.equal(end.clockFrame,913);assert.equal(end.endFrame,713);assert.equal(end.compensationFrames,200);assert.equal(h.engine.tracks.get('track'),track);assert(!h.events.some(e=>e.type==='underrun'));
+});
+
+test('Finish before the safe minimum waits only for that minimum, never the original timed end',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:200});h.arm({lengthFrames:6000});h.run(73,()=>.25);
+  h.engine.command({type:'finish'});assert.equal(h.engine.capture.targetEndFrame,329);h.run(329-73+201,()=>.25);
+  const end=h.events.find(e=>e.type==='capture-end');assert.equal(end.frames,329);assert.equal(end.endFrame,329);assert.equal(end.clockFrame,529);assert.equal(h.engine.baseFrames,329);assert(h.samples('raw').every(x=>x===.25));
+});
+
+test('opt-in first-loop count-in applies equally to arbitrary timed recording and preserves exact compensated onset',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:100,metronome:{enabled:false,bpm:137,countInBeats:4}});h.arm({lengthFrames:1003});
+  const countFrames=Math.round(4*8000*60/137);assert.equal(h.engine.capture.status,'counting');h.run(countFrames,(_,clock)=>clock/100000,237);
+  assert.equal(h.engine.frame,0);assert.equal(h.engine.capture.raw.frames,0);h.run(1104,(_,clock)=>clock/100000,61);
+  const start=h.events.find(e=>e.type==='capture-start'),end=h.events.find(e=>e.type==='capture-end'),pcm=h.samples('raw');
+  assert.equal(start.clockFrame,countFrames);assert.equal(start.startFrame,0);assert.equal(end.frames,1003);assert.equal(end.endFrame,1003);assert.equal(end.clockFrame,countFrames+1103);
+  assert.equal(pcm[0],Math.fround((countFrames+100)/100000));assert.equal(pcm.at(-1),Math.fround((countFrames+1102)/100000));assert.equal(h.events.filter(e=>e.type==='count-in').length,4);
+});
+
+test('a safe duration whose end overflows the exact audio timeline is rejected before capture changes transport or writes audio',()=>{
+  const h=harness();h.engine.command({type:'configure',baseFrames:1003});h.engine.command({type:'play'});h.engine.frame=Number.MAX_SAFE_INTEGER-123;
+  const frame=h.engine.frame,clock=h.engine.clock,pool=h.engine.pool.length,caches=h.engine.caches.size;
+  h.arm({lengthFrames:1000,quantized:false});
+  const rejected=h.events.find(event=>event.type==='capture-rejected');assert.equal(rejected.captureId,'capture');assert.match(rejected.message,/timeline/);
+  assert.equal(h.engine.capture,null);assert.equal(h.engine.frame,frame);assert.equal(h.engine.clock,clock);assert.equal(h.engine.playing,true);assert.equal(h.engine.baseFrames,1003);
+  assert.equal(h.engine.pool.length,pool);assert.equal(h.engine.caches.size,caches);assert.equal(h.assets.size,0);assert.equal(h.events.some(event=>event.type==='capture-start'),false);
+});

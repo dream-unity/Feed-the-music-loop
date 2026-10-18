@@ -78,6 +78,28 @@ async function recordFirstLoop(page) {
   await playing(page, true);
 }
 
+async function savedProject(page) {
+  return page.evaluate(async () => {
+    const storagePath = './src/storage/client.mjs', { StorageClient } = await import(storagePath), storage = new StorageClient();
+    try { await storage.init(); return await storage.loadProject(localStorage.getItem('fml:last-project')); }
+    finally { await storage.dispose(); }
+  });
+}
+
+async function watchLoopOnset(page) {
+  await page.evaluate(() => {
+    const root = document.querySelector('#app'), button = document.querySelector('[data-testid="add-loop"]');
+    const timing = window.__loopCaptureOnset = { clickedAt: null, recordingAt: null, states: [] };
+    button.addEventListener('click', () => { timing.clickedAt = performance.now(); }, { capture: true, once: true });
+    const observer = new MutationObserver(() => {
+      const state = root.dataset.captureState;
+      if (timing.clickedAt !== null) timing.states.push({ state, elapsed: performance.now() - timing.clickedAt });
+      if (state === 'recording' && timing.clickedAt !== null) { timing.recordingAt = performance.now(); observer.disconnect(); }
+    });
+    observer.observe(root, { attributes: true, attributeFilter: ['data-capture-state'] });
+  });
+}
+
 test.beforeEach(async ({ page }, testInfo) => {
   const errors = [];
   const remoteRequests = [];
@@ -173,11 +195,19 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   await reviewScreenshot(page, testInfo, 'desktop-welcome');
   await recordFirstLoop(page);
 
-  // The default second layer is one synchronized cycle and ends automatically.
+  // Cycle synchronization is an explicit choice; free and immediate are the
+  // defaults. This flow deliberately exercises one aligned automatic cycle.
+  await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('cycles');
+  await page.getByRole('spinbutton', { name: 'Number of cycles', exact: true }).fill('1');
+  await page.getByRole('combobox', { name: 'Recording starts', exact: true }).selectOption('next-cycle');
   await page.getByTestId('add-loop').click();
   await expect(tracks(page)).toHaveCount(2);
   await state(page, 'idle');
   await playing(page, true);
+  await expect.poll(async () => (await savedProject(page)).tracks.length).toBe(2);
+  const synchronized = await savedProject(page);
+  expect(synchronized.tracks[1].frames).toBe(synchronized.baseFrames);
+  expect(synchronized.tracks[1].offsetFrames).toBe(0);
   await reviewScreenshot(page, testInfo, 'desktop-build');
 
   await page.getByTestId('sing').click();
@@ -510,7 +540,7 @@ test('cancel discards persisted loop and vocal capture pages while preserving th
   await view(page, 'mix');
   const originalWav = await download(page, () => page.locator('[data-view-panel="mix"] [data-action="export-track"]:visible').click());
   await view(page, 'build');
-  await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('0');
+  await page.getByRole('combobox', { name: 'New loop length', exact: true }).selectOption('free');
 
   const initialAssets = await page.evaluate(async id => {
     const { StorageClient } = await import('./src/storage/client.mjs');
@@ -584,6 +614,74 @@ test('stop while microphone permission is pending cancels the late stream', asyn
   await expect(tracks(page)).toHaveCount(0);
   await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Connect microphone');
   await expect.poll(() => page.evaluate(() => window.__testMicStreams.length > 0 && window.__testMicStreams.every(stream => stream.getTracks().every(track => track.readyState === 'ended')))).toBe(true);
+});
+
+test('custom seconds work for the first loop, free capture starts immediately, and Finish can stop a timed loop early', async ({ page }, testInfo) => {
+  await boot(page);
+  const length = page.getByRole('combobox', { name: 'New loop length', exact: true });
+  const starts = page.getByRole('combobox', { name: 'Recording starts', exact: true });
+  const seconds = page.getByRole('spinbutton', { name: 'Loop duration in seconds', exact: true });
+  await expect(length).toHaveValue('free'); await expect(starts).toHaveValue('immediate');
+  await length.selectOption('seconds'); await seconds.fill('3.25'); await seconds.press('Tab');
+  await page.getByTestId('enable-mic').click();
+  await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Disconnect microphone');
+  await page.getByTestId('add-loop').click(); await state(page, 'recording');
+  await expect(length).toBeDisabled(); await expect(starts).toBeDisabled(); await expect(seconds).toBeDisabled();
+  // No Finish click: a timed first loop must establish an exact sample count,
+  // even though no earlier cycle exists from which to derive its length.
+  await expect(tracks(page)).toHaveCount(1); await state(page, 'idle');
+  await expect.poll(async () => (await savedProject(page)).tracks.length).toBe(1);
+  const first = await savedProject(page);
+  expect(first.tracks[0].frames).toBe(Math.round(first.sampleRate * 3.25));
+  expect(first.baseFrames).toBe(first.tracks[0].frames);
+  await playing(page, true);
+
+  await length.selectOption('free');
+  // Click well away from the next 3.25-second boundary. A quantized start
+  // would now wait over two seconds, whereas a warm mic must start promptly.
+  await expect.poll(async () => {
+    const [minutes, remainder] = (await page.locator('[data-ref="transport-time"]').textContent()).split(':').map(Number);
+    const phase = (minutes * 60 + remainder) % 3.25;
+    return phase >= .5 && phase <= 1;
+  }, { intervals: [20], timeout: 6000 }).toBe(true);
+  await watchLoopOnset(page);
+  await page.getByTestId('add-loop').click(); await state(page, 'recording');
+  const onset = await page.evaluate(() => window.__loopCaptureOnset);
+  await testInfo.attach('warm-microphone-immediate-start', { body: JSON.stringify(onset), contentType: 'application/json' });
+  expect(onset.clickedAt).toEqual(expect.any(Number)); expect(onset.recordingAt).toEqual(expect.any(Number));
+  expect(onset.recordingAt - onset.clickedAt).toBeLessThan(500);
+  await expect.poll(async () => {
+    const [minutes, remainder] = (await page.locator('[data-ref="capture-time"]').textContent()).split(':').map(Number);
+    return minutes * 60 + remainder;
+  }).toBeGreaterThanOrEqual(2.3);
+  await state(page, 'recording'); await expect(tracks(page)).toHaveCount(1);
+  await page.getByTestId('finish').click(); await state(page, 'idle'); await expect(tracks(page)).toHaveCount(2);
+  await expect.poll(async () => (await savedProject(page)).tracks.length).toBe(2);
+  const free = await savedProject(page);
+  expect(free.tracks[1].frames).toBeGreaterThan(free.sampleRate * 2);
+  expect(free.baseFrames).toBe(first.baseFrames);
+
+  await length.selectOption('seconds'); await seconds.fill('8'); await seconds.press('Tab');
+  await page.getByTestId('add-loop').click(); await state(page, 'recording');
+  await page.waitForTimeout(650); // Capture actual audio before ending early.
+  await page.getByTestId('finish').click();
+  await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'idle', { timeout: 4000 });
+  await expect(tracks(page)).toHaveCount(3);
+  await expect.poll(async () => (await savedProject(page)).tracks.length).toBe(3);
+  const shortened = await savedProject(page);
+  expect(shortened.tracks[2].frames).toBeLessThan(shortened.sampleRate * 3);
+  expect(shortened.tracks[2].frames).toBeGreaterThan(shortened.sampleRate * .5);
+  expect(shortened.baseFrames).toBe(first.baseFrames);
+  await page.getByTestId('stop').click();
+  await page.reload(); await expect(tracks(page)).toHaveCount(3);
+  await expect(length).toHaveValue('seconds'); await expect(seconds).toHaveValue('8'); await expect(starts).toHaveValue('immediate');
+  await page.setViewportSize({ width: 360, height: 800 });
+  for (const input of [length, seconds, starts]) {
+    await input.scrollIntoViewIfNeeded(); const bounds = await input.boundingBox();
+    expect(bounds.height).toBeGreaterThanOrEqual(44); expect(bounds.x).toBeGreaterThanOrEqual(0); expect(bounds.x + bounds.width).toBeLessThanOrEqual(361);
+  }
+  await seconds.scrollIntoViewIfNeeded();
+  await reviewScreenshot(page, testInfo, 'custom-loop-duration-phone');
 });
 
 test('microphone inputs switch between takes and remain locked while recording', async ({ page }) => {

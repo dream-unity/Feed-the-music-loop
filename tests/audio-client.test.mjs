@@ -462,3 +462,13 @@ test('loop-only arming never asks for microphone permission and rejection retire
   assert.equal(h.requests.length,0);assert.equal(h.engine.loopMixCapture(),true);
   h.nodes[0].emit({type:'capture-rejected',captureId:'loops'});assert.equal(h.engine.loopMixCapture(),false);
 });
+
+test('a warmed recording reuses context, live microphone and ready tracks, and posts arm synchronously',async t=>{
+  const h=fakeBrowser(t);await h.init();const enabling=h.engine.enableMic(),stream=microphone();h.requests[0].resolve(stream);await enabling;
+  const track=createTrack({id:'loop',assetId:'loop-audio',frames:1003});h.engine.syncTracks([track]);h.nodes[0].emit({type:'track-ready',id:track.id,assetId:track.assetId});
+  const context=h.contexts[0],resumeCount=context.resumeCount,source=h.sources[0],beforeCommands=h.commands().length;
+  await h.init();await h.engine.enableMic();await h.engine.waitUntilReady();
+  h.engine.arm({id:'quick',assetId:'quick-audio',kind:'loop',lengthFrames:0,quantized:false});
+  assert.equal(h.contexts.length,1);assert.equal(context.resumeCount,resumeCount);assert.equal(h.requests.length,1);assert.equal(h.sources.length,1);assert.equal(h.engine.source,source);assert.equal(stream.track.stopCount,0);
+  assert.equal(h.commands().length,beforeCommands+1);assert.equal(h.commands().at(-1).type,'arm');assert.equal(h.commands().at(-1).capture.quantized,false);assert.equal(h.engine.armingCapture.id,'quick');
+});
