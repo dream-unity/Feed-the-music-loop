@@ -1513,7 +1513,7 @@ export class StudioController {
     for (const media of running) media.pause();
     if (transport) this.engine?.pause();
     this.state.playing = false; this.state.paused = true;
-    this.state.outputLevel = 0; this.state.status = 'Paused · resume from the same position';
+    this.state.outputLevel = 0;
     this.render(); await this.releaseWake();
   }
   async playPlayback() {
@@ -1563,7 +1563,7 @@ export class StudioController {
     this.state.playbackBaselines = Object.fromEntries((project?.tracks || []).map(track => [track.id, track.offsetFrames || 0]));
     if (!this.pending) { this.state.capture = null; if (!this.projectDeletion?.committing && !this.trackEditOperation) this.state.busy = false; }
     else if (this.state.capture) this.state.capture = { ...this.state.capture, status: 'finishing' };
-    this.state.playing = false; this.state.status = this.pending ? 'Stopped · finishing and saving recording…' : 'Stopped · back to the beginning';
+    this.state.playing = false;
     this.render(); await this.releaseWake();
   }
   currentPlaybackProject() {

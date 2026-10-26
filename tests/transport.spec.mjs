@@ -12,7 +12,7 @@ async function seed(page, context) {
   await page.goto('./__ci-transport-fixtures.html');
   return page.evaluate(async () => {
     const storagePath = './src/storage/client.mjs', projectPath = './src/project.mjs';
-    const { StorageClient } = await import(storagePath), { createProject, createTrack, PAGE_FRAMES } = await import(projectPath);
+    const { StorageClient } = await import(storagePath), { createProject, createTrack, validateProject, PAGE_FRAMES } = await import(projectPath);
     const storage = new StorageClient(), project = createProject('Stop and pause verification', 48000);
     try {
       await storage.init(); await storage.saveProject(project);
@@ -28,10 +28,10 @@ async function seed(page, context) {
         }
         await storage.finishAsset(id, { frames });
         project.tracks.push(createTrack({ assetId: id, name: `Opening ${index + 1}`, frames, offsetFrames: index ? 72000 : 12000,
-          peaks: Array.from({ length: 64 }, (_, i) => i < 5 ? .12 : 0), mix: { volume: 1, pan: index ? 1 : -1, low: 0, mid: 0, high: 0, highpass: 0, compression: 0, reverb: 0, delay: 0 } }));
+          peaks: Array.from({ length: 64 }, (_, i) => i < 5 ? .12 : 0), mix: { volume: 1, pan: index ? 1 : -1, low: 0, mid: 0, high: 0, highpass: 20, compression: 0, reverb: 0, delay: 0 } }));
       }
       project.baseFrames = 2 * project.sampleRate;
-      await storage.saveProject(project); localStorage.setItem('fml:last-project', project.id);
+      await storage.saveProject(validateProject(project)); localStorage.setItem('fml:last-project', project.id);
       return { offsets: project.tracks.map(track => track.offsetFrames), lengths: project.tracks.map(track => track.frames) };
     } finally { await storage.dispose(); }
   });

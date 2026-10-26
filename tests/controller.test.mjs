@@ -1937,6 +1937,22 @@ test('Pause holds transport and microphone-monitor preference, and Play resumes 
   assert.equal(f.controller.state.paused, false); assert.equal(f.controller.state.transportFrame, 901);
 });
 
+test('Pause and Stop preserve the pending-save status until the durable save completes', async () => {
+  const f = fixture(), write = deferred();
+  f.controller.state.playing = true; f.engine.playing = true;
+  f.storage.saveHook = () => write.promise;
+  const saving = f.controller.saveNow(); await tick();
+  assert.equal(f.controller.state.status, 'Saving…');
+  await f.controller.handle({ type: 'pause' });
+  assert.equal(f.controller.state.status, 'Saving…', 'Pause must preserve the unsaved-change guard');
+  await f.controller.handle({ type: 'stop' });
+  assert.equal(f.controller.state.status, 'Saving…', 'Stop must preserve the unsaved-change guard');
+  write.resolve(); await saving;
+  assert.equal(f.controller.state.status, 'Saved on this device');
+  await f.controller.handle({ type: 'stop' });
+  assert.equal(f.controller.state.status, 'Saved on this device', 'Transport controls do not replace durable save status');
+});
+
 test('Pause and Play retain the native recording position, and Stop restarts that recording from zero without starting backing', async () => {
   const f = fixture(), media = playbackMedia(); f.ui.getPlaybackMedia = () => [media];
   await f.controller.handle({ type: 'pause' });
