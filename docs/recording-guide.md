@@ -2,6 +2,8 @@
 
 Start with a short groove, then build around it. Your loop layers, continuous vocal takes and recorded stereo performances stay separate, so you can change the sound without singing everything again.
 
+The bottom bar has separate **Play**, **Pause** and **Stop** buttons. Pause holds the current position; Play resumes. Stop rewinds the song counter, every live loop and loaded recording players to zero. Playing the loops after Stop starts all their beginnings together. Their individual lengths stay the same. The space bar toggles Play/Pause outside recording; use the square Stop button when you want a full reset. During recording, Pause is disabled: Finish keeps the groove going, while Stop saves the recorded portion and returns playback to the beginning.
+
 1. **Get a clean input.**
 
    Open the studio, connect wired headphones and choose **Connect mic**. Allow microphone access. Under **Timing & recording**, **Microphone input** lets you choose an available input after permission is granted.
@@ -102,7 +104,7 @@ Choose **Record all the loops** in the bottom recording bar. This is a separate 
 
 No microphone permission is needed. A connected microphone, microphone monitoring, a selected vocal take and the metronome are excluded from the recording. A vocal that you previously turned into a loop is included like any other unmuted loop.
 
-Recording follows your **Recording starts** preference, immediately by default. It has no automatic ending from the loop-duration setting. Change mutes, launch sections and adjust the mix while recording to build the song. Choose **Finish recording** when ready; your groove keeps playing. **Stop** saves the recording and stops playback. **Discard** removes the current attempt. The finished **Loop recording** appears immediately below the recorder with Listen, WAV and trash controls, and remains in **Song → Performances**. No separate vocal take is created.
+Recording follows your **Recording starts** preference, immediately by default. It has no automatic ending from the loop-duration setting. Change mutes, launch sections and adjust the mix while recording to build the song. Choose **Finish recording** when ready; your groove keeps playing. **Stop** saves the recording, stops playback and returns every loop to the beginning. **Discard** removes the current attempt. The finished **Loop recording** appears immediately below the recorder with Listen, WAV and trash controls, and remains in **Song → Performances**. No separate vocal take is created.
 
 During microphone recording, the live microphone history rises and falls with your actual input, including quiet or silent moments. During **Record all the loops**, the same display shows the captured stereo loop levels instead of microphone input.
 

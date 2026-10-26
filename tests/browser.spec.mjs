@@ -319,8 +319,20 @@ test('record loops, a continuous vocal, another take, and recover after reload',
   const reopenedAudio = inspectWav(reopenedMaster.bytes);
   expect(preview.duration).toBeCloseTo(reopenedAudio.frames / reopenedAudio.sampleRate, 2);
   await testInfo.attach('native-performance-preview', { body: JSON.stringify(preview, null, 2), contentType: 'application/json' });
+  const previewSource = await player.getAttribute('src');
+  await page.getByTestId('pause').click();
+  await expect.poll(() => player.evaluate(audio => audio.paused)).toBe(true);
+  const previewHeld = await player.evaluate(audio => audio.currentTime);
+  expect(previewHeld).toBeGreaterThan(.3);
+  await page.waitForTimeout(200);
+  expect(await player.evaluate(audio => audio.currentTime)).toBe(previewHeld);
+  await page.getByTestId('play').click();
+  await expect.poll(() => player.evaluate(audio => audio.currentTime)).toBeGreaterThan(previewHeld + .1);
+  await playing(page, false); // Resume the selected recording, not the backing loops.
   await page.getByTestId('stop').click();
   expect(await player.evaluate(audio => audio.paused)).toBe(true);
+  await expect.poll(() => player.evaluate(audio => audio.currentTime)).toBe(0);
+  await expect(player).toHaveAttribute('src', previewSource);
 });
 
 test('demo, mix controls, sections, portable backup and invalid-import preservation', async ({ page }, testInfo) => {
@@ -626,6 +638,7 @@ test('custom seconds work for the first loop, free capture starts immediately, a
   await page.getByTestId('enable-mic').click();
   await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Disconnect microphone');
   await page.getByTestId('add-loop').click(); await state(page, 'recording');
+  await expect(page.getByTestId('pause')).toBeDisabled();
   await expect(length).toBeDisabled(); await expect(starts).toBeDisabled(); await expect(seconds).toBeDisabled();
   // No Finish click: a timed first loop must establish an exact sample count,
   // even though no earlier cycle exists from which to derive its length.

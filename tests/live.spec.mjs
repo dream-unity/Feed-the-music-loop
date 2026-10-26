@@ -145,8 +145,22 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     await expect(page.locator('[data-ref="save-state"]')).toHaveText('Saved on this device');
     await expect(page.locator('#app')).toHaveAttribute('data-playing', 'true');
     await expect.poll(async () => Number(await page.locator('[data-ref="output-db"]').textContent())).toBeGreaterThan(-60);
+    await page.getByTestId('pause').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-playing', 'false');
+    await page.waitForTimeout(100); // Let the audio-thread acknowledgement update the visible clock.
+    const heldTime = await page.locator('[data-ref="transport-time"]').textContent();
+    const heldPositions = await page.locator('.loop-card [data-position]').evaluateAll(nodes => nodes.map(node => node.style.left));
+    expect(heldTime).not.toBe('0:00.0');
+    await page.waitForTimeout(200);
+    await expect(page.locator('[data-ref="transport-time"]')).toHaveText(heldTime);
+    expect(await page.locator('.loop-card [data-position]').evaluateAll(nodes => nodes.map(node => node.style.left))).toEqual(heldPositions);
+    await page.getByTestId('play').click();
+    await expect(page.locator('#app')).toHaveAttribute('data-playing', 'true');
+    await expect(page.locator('[data-ref="transport-time"]')).not.toHaveText(heldTime);
     await page.getByTestId('stop').click();
     await expect(page.locator('#app')).toHaveAttribute('data-playing', 'false');
+    await expect(page.locator('[data-ref="transport-time"]')).toHaveText('0:00.0');
+    await expect.poll(() => page.locator('.loop-card [data-position]').evaluateAll(nodes => nodes.map(node => Number.parseFloat(node.style.left)))).toEqual([0]);
     await page.getByTestId('enable-mic').click();
     await expect(page.getByTestId('enable-mic')).toHaveAccessibleName('Connect microphone');
     await page.locator('[data-action="view"][data-view="mix"]').click();
@@ -170,6 +184,7 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     });
     await page.getByTestId('record-all-loops').click();
     await expect(page.locator('#app')).toHaveAttribute('data-capture-state', 'recording');
+    await expect(page.getByTestId('pause')).toBeDisabled();
     await expect(page.locator('[data-ref="capture-live-label"]')).toHaveText('LIVE LOOPS');
     await page.waitForTimeout(1100);
     await page.getByTestId('finish').click();

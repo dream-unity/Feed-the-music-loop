@@ -44,14 +44,15 @@ class FakeUI extends EventTarget {
   notify(message, kind) { this.notifications.push({ message, kind }); }
 }
 class FakeEngine {
-  constructor() { this.commands = []; this.micHook = null; }
+  constructor() { this.commands = []; this.micHook = null; this.node = {}; this.transportGeneration = 0; this.playing = false; }
   async enableMic() { if (this.micHook) await this.micHook(); }
   configure(project) { this.commands.push({ type: 'configure', id: project.id }); }
   syncTracks(tracks) { this.commands.push({ type: 'sync-tracks', ids: tracks.map(track => track.id) }); }
   arm(capture) { this.commands.push({ type: 'arm', capture }); }
   cancel() { this.commands.push({ type: 'cancel' }); }
-  stop() { this.commands.push({ type: 'stop' }); }
-  play() { this.commands.push({ type: 'play' }); }
+  stop() { this.transportGeneration++; this.playing = false; this.commands.push({ type: 'stop' }); }
+  pause() { this.transportGeneration++; this.playing = false; this.commands.push({ type: 'pause' }); }
+  play() { this.transportGeneration++; this.playing = true; this.commands.push({ type: 'play' }); }
   disableMic() { this.commands.push({ type: 'mic-off' }); }
   send(type, payload) { this.commands.push({ type, payload }); }
   async close() { this.commands.push({ type: 'close' }); }
@@ -110,7 +111,7 @@ test('suspended playback exposes Play again, ignores stale meters, and resumes o
   assert.equal(f.controller.engine, f.engine); assert.equal(f.controller.state.playing, false);
   assert.equal(f.controller.state.monitor, false); assert.equal(f.controller.state.project.input.monitor, false);
   assert.match(f.controller.state.status, /press Play or Record to resume/);
-  assert.ok(f.engine.commands.some(command => command.type === 'stop'));
+  assert.ok(f.engine.commands.some(command => command.type === 'pause'));
   f.controller.audioEvent('meter', { playing: true, transportFrame: 859, inputLevel: .7, outputLevel: .5 });
   assert.equal(f.controller.state.playing, false); assert.equal(f.controller.state.transportFrame, 731);
   f.engine.context.state = 'running'; f.controller.audioEvent('context-state', { state: 'running' });
@@ -1895,4 +1896,124 @@ test('background capacity refresh occurs only after durable capture metadata and
   await f.controller.handle({ type: 'sing' }); await tick();
   assert.deepEqual(order, ['save', 'asset', 'asset', 'arm', 'estimate']); assert.equal(f.controller.state.storage.usage, 10);
   await f.controller.cancelPrepared(f.controller.pending);
+});
+
+function playbackMedia({ source = 'blob:recording', currentTime = 2.25, paused = false } = {}) {
+  return { src: source, currentTime, paused, ended: false, playCalls: 0, pauseCalls: 0,
+    getAttribute(name) { return name === 'src' ? this.src : null; },
+    pause() { this.paused = true; this.pauseCalls++; },
+    async play() { this.paused = false; this.playCalls++; } };
+}
+
+test('Stop resets every loaded audio player and transport without removing their selected recordings or authored timing', async () => {
+  const f = fixture(), project = f.controller.state.project;
+  project.tracks = [createTrack({ assetId: 'a', frames: 1000, offsetFrames: 319 }), createTrack({ assetId: 'b', frames: 1500, offsetFrames: -421 })];
+  const tracks = clone(project.tracks), media = [playbackMedia(), playbackMedia({ source: 'blob:master', currentTime: 4.5 }), playbackMedia({ source: 'blob:editor', currentTime: .8 })];
+  f.ui.getPlaybackMedia = () => media;
+  f.controller.state.preview = { url: media[0].src, name: 'Song' };
+  f.controller.state.recordingMix = { previewUrl: media[1].src };
+  f.controller.state.trackEditor = { previewUrl: media[2].src };
+  f.controller.refreshTrackEditor = () => {}; f.controller.refreshRecordingMix = () => {}; f.controller.loadEditorWaveform = () => {};
+  f.controller.state.playing = true; f.controller.state.transportFrame = 4719; f.controller.state.queuedSectionId = 'later';
+  f.controller.state.project.input.monitor = true; f.controller.state.monitor = true;
+  await f.controller.handle({ type: 'stop' });
+  assert.equal(f.controller.state.transportFrame, 0); assert.equal(f.controller.state.playing, false); assert.equal(f.controller.state.paused, false);
+  assert.equal(f.controller.state.queuedSectionId, null); assert.equal(f.controller.state.monitor, false);
+  assert.deepEqual(project.tracks, tracks); assert.deepEqual(Object.values(f.controller.state.playbackOffsets), [0, 0]);
+  assert.deepEqual(f.controller.state.playbackBaselines, Object.fromEntries(tracks.map(track => [track.id, track.offsetFrames])));
+  for (const item of media) { assert.equal(item.currentTime, 0); assert.equal(item.paused, true); assert.ok(item.src); }
+  assert.equal(f.controller.state.preview.url, 'blob:recording'); assert.equal(f.controller.state.recordingMix.previewUrl, 'blob:master'); assert.equal(f.controller.state.trackEditor.previewUrl, 'blob:editor');
+});
+
+test('Pause holds transport and microphone-monitor preference, and Play resumes only that transport', async () => {
+  const f = fixture(); f.controller.state.playing = true; f.engine.playing = true; f.controller.state.transportFrame = 901;
+  f.controller.state.monitor = true; f.controller.state.project.input.monitor = true;
+  const idlePreview = playbackMedia({ paused: true }); f.ui.getPlaybackMedia = () => [idlePreview];
+  await f.controller.handle({ type: 'pause' });
+  assert.equal(f.controller.state.paused, true); assert.equal(f.controller.state.playing, false); assert.equal(f.controller.state.transportFrame, 901);
+  assert.equal(f.controller.state.project.input.monitor, true); assert.ok(f.engine.commands.some(command => command.type === 'pause'));
+  await f.controller.handle({ type: 'play' });
+  assert.equal(idlePreview.playCalls, 0); assert.equal(f.engine.commands.filter(command => command.type === 'play').length, 1);
+  assert.equal(f.controller.state.paused, false); assert.equal(f.controller.state.transportFrame, 901);
+});
+
+test('Pause and Play retain the native recording position, and Stop restarts that recording from zero without starting backing', async () => {
+  const f = fixture(), media = playbackMedia(); f.ui.getPlaybackMedia = () => [media];
+  await f.controller.handle({ type: 'pause' });
+  assert.equal(media.currentTime, 2.25); assert.equal(media.paused, true); assert.equal(f.controller.state.paused, true);
+  await f.controller.handle({ type: 'play' });
+  assert.equal(media.currentTime, 2.25); assert.equal(media.playCalls, 1); assert.equal(media.paused, false);
+  assert.equal(f.engine.commands.some(command => command.type === 'play'), false);
+  await f.controller.handle({ type: 'stop' }); assert.equal(media.currentTime, 0); assert.equal(media.paused, true);
+  await f.controller.handle({ type: 'play' }); assert.equal(media.playCalls, 2); assert.equal(media.currentTime, 0);
+  assert.equal(f.engine.commands.some(command => command.type === 'play'), false);
+});
+
+test('native Play clears a global pause and replacing the preview cannot resume an obsolete audio source', async () => {
+  const f = fixture(), media = playbackMedia(); f.ui.getPlaybackMedia = () => [media];
+  await f.controller.handle({ type: 'pause' }); assert.equal(f.controller.pausedMedia.length, 1);
+  await f.controller.handle({ type: 'media-playback', playing: true, id: 'performance-player' });
+  assert.equal(f.controller.state.paused, false); assert.equal(f.controller.pausedMedia.length, 0);
+  media.paused = false; await f.controller.handle({ type: 'pause' });
+  f.ui.getPlaybackMedia = () => []; f.controller.closePreview(); await f.controller.handle({ type: 'play' });
+  assert.equal(media.playCalls, 0); assert.equal(f.engine.commands.filter(command => command.type === 'play').length, 1);
+});
+
+test('old meter and audition acknowledgements cannot resurrect playback after Stop', async () => {
+  const f = fixture(); f.controller.state.transportFrame = 4500; f.controller.state.playing = true;
+  await f.controller.handle({ type: 'stop' }); const generation = f.engine.transportGeneration;
+  f.controller.audioEvent('meter', { transportGeneration: generation - 1, playing: true, transportFrame: 4600, outputLevel: .5 });
+  f.controller.audioEvent('audition-start', { transportGeneration: generation - 1, id: 'old', startFrame: 4600, endFrame: 6000 });
+  assert.equal(f.controller.state.transportFrame, 0); assert.equal(f.controller.state.playing, false); assert.equal(f.controller.state.audition, null);
+  f.controller.audioEvent('state', { transportGeneration: generation, playing: false, transportFrame: 0, paused: false });
+  await f.controller.handle({ type: 'play' }); f.controller.state.playing = true;
+  f.controller.audioEvent('audition-end', { transportGeneration: generation, reason: 'stopped' });
+  assert.equal(f.controller.state.playing, true);
+});
+
+test('Pause and Play cannot interrupt an active recording or its finishing tail', async () => {
+  for (const kind of ['loop', 'vocal', 'mix']) for (const status of ['arming', 'recording', 'finishing']) {
+    const f = fixture(); f.controller.state.capture = { kind, status }; f.controller.state.transportFrame = 719;
+    await assert.rejects(f.controller.handle({ type: 'pause' }), /recording before pausing/);
+    await assert.rejects(f.controller.handle({ type: 'play' }), /Finish saving the recording/);
+    assert.equal(f.controller.state.transportFrame, 719); assert.equal(f.engine.commands.length, 0);
+  }
+});
+
+test('Stop leaves capture recovery progress on its original timeline while the visible transport returns to zero', async () => {
+  const f = fixture(); finishedCapture(f, { rawFrames: 700, masterFrames: 700 });
+  f.controller.state.transportFrame = 2000; f.controller.pending.finalizing = false; f.controller.updateCaptureIntent();
+  const checkpoint = f.controller.state.project.pendingCapture.sealedThroughFrame;
+  await f.controller.handle({ type: 'stop' }); f.controller.updateCaptureIntent();
+  assert.equal(f.controller.state.transportFrame, 0); assert.equal(f.controller.pending.stopRequested, true);
+  assert.equal(f.controller.state.project.pendingCapture.sealedThroughFrame, checkpoint);
+  assert.equal(f.controller.state.capture.status, 'finishing');
+});
+
+test('a cold Stop requests a source-aligned reset after the graph is initialized', async () => {
+  const f = fixture(); f.controller.engine = null;
+  await f.controller.handle({ type: 'stop' }); assert.equal(f.controller.resetTransportOnInit, true);
+  const engine = f.engine; engine.init = async () => engine; engine.waitUntilReady = async () => {}; f.controller.engine = engine;
+  await StudioController.prototype.ensureAudio.call(f.controller);
+  assert.equal(f.controller.resetTransportOnInit, false); assert.equal(engine.commands.filter(command => command.type === 'stop').length, 1);
+});
+
+test('current playback exports derive a fresh nudge from the reset baseline without changing stored loop offsets', async () => {
+  const f = fixture(), track = createTrack({ assetId: 'phase', frames: 1000, offsetFrames: 327 });
+  f.controller.state.project.tracks.push(track); await f.controller.handle({ type: 'stop' });
+  assert.equal(f.controller.currentPlaybackProject().tracks[0].offsetFrames, 0);
+  track.offsetFrames += 57; // Export immediately, before a later meter can arrive.
+  assert.equal(f.controller.currentPlaybackProject().tracks[0].offsetFrames, 57);
+  assert.equal(f.controller.state.project.tracks[0].offsetFrames, 384);
+});
+
+test('current playback exports preserve exact phase when valid authored offsets have an unsafe difference', async () => {
+  const f = fixture(), track = createTrack({ assetId: 'extreme-offset', frames: 1003, offsetFrames: -Number.MAX_SAFE_INTEGER });
+  f.controller.state.project.tracks = [track];
+  await f.controller.handle({ type: 'stop' });
+  track.offsetFrames = Number.MAX_SAFE_INTEGER;
+  const exported = f.controller.currentPlaybackProject();
+  assert.equal(exported.tracks[0].offsetFrames, Number((2n * BigInt(Number.MAX_SAFE_INTEGER)) % BigInt(track.frames)));
+  assert.ok(Number.isSafeInteger(exported.tracks[0].offsetFrames));
+  assert.equal(track.offsetFrames, Number.MAX_SAFE_INTEGER, 'The authored timing is not rewritten');
 });

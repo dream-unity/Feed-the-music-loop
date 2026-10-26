@@ -26,6 +26,7 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 - Separate continuous lead recordings while loops play.
 - An original stereo master for each vocal performance, alongside editable vocal audio and timestamped arrangement events.
 - Sample-frame transport, loop boundaries and queued section changes in an `AudioWorklet`.
+- Separate Play, Pause and Stop controls. Pause holds the current position; Stop returns the transport and every loop to the beginning so they restart together.
 - Live audition of a selected lead with the current mixer, plus the original performance player.
 - Individual layer mute, solo, naming, color, timing adjustment and reversible role presets.
 - Waveform editing for every loop: select precise moments, trim, shorten or extend with repeats/silence, and copy a selection into the same or another track. Each edit saves a separate audio version and supports session Undo/Redo.
@@ -43,6 +44,8 @@ The [recording guide](docs/recording-guide.md) walks through timing, clean input
 ## Audio and recording behavior
 
 Audio runs on the browser's audio rendering thread. Interface redraws do not set loop timing. The engine uses actual render-block lengths rather than assuming every block contains 128 frames.
+
+**Pause** holds the current playback position, including a recording preview; **Play/Resume** continues from there. **Stop** silences playback, rewinds loaded players and resets each live loop to its first sample. The next Play starts those loop beginnings together. Saved audio and the timing inside earlier recorded performances stay intact. Each loop retains its own duration, so different-length loops still complete their repeats at different times. While recording, Pause is unavailable; Stop saves the captured portion and returns playback to zero, while **Finish recording** saves it and lets the groove continue.
 
 New projects and older projects without recording preferences default to free length and an immediate start. A two-second demo cycle does not limit new recordings. Custom seconds are rounded to the nearest audio sample; choosing a cycle count makes the duration that many times the existing base cycle. **Finish recording** can end either kind early. **Next cycle** controls only when recording starts, and the optional first-loop count-in works for both free and timed loops. With a ready microphone, immediate capture starts on the next audio render block after preparation; first-use permission, hardware startup and deliberate recording compensation remain separate from that setting.
 

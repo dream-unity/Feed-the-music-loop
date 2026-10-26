@@ -8,7 +8,7 @@ export class AudioEngine extends EventTarget {
   constructor(storage, { resumeTimeoutMs = 10000 } = {}) {
     super(); this.storage = storage; this.context = null; this.node = null; this.stream = null; this.source = null;
     this.micGeneration = 0; this.initPromise = null; this.tracks = new Map(); this.playing = false; this.frame = 0;
-    this.capture = null; this.armingCapture = null; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
+    this.capture = null; this.armingCapture = null; this.paused = false; this.playbackOffsets = {}; this.playbackBaselines = {}; this.transportGeneration = 0; this.closed = false; this.requestId = 0; this.micPromise = null; this.projectId = null;
     this.selectedDeviceId = ''; this.pendingDeviceId = null; this.deviceTarget = null; this.deviceListener = null; this.deviceListGeneration = 0;
     this.suppressedStateChange = false;
     this.readyTracks = new Set(); this.readyWaiters = new Set(); this.trackAssets = new Map(); this.readinessGeneration = 0;
@@ -72,7 +72,8 @@ export class AudioEngine extends EventTarget {
   }
   onMessage(message) {
     if (!message || typeof message.type !== 'string') return;
-    if (message.type === 'meter' || message.type === 'state') {
+    if ((message.type === 'meter' || message.type === 'state') && (!Number.isSafeInteger(message.transportGeneration) || message.transportGeneration >= this.transportGeneration)) {
+      this.paused = !!message.paused; this.playbackOffsets = message.playbackOffsets || this.playbackOffsets; this.playbackBaselines = message.playbackBaselines || this.playbackBaselines;
       this.playing = !!message.playing; this.frame = message.transportFrame ?? this.frame; this.capture = message.capture ?? null;
     }
     if (message.type === 'capture-end') this.capture = null;
@@ -82,6 +83,7 @@ export class AudioEngine extends EventTarget {
   }
   send(type, detail = {}, transfer = []) {
     if (!this.node) return false;
+    if (['play', 'pause', 'stop', 'seek'].includes(type)) detail = { ...detail, transportGeneration: ++this.transportGeneration };
     this.node.port.postMessage({ type, requestId: ++this.requestId, ...detail }, transfer); return true;
   }
   configure(project) {
@@ -216,6 +218,8 @@ export class AudioEngine extends EventTarget {
     this.send('configure', { monitor: false }); this.dispatchEvent(event('mic', { enabled: false, selectedDeviceId: this.selectedDeviceId, settings: {} }));
   }
   play() { this.send('play'); }
+  pause() { this.send('pause'); }
+  seek() { this.send('seek'); }
   cancelReadiness() { ++this.readinessGeneration; for (const check of this.readyWaiters) check(); }
   stop() { this.cancelPendingMic(); this.cancelReadiness(); this.send('stop'); }
   finish() { this.send('finish'); }

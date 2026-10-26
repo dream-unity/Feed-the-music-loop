@@ -49,6 +49,10 @@ The final-level controls measure sample peaks. They do not measure LUFS or recon
 
 ## What the checks establish
 
+Studio 2026.10.26.1 separates Pause from Stop. Deterministic transport checks compare paused/resumed PCM with uninterrupted playback, including effects and metronome state. Stop checks cover unequal loop lengths and nonzero saved offsets, compensation tails, queued commands, preview positions and recording endpoints. Runtime reset offsets must not alter saved source timing; export checks compare the captured arrangement and subsequent timing edits against expected samples.
+
+The portable browser transport scenario checks held and reset playheads, keyboard Pause/Resume, native recording previews and simultaneous stereo loop openings after Stop. It also verifies that stopping an active capture preserves its duration and that phone transport controls remain accessible. Different-length loops still repeat at their own lengths; resetting makes their first samples start together.
+
 Studio 2026.10.18.2 adds free, custom-second and cycle-based loop durations with independent immediate or next-cycle starts. Deterministic tests verify the first captured sample, exact timed lengths across render-block sizes, timed first-loop count-in, early Finish with compensation, and provisional playback before a durable seal. Controller tests cover invalid durations before microphone access, saved preferences and delayed storage estimates that must not delay recording.
 
 The Chromium scenario records a 3.25-second first loop, verifies its exact saved frame count, starts another recording away from a cycle boundary with an already connected microphone, continues free recording beyond two seconds, and ends an eight-second preset early. It measures click-to-recording-state time against a 500 ms regression threshold and retains that measurement in the report. This detects the former deliberate cycle wait; it is not a hardware-latency guarantee. The public-site check also records an exact 3.25-second first loop and verifies the immediate/free defaults before selecting its duration.

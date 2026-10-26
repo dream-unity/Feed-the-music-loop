@@ -139,6 +139,12 @@ function checkMix(value, label, strict) {
   return out;
 }
 function unique(items, label) { const seen = new Set(); for (const item of items) { if (seen.has(item.id)) fail(`${label} contains a duplicate identifier.`); seen.add(item.id); } return seen; }
+function checkSourceOffset(track) {
+  if (track?.sourceOffsetFrames !== undefined) number(track.sourceOffsetFrames, 'source track offset', -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, true);
+}
+function checkSnapshotOffsets(snapshot) {
+  if (Array.isArray(snapshot?.tracks)) for (const track of snapshot.tracks) checkSourceOffset(track);
+}
 
 /** Validate the complete metadata before a load/import can replace the active project. */
 export function validateProject(input, { strict = true } = {}) {
@@ -166,6 +172,7 @@ export function validateProject(input, { strict = true } = {}) {
     if (!['loop', 'vocal'].includes(t.kind)) fail('Unknown track type.');
     number(t.frames, 'track frames', 1, Number.MAX_SAFE_INTEGER, true); number(t.channels, 'track channels', 1, 2, true);
     number(t.offsetFrames ?? 0, 'track offset', -Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, true); t.offsetFrames ??= 0;
+    checkSourceOffset(t);
     t.muted = bool(t.muted, 'track mute'); t.solo = bool(t.solo, 'track solo'); t.mix = checkMix(t.mix, 'track mix', strict);
     if (t.color !== undefined && !/^#[0-9a-f]{6}$/i.test(t.color)) fail('Invalid track colour.');
     if (t.peaks !== undefined) { array(t.peaks, 'waveform', 4096); for (const v of t.peaks) number(v, 'waveform peak', 0, 128); }
@@ -208,7 +215,10 @@ export function validateProject(input, { strict = true } = {}) {
     if (perf.editableFrames !== undefined) number(perf.editableFrames, 'editable performance length', 0, perf.frames, true);
     if (perf.arrangementIncomplete && (perf.status === 'complete' || perf.editableFrames === undefined)) fail('An incomplete arrangement needs an interrupted status and a verified editable interval.');
     checkEvents(perf.events ?? [], 'performance events');
+    checkSnapshotOffsets(perf.initialState);
   }
+  checkSnapshotOffsets(p.pendingCapture?.initialState);
+  if (Array.isArray(p.pendingCapture?.events)) for (const event of p.pendingCapture.events) checkSourceOffset(event?.track);
   if (p.pendingCapture?.arrangementIncomplete !== undefined) bool(p.pendingCapture.arrangementIncomplete, 'incomplete capture arrangement');
   if (p.pendingCapture?.arrangementThroughFrame !== undefined) number(p.pendingCapture.arrangementThroughFrame, 'capture arrangement boundary', 0, Number.MAX_SAFE_INTEGER, true);
   const perfIds = unique(performances, 'performances');
@@ -230,7 +240,7 @@ export function validateProject(input, { strict = true } = {}) {
 }
 function checkEvents(events, label) {
   array(events, label, MAX_AUTOMATION_EVENTS);
-  for (const event of events) { object(event, 'event'); number(event.frame, 'event frame', 0, Number.MAX_SAFE_INTEGER, true); string(event.type, 'event type', 64); }
+  for (const event of events) { object(event, 'event'); number(event.frame, 'event frame', 0, Number.MAX_SAFE_INTEGER, true); string(event.type, 'event type', 64); checkSourceOffset(event.track); }
 }
 export function referencedAssets(project) {
   const found = new Set();
