@@ -41,8 +41,8 @@ test('cancel queued recording cannot start after the future boundary',()=>{
   const h=harness();h.engine.command({type:'configure',baseFrames:1000});h.engine.command({type:'play'});h.run(300);h.arm({quantized:true});h.engine.command({type:'cancel'});h.run(3000,()=>.5);assert.equal(h.events.filter(e=>e.type==='capture-start').length,0);assert.equal(h.assets.get('raw').status,'cancelled');assert.equal(h.engine.capture,null);
 });
 
-test('stop during compensated capture drains aligned ending without moving transport',()=>{
-  const h=harness();h.engine.command({type:'configure',compensationFrames:200});h.arm({kind:'vocal',masterAssetId:'master'});h.run(700,(_,clock)=>clock/10000);h.engine.command({type:'stop'});h.run(300,(_,clock)=>clock/10000);assert.equal(h.engine.frame,700);assert.equal(h.engine.playing,false);assert.equal(h.samples('raw').length,700);assert.equal(h.samples('master').length,1400);assert(Math.abs(h.samples('raw').at(-1)-.0899)<1e-7);
+test('stop during compensated capture rewinds transport while draining the original aligned ending',()=>{
+  const h=harness();h.engine.command({type:'configure',compensationFrames:200});h.arm({kind:'vocal',masterAssetId:'master'});h.run(700,(_,clock)=>clock/10000);h.engine.command({type:'stop'});h.run(300,(_,clock)=>clock/10000);assert.equal(h.engine.frame,0);assert.equal(h.engine.playing,false);assert.equal(h.samples('raw').length,700);assert.equal(h.samples('master').length,1400);assert(Math.abs(h.samples('raw').at(-1)-.0899)<1e-7);
 });
 
 test('write backpressure stops both dry and stereo capture at the same valid prefix',()=>{
@@ -394,14 +394,14 @@ test('loop-only capture stays silent with every loop muted despite a live microp
   assert.equal(meter.captureLevel,0);assert.equal(meter.captureRms,0);assert(meter.inputLevel>.5);
 });
 
-test('loop-only capture starts on the next cycle and stops exactly without mic compensation or transport reset',()=>{
+test('loop-only capture starts on the next cycle and stops exactly while resetting transport',()=>{
   const h=harness();storedLoop(h,{id:'loop'},i=>Math.sin(i*.05)*.2);
   h.engine.command({type:'configure',baseFrames:1003,compensationFrames:700,metronome:{countInBeats:8}});
   h.engine.command({type:'play'});h.run(421);h.arm({kind:'mix',assetId:'song',quantized:true});
   h.run(2500);const start=h.events.find(e=>e.type==='capture-start');assert.equal(start.startFrame,1003);assert.equal(start.compensationFrames,0);
   const stoppedAt=h.engine.frame;h.engine.command({type:'stop'});h.run(1);
   const end=h.events.find(e=>e.type==='capture-end');assert.equal(end.frames,stoppedAt-1003);assert.equal(end.endFrame,stoppedAt);
-  assert.equal(h.samples('song').length,(stoppedAt-1003)*2);assert.equal(h.engine.frame,stoppedAt);assert.equal(h.engine.playing,false);
+  assert.equal(h.samples('song').length,(stoppedAt-1003)*2);assert.equal(h.engine.frame,0);assert.equal(h.engine.playing,false);
 });
 
 test('cancelling loop-only capture leaves source loops intact and releases capture memory',()=>{
@@ -494,4 +494,100 @@ test('a safe duration whose end overflows the exact audio timeline is rejected b
   const rejected=h.events.find(event=>event.type==='capture-rejected');assert.equal(rejected.captureId,'capture');assert.match(rejected.message,/timeline/);
   assert.equal(h.engine.capture,null);assert.equal(h.engine.frame,frame);assert.equal(h.engine.clock,clock);assert.equal(h.engine.playing,true);assert.equal(h.engine.baseFrames,1003);
   assert.equal(h.engine.pool.length,pool);assert.equal(h.engine.caches.size,caches);assert.equal(h.assets.size,0);assert.equal(h.events.some(event=>event.type==='capture-start'),false);
+});
+
+
+test('Stop rewinds unequal loops to their own first samples without changing authored offsets',()=>{
+  const actual=harness(),reference=harness();
+  for(const h of [actual,reference]){
+    storedLoop(h,{id:'short',frames:1003,mix:{pan:-.6,reverb:.2,delay:.15}},i=>Math.sin(i*.071)*.2);
+    storedLoop(h,{id:'long',frames:1709,mix:{pan:.6,reverb:.1,delay:.2}},i=>Math.cos(i*.037)*.15);
+    h.engine.command({type:'configure',baseFrames:1003});
+  }
+  const short={...actual.engine.tracks.get('short').track,offsetFrames:277},long={...actual.engine.tracks.get('long').track,offsetFrames:-611};
+  actual.engine.command({type:'track',track:short});actual.engine.command({type:'track',track:long});
+  actual.engine.command({type:'play'});actual.run(2341);actual.engine.command({type:'section',section:{id:'queued',tracks:{short:{muted:true}}}});
+  actual.engine.command({type:'stop'});
+  assert.equal(actual.engine.frame,0);assert.equal(actual.engine.playing,false);assert.equal(actual.engine.paused,false);assert.equal(actual.engine.pendingSection,null);
+  assert.deepEqual(actual.engine.playbackOffsets(),{short:0,long:0});assert.deepEqual(actual.engine.playbackBaselineOffsets(),{short:277,long:-611});
+  assert.equal(actual.engine.tracks.get('short').track.offsetFrames,277);assert.equal(actual.engine.tracks.get('long').track.offsetFrames,-611);
+  assert(actual.run(703).l.every(sample=>sample===0));
+  actual.engine.command({type:'play'});reference.engine.command({type:'play'});
+  const a=actual.run(4097,()=>0,73),b=reference.run(4097,()=>0,73);
+  assert.deepEqual(a.l,b.l);assert.deepEqual(a.r,b.r);
+  actual.engine.command({type:'stop'});actual.engine.command({type:'stop'});assert.equal(actual.engine.frame,0);assert.deepEqual(actual.engine.playbackOffsets(),{short:0,long:0});
+});
+
+test('Pause freezes exact loop and DSP state while input metering and the hardware clock continue',()=>{
+  const paused=harness(),continuous=harness();
+  for(const h of [paused,continuous]){
+    storedLoop(h,{id:'sound',frames:1709,mix:{compression:.7,reverb:.8,delay:.6}},i=>Math.sin(i*.061)*.4);
+    h.engine.command({type:'configure',baseFrames:1709,metronome:{enabled:true,beatsPerCycle:3}});h.engine.command({type:'play'});h.run(1411);
+  }
+  const frame=paused.engine.frame,clock=paused.engine.clock;
+  paused.engine.command({type:'pause'});const quiet=paused.run(9333,()=>.25,97);
+  assert.equal(paused.engine.frame,frame);assert.equal(paused.engine.clock,clock+9333);assert.equal(paused.engine.paused,true);assert.equal(paused.engine.playing,false);
+  assert(quiet.l.every(sample=>sample===0));assert(quiet.r.every(sample=>sample===0));
+  assert.equal(paused.events.filter(event=>event.type==='meter').at(-1).inputLevel,.25);
+  paused.engine.command({type:'play'});assert.equal(paused.engine.paused,false);assert.equal(paused.events.filter(event=>event.type==='state').at(-1).transportFrame,frame);
+  const a=paused.run(4409,()=>0,83),b=continuous.run(4409,()=>0,83);assert.deepEqual(a.l,b.l);assert.deepEqual(a.r,b.r);
+});
+
+test('reset baselines survive resync, remove/Undo and edits; later running layers retain their entrance phase',()=>{
+  const h=harness();storedLoop(h,{id:'layer',frames:1003},i=>Math.sin(i*.03)*.2);
+  const authored={...h.engine.tracks.get('layer').track,offsetFrames:301};h.engine.command({type:'track',track:authored});h.engine.command({type:'stop'});
+  h.engine.command({type:'track',track:{...authored,offsetFrames:341}});assert.equal(h.engine.playbackOffsets().layer,40);
+  h.engine.command({type:'remove-track',id:'layer'});h.engine.command({type:'track',track:{...authored,offsetFrames:341}});assert.equal(h.engine.playbackOffsets().layer,40);
+  h.engine.command({type:'track',track:{...authored,frames:700,offsetFrames:341}});assert.equal(h.engine.playbackOffsets().layer,40);
+  h.engine.command({type:'play'});h.run(219);
+  h.engine.command({type:'track',track:{...authored,id:'later-vocal',offsetFrames:219}});assert.equal(h.engine.playbackOffsets()['later-vocal'],219);
+  h.arm({id:'song',assetId:'song',kind:'mix'});h.run(1);
+  const snapshot=h.events.find(event=>event.type==='capture-start'&&event.captureId==='song').initialState;
+  assert.equal(snapshot.tracks.find(track=>track.id==='layer').offsetFrames,40);assert.equal(snapshot.tracks.find(track=>track.id==='layer').sourceOffsetFrames,341);
+  const command=h.events.filter(event=>event.type==='command'&&event.command==='track'&&event.track.id==='layer').at(-1);
+  assert.equal(command.track.offsetFrames,40);assert.equal(command.track.sourceOffsetFrames,341);
+});
+
+test('Stop exposes zero immediately but preserves compensated recording endpoints and refuses premature resume',()=>{
+  const h=harness();storedLoop(h,{id:'backing',frames:1003},i=>Math.sin(i*.04)*.2);h.engine.command({type:'configure',baseFrames:1003,compensationFrames:200});h.engine.command({type:'play'});h.run(421);
+  h.arm({id:'voice',assetId:'voice',masterAssetId:'master',kind:'vocal'});const before=h.run(700,(_,clock)=>clock/10000),end=h.engine.frame;
+  h.engine.command({type:'stop'});assert.equal(h.engine.frame,0);assert.equal(h.engine.capture.endFrame,end);assert.equal(h.engine.capture.startFrame,421);
+  h.engine.command({type:'play'});assert.equal(h.engine.playing,false);assert.equal(h.engine.frame,0);
+  h.arm({id:'too-soon',assetId:'too-soon',kind:'loop'});assert.equal(h.engine.capture.id,'voice');
+  const after=h.run(201,(_,clock)=>clock/10000);assert(after.l.every(sample=>sample===0));
+  const saved=h.events.find(event=>event.type==='capture-end'&&event.captureId==='voice');assert.equal(saved.frames,700);assert.equal(saved.startFrame,421);assert.equal(saved.endFrame,end);assert.equal(saved.transportFrame,0);
+  assert.equal(h.samples('voice').length,700);assert(Math.abs(h.samples('voice')[0]-.0621)<1e-7);assert(Math.abs(h.samples('voice').at(-1)-.1320)<1e-7);
+  assert.equal(h.samples('master').length,1400);assert.equal(h.engine.frame,0);assert.deepEqual(h.engine.playbackOffsets(),{backing:0});
+  h.engine.command({type:'play'});assert.equal(h.engine.frame,0);assert.equal(h.engine.playing,true);
+});
+
+test('Pause refuses recording and preserves a loading audition until deliberate resume',()=>{
+  const h=harness();h.arm();h.run(333);h.engine.command({type:'pause'});assert.equal(h.engine.capture.status,'recording');assert.equal(h.engine.playing,true);assert.equal(h.engine.paused,false);h.engine.command({type:'cancel'});
+  h.engine.command({type:'audition',take:{id:'take',assetId:'unloaded',frames:400,startFrame:93,mix:{}},tailFrames:0});h.engine.command({type:'pause'});
+  for(let index=0;index<2;index++){const frames=index?144:256;h.engine.storageMessage({type:'page',assetId:'unloaded',index,frames,channels:1,buffer:new Float32Array(frames).fill(.1).buffer});}
+  assert.equal(h.engine.audition.status,'loading');assert.equal(h.engine.playing,false);h.run(1000);assert.equal(h.engine.frame,93);
+  h.engine.command({type:'play'});assert.equal(h.engine.audition.status,'playing');h.run(101);h.engine.command({type:'pause'});const frame=h.engine.frame;h.run(1000);assert.equal(h.engine.frame,frame);assert.equal(h.engine.audition.id,'take');h.engine.command({type:'stop'});assert.equal(h.engine.audition,null);assert.equal(h.engine.frame,0);
+});
+
+test('transport command generations reject stale play and keep state and meters at stopped zero',()=>{
+  const h=harness();h.engine.command({type:'play',transportGeneration:1});h.run(401);h.engine.command({type:'pause',transportGeneration:2});h.engine.command({type:'stop',transportGeneration:3});h.engine.command({type:'play',transportGeneration:2});h.run(1000);
+  assert.equal(h.engine.playing,false);assert.equal(h.engine.frame,0);assert.equal(h.engine.transportGeneration,3);
+  const meter=h.events.filter(event=>event.type==='meter').at(-1);assert.equal(meter.transportGeneration,3);assert.equal(meter.transportFrame,0);assert.equal(meter.paused,false);
+});
+
+test('Return to start aligns every loop and cancels queued sections while preserving playback intent',()=>{
+  const h=harness();storedLoop(h,{id:'one',frames:1003},i=>Math.sin(i*.07)*.2);storedLoop(h,{id:'two',frames:1709},i=>Math.cos(i*.03)*.1);
+  for(const [id,offsetFrames] of [['one',271],['two',839]])h.engine.command({type:'track',track:{...h.engine.tracks.get(id).track,offsetFrames}});
+  h.engine.command({type:'configure',baseFrames:1003});h.engine.command({type:'play'});h.run(1807);h.engine.command({type:'section',section:{id:'queued',tracks:{}}});
+  h.engine.command({type:'seek'});assert.equal(h.engine.frame,0);assert.equal(h.engine.playing,true);assert.equal(h.engine.pendingSection,null);assert.deepEqual(h.engine.playbackOffsets(),{one:0,two:0});
+  h.run(173);h.engine.command({type:'pause'});h.engine.command({type:'seek'});assert.equal(h.engine.frame,0);assert.equal(h.engine.paused,true);assert.equal(h.engine.playing,false);assert(h.run(700).l.every(value=>value===0));
+});
+
+test('Pause holds preview position and microphone monitoring without losing either playback preference',()=>{
+  const h=harness();const assetId=storedLoop(h,{id:'source',frames:1709},i=>Math.sin(i*.05)*.2);h.engine.command({type:'remove-track',id:'source'});
+  h.engine.command({type:'configure',monitor:true});h.engine.command({type:'preview-take',take:{assetId,frames:1709}});h.run(317,()=>.1);
+  h.engine.command({type:'pause'});assert.equal(h.engine.preview.position,317);assert.equal(h.engine.monitor,true);
+  assert(h.run(1000,()=>.3).l.every(value=>value===0));assert.equal(h.engine.preview.position,317);
+  h.engine.command({type:'play'});assert(h.run(101,()=>.3).l.some(value=>Math.abs(value)>.01));assert.equal(h.engine.preview.position,418);
+  h.engine.command({type:'stop'});assert.equal(h.engine.preview,null);assert.equal(h.engine.monitor,false);assert.equal(h.engine.frame,0);
 });

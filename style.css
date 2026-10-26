@@ -475,9 +475,9 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 .dock-actions > .primary { font-size: 11px; padding: 11px 14px; }
 .dock-actions > .primary .icon { width: 16px; height: 16px; }
 .dock-actions kbd { font-size: 8px; min-width: 17px; min-height: 17px; padding: 1px 3px; margin-left: 5px; }
-.transport-button, .stop-button { width: 44px; padding: 10px; border-color: #465b50; background: #28392f; color: #cadcca; }
+.transport-button, .pause-button, .stop-button { width: 44px; padding: 10px; border-color: #465b50; background: #28392f; color: #cadcca; }
 .transport-button .icon { fill: currentColor; stroke-width: 1px; width: 15px; height: 15px; }
-.stop-button .icon { width: 15px; height: 15px; }
+.pause-button .icon, .stop-button .icon { width: 15px; height: 15px; }
 .dock-separator { height: 24px; width: 1px; background: #405045; margin: 0 5px; }
 .history-actions { display: flex; padding-left: 13px; border-left: 1px solid #405045; }
 .history-actions .button { color: #a8bbac; min-width: 36px; width: 36px; padding: 8px; }
@@ -794,7 +794,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .history-actions .icon { width: 14px; height: 14px; }
   .dock-actions { grid-column: 1 / -1; grid-row: 2; display: flex; gap: 7px; width: 100%; }
   .dock-actions > .button { min-height: 48px; border-radius: 10px; }
-  .transport-button, .stop-button { min-width: 45px; width: 45px; padding: 9px; }
+  .transport-button, .pause-button, .stop-button { min-width: 45px; width: 45px; padding: 9px; }
   .dock-actions > .primary { padding: 10px 9px; font-size: 10px; gap: 5px; min-width: 0; flex: 1; }
   .dock-actions > .primary .icon { width: 14px; height: 14px; }
   .dock-actions > .quiet { font-size: 10px; padding: 10px; }
@@ -861,7 +861,7 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
   .mixer-group .slider-label { font-size: 11px; }
   .record-dock { padding-left: 10px; padding-right: 10px; }
   .dock-actions { gap: 5px; }
-  .transport-button, .stop-button { width: 40px; min-width: 40px; }
+  .transport-button, .pause-button, .stop-button { width: 40px; min-width: 40px; }
   .dock-actions > .primary { font-size: 9px; padding: 10px 6px; }
   .dock-actions > .primary .icon { width: 12px; height: 12px; }
   .dock-actions > .primary[data-action="sing"] .icon { display: none; }
@@ -1283,4 +1283,18 @@ main { max-width: 1320px; margin: 0 auto; padding: 0 48px 132px; }
 @media (max-width: 640px) {
   .loop-length > .loop-recording-number { font-size: 13px; }
   .loop-recording-number input { font-size: 14px; }
+}
+
+/* Pause is a separate transport action; all three controls retain touch targets. */
+.pause-button .icon { stroke-width: 3px; }
+@media (max-width: 420px) {
+  .dock-actions { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); }
+  .dock-actions > .transport-button, .dock-actions > .pause-button, .dock-actions > .stop-button { grid-column: span 2; width: 100%; min-width: 44px; }
+  .dock-actions > [data-action="add-loop"], .dock-actions > [data-action="sing"], .dock-actions > [data-action="finish"], .dock-actions > [data-action="cancel"] { grid-column: span 3; }
+  .dock-actions > .loop-record-button { grid-column: 1 / -1; }
+  main { padding-bottom: calc(250px + env(safe-area-inset-bottom)); }
+  .has-loop-record-control main { padding-bottom: calc(300px + env(safe-area-inset-bottom)); }
+  .toast-region { bottom: calc(235px + env(safe-area-inset-bottom)); }
+  .has-loop-record-control .toast-region { bottom: calc(285px + env(safe-area-inset-bottom)); }
+  html { scroll-padding-bottom: calc(300px + env(safe-area-inset-bottom)); }
 }

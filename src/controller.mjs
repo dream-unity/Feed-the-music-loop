@@ -34,7 +34,8 @@ export class StudioController {
     this.storage = storage; this.ui = ui; this.engine = null; this.history = new ProjectHistory(); this.generation = 0;
     this.pending = null; this.sealed = new Map(); this.saveTimer = null; this.saveChain = Promise.resolve(); this.saveSerial = 0;
     this.lastCheckpointAt = 0; this.lastUnderrunAt = 0; this.urls = new Set(); this.wakeLock = null; this.exportAbort = null;
-    this.state = { project: null, projects: [], selectedTrackId: null, view: 'build', playing: false, capture: null, status: 'Opening studio…', micEnabled: false, monitor: false,
+    this.pausedMedia = []; this.pausedTransport = false; this.resetTransportOnInit = false;
+    this.state = { project: null, projects: [], selectedTrackId: null, view: 'build', playing: false, paused: false, playbackOffsets: {}, playbackBaselines: {}, capture: null, status: 'Opening studio…', micEnabled: false, monitor: false,
       inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
       recovered: [], discarded: [], damagedAudio: [], readonly: false, readonlyReason: null, recoveryRequired: false, deletionPending: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
@@ -106,7 +107,8 @@ export class StudioController {
     this.state.readonly = readonly; this.state.readonlyReason = readonlyReason; this.state.recoveryRequired = recoveryRequired; this.state.deletionPending = deletionPending;
     this.state.project = next; this.state.sampleRate = next.sampleRate; this.state.selectedTrackId = next.tracks[0]?.id || null;
     this.state.capture = null; this.state.recentRecording = latestProjectRecording(next); this.state.audition = null; this.state.playing = false; this.state.micEnabled = false; this.state.monitor = false; next.input.monitor = false;
-    this.state.transportFrame = 0; this.state.activeSectionId = null; this.state.queuedSectionId = null; this.history.clear();
+    this.state.transportFrame = 0; this.state.paused = false; this.state.playbackOffsets = {}; this.state.playbackBaselines = {}; this.pausedMedia = []; this.pausedTransport = false; this.resetTransportOnInit = false;
+    this.state.activeSectionId = null; this.state.queuedSectionId = null; this.history.clear();
     this.state.recovered = assets.filter(a => a.frames > 0 && a.status !== 'cancelled' && !used.has(a.id)).map(a => ({ ...a, needsRecovery: a.status === 'recording' }));
     this.state.discarded = assets.filter(isDiscardedCapture);
     this.state.mixMode = next.performances.some(item => !item.removed) || assets.some(item => item.kind === 'recording' || item.kind === 'mix') ? 'recordings' : 'layers';
@@ -139,9 +141,12 @@ export class StudioController {
     const engine = this.engine;
     await engine.init(this.state.project);
     if (engine !== this.engine) throw Object.assign(new Error('Audio session changed.'), { name: 'AbortError' });
-    await engine.waitUntilReady(); return engine;
+    await engine.waitUntilReady();
+    if (this.resetTransportOnInit) { engine.stop(); this.resetTransportOnInit = false; }
+    return engine;
   }
   audioEvent(type, data) {
+    if (['audition-start', 'audition-end'].includes(type) && (data.transportGeneration ?? 0) < (this.engine?.transportGeneration ?? 0)) return;
     if (type === 'context-state') {
       const engine = this.engine;
       // Closing a project intentionally also closes its AudioContext. Those
@@ -166,18 +171,25 @@ export class StudioController {
         if (!this.pending) { this.state.capture = null; this.state.busy = false; }
         this.recoverAudioEngine(data.state === 'closed' ? 'The audio session closed unexpectedly.' : 'Audio was paused by your device.').catch(error => this.handleError(error));
       } else {
-        engine.stop();
+        engine.pause(); this.pausedTransport = true; this.state.paused = true;
         this.state.status = 'Audio paused · press Play or Record to resume'; this.render();
       }
       return;
     }
     if (type === 'count-in') { this.state.status = 'Count in · get ready'; return; }
     if (type === 'state' || type === 'meter') {
+      // The audio port may already contain a meter from before Stop/Pause/Play.
+      // Never let that old transport snapshot resurrect the old playhead.
+      if ((data.transportGeneration ?? 0) < (this.engine?.transportGeneration ?? 0)) return;
+      if (this.resetTransportOnInit) return;
       // A meter already queued before suspension must not re-disable Play by
       // advertising the audio thread's previous playing state.
       if (this.engine?.context && ['suspended', 'interrupted', 'closed'].includes(this.engine.context.state)) return;
       if (this.state.audioPaused) { this.state.audioPaused = false; this.state.status = 'Audio ready'; }
       this.state.playing = !!data.playing; this.state.transportFrame = data.transportFrame || 0;
+      this.state.paused = !!data.paused || this.pausedMedia.length > 0;
+      if (data.playbackOffsets) this.state.playbackOffsets = { ...data.playbackOffsets };
+      if (data.playbackBaselines) this.state.playbackBaselines = { ...data.playbackBaselines };
       this.state.audition = data.audition || null;
       this.state.liveBaseFrames = data.baseFrames || this.state.project.baseFrames;
       if (this.pending) this.state.capture = { startMode: this.pending.startMode, lengthMode: this.pending.lengthMode, ...(data.capture || { id: this.pending.id, kind: this.pending.kind, status: this.pending.ended ? 'finishing' : 'arming', elapsedFrames: this.pending.end?.frames || 0 }) };
@@ -225,7 +237,7 @@ export class StudioController {
       this.pending.initialState = { ...clone(initialState), frame: data.startFrame };
       if (initialState.inputMix) this.pending.track.mix = normalizeMix(initialState.inputMix);
       this.pending.startFrame = data.startFrame; this.pending.started = true;
-      this.state.capture = { id: data.captureId, kind: data.kind, status: 'recording', elapsedFrames: 0, startFrame: data.startFrame, targetFrames: this.pending.lengthFrames, startMode: this.pending.startMode, lengthMode: this.pending.lengthMode };
+      this.state.capture = { id: data.captureId, kind: data.kind, status: this.pending.stopRequested ? 'finishing' : 'recording', elapsedFrames: 0, startFrame: data.startFrame, targetFrames: this.pending.lengthFrames, startMode: this.pending.startMode, lengthMode: this.pending.lengthMode };
       this.state.status = 'Recording · saving audio continuously'; this.updateCaptureIntent(); this.scheduleSave(0); this.render(); return;
     }
     if (type === 'capture-end') {
@@ -244,7 +256,7 @@ export class StudioController {
     }
     if (type === 'command') {
       const command = typeof data.command === 'string' ? data.command : data.command?.type;
-      if (command && !['play', 'stop', 'clear', 'arm', 'cancel', 'finish'].includes(command)) {
+      if (command && !['play', 'pause', 'stop', 'seek', 'clear', 'arm', 'cancel', 'finish'].includes(command)) {
         const payload = data.payload || data.data || (typeof data.command === 'object' ? data.command : data);
         const clean = jsonSafe(payload); delete clean.requestId; delete clean.type; delete clean.command; delete clean.projectFrame; delete clean.transportFrame; delete clean.clockFrame;
         this.recordEvent({ ...clean, frame: data.frame ?? data.projectFrame, type: command });
@@ -301,10 +313,13 @@ export class StudioController {
   }
   updateCaptureIntent(force = false) {
     const p = this.pending; if (!p || (p.finalizing && !force)) return;
+    // Stop resets the visible transport before an alignment tail is drained.
+    // Keep the recovery checkpoint on the capture's original musical timeline.
+    p.intentTransportFrame = Math.max(p.intentTransportFrame || 0, this.state.transportFrame, p.end ? (p.end.startFrame ?? p.startFrame ?? 0) + (p.end.frames || 0) : 0);
     this.state.project.pendingCapture = { id: p.id, kind: p.kind, assetId: p.assetId, masterAssetId: p.masterAssetId || null, performanceId: p.performanceId || null,
       takeId: p.takeId || null, track: p.track, startFrame: p.startFrame ?? 0, initialState: p.initialState, events: p.events,
       ...(p.arrangementIncomplete ? { arrangementIncomplete: true, arrangementThroughFrame: p.arrangementThroughFrame } : {}),
-      sealedThroughFrame: Math.max(p.startFrame || 0, this.state.transportFrame - (p.kind === 'mix' ? 0 : Math.round(this.state.project.input.compensationMs * this.state.sampleRate / 1000))), createdAt: p.createdAt };
+      sealedThroughFrame: Math.max(p.startFrame || 0, p.intentTransportFrame - (p.kind === 'mix' ? 0 : Math.round(this.state.project.input.compensationMs * this.state.sampleRate / 1000))), createdAt: p.createdAt };
     if (p.metadataBudget && !p.ended) {
       try { if (!p.metadataBudget.reconcile(this.state.project)) this.finishAtMetadataLimit(); }
       catch { this.finishAtMetadataLimit(this.state.transportFrame); }
@@ -893,6 +908,7 @@ export class StudioController {
   }
   async releaseWake() { await this.wakeLock?.release().catch(() => {}); this.wakeLock = null; }
   closePreview() {
+    this.pausedMedia = []; this.pausedTransport = false; this.state.paused = false;
     this.stopRecordingMasterPreview();
     this.previewAbort?.abort(); this.previewAbort = null; this.state.previewPreparing = null;
     globalThis.document?.querySelector('#performance-player')?.pause();
@@ -1482,9 +1498,94 @@ export class StudioController {
       this.render();
     }
   }
+  playbackMedia() {
+    return [...(this.ui.getPlaybackMedia?.() || [])];
+  }
+  mediaSource(media) { return media.getAttribute?.('src') || media.currentSrc || media.src || ''; }
+  async pausePlayback() {
+    if (this.pending || this.state.capture) throw new Error('Finish or stop the recording before pausing playback.');
+    if (this.state.busy || this.state.previewPreparing || this.state.recordingMix?.previewBusy || this.state.trackEditor?.previewBusy) throw new Error('Wait for the audio to be ready before pausing.');
+    const running = this.playbackMedia().filter(media => !media.paused && !media.ended);
+    const transport = this.state.playing || !!this.engine?.playing;
+    if (!running.length && !transport) return;
+    this.pausedTransport = transport;
+    this.pausedMedia = running.map(media => ({ media, source: this.mediaSource(media) }));
+    for (const media of running) media.pause();
+    if (transport) this.engine?.pause();
+    this.state.playing = false; this.state.paused = true;
+    this.state.outputLevel = 0;
+    this.render(); await this.releaseWake();
+  }
+  async playPlayback() {
+    if (this.pending || this.state.capture) throw new Error('Finish saving the recording before starting playback.');
+    if (this.state.busy || this.state.previewPreparing || this.state.recordingMix?.previewBusy || this.state.trackEditor?.previewBusy) throw new Error('Wait for the audio to be ready before starting playback.');
+    const loaded = this.playbackMedia();
+    if (this.state.playing || loaded.some(media => !media.paused && !media.ended)) return this.pausePlayback();
+    const token = this.generation, resumeTransport = this.pausedTransport;
+    let media = this.pausedMedia.filter(item => loaded.includes(item.media) && this.mediaSource(item.media) === item.source).map(item => item.media);
+    // A retained preview remains the selected playback target after Stop, or
+    // after the user pauses its native audio control. Do not start backing loops.
+    if (!resumeTransport && !media.length) media = loaded.slice(-1);
+    this.pausedMedia = []; this.pausedTransport = false; this.state.paused = false;
+    if (media.length) {
+      try { await Promise.all(media.map(item => item.play())); }
+      catch (error) { if (token === this.generation && !isAbort(error)) throw error; }
+      if (token !== this.generation) return;
+    }
+    if (resumeTransport || !media.length) {
+      const engine = await this.ensureAudio(); if (token !== this.generation) return;
+      engine.play(); this.keepAwake();
+    }
+    this.render();
+  }
+  async stopPlayback() {
+    ++this.generation;
+    this.pausedMedia = []; this.pausedTransport = false; this.state.paused = false;
+    this.previewAbort?.abort(); this.previewAbort = null; this.state.previewPreparing = null;
+    if (this.recordingMasterOperation?.kind === 'preview') this.recordingMasterOperation.abort.abort();
+    this.editorPreviewAbort?.abort(); this.editorPreviewAbort = null;
+    if (this.state.trackEditor) this.state.trackEditor.previewBusy = false;
+    for (const media of this.playbackMedia()) { media.pause(); try { media.currentTime = 0; } catch {} }
+    this.microphoneOperation = null; this.state.micChanging = false;
+    const project = this.state.project;
+    if (project) project.input.monitor = false;
+    this.state.monitor = false;
+    if (this.pending) { this.updateCaptureIntent(); this.pending.stopRequested = true; }
+    this.engine?.configure(project);
+    if (this.engine?.node || this.engine?.stop) this.engine.stop();
+    // A Stop before the graph exists must still align saved loop starts when
+    // the first Play or Record creates it. An initializing graph gets the same
+    // reset after init; posting a command before its port exists is insufficient.
+    this.resetTransportOnInit = !this.engine?.node;
+    this.state.audition = null; this.state.queuedSectionId = null;
+    this.state.transportFrame = 0; this.state.outputLevel = 0;
+    this.state.playbackOffsets = Object.fromEntries((project?.tracks || []).map(track => [track.id, 0]));
+    this.state.playbackBaselines = Object.fromEntries((project?.tracks || []).map(track => [track.id, track.offsetFrames || 0]));
+    if (!this.pending) { this.state.capture = null; if (!this.projectDeletion?.committing && !this.trackEditOperation) this.state.busy = false; }
+    else if (this.state.capture) this.state.capture = { ...this.state.capture, status: 'finishing' };
+    this.state.playing = false;
+    this.render(); await this.releaseWake();
+  }
+  currentPlaybackProject() {
+    const project = this.state.project, offsets = this.state.playbackOffsets || {}, baselines = this.state.playbackBaselines || {};
+    return { ...project, tracks: project.tracks.map(track => {
+      let offsetFrames = Number.isSafeInteger(offsets[track.id]) ? offsets[track.id] : track.offsetFrames;
+      if (Number.isSafeInteger(baselines[track.id])) {
+        offsetFrames = track.offsetFrames - baselines[track.id];
+        // Match the audio graph when two valid authored offsets have an unsafe
+        // difference. Reduce each operand before subtracting to preserve phase.
+        if (!Number.isSafeInteger(offsetFrames)) {
+          const modulo = value => ((value % track.frames) + track.frames) % track.frames;
+          offsetFrames = modulo(modulo(track.offsetFrames) - modulo(baselines[track.id]));
+        }
+      }
+      return { ...track, offsetFrames };
+    }) };
+  }
   async handle(action = {}) {
+    if (action.type === 'media-playback') { this.pausedMedia = []; this.pausedTransport = false; this.state.paused = false; this.render(); return; }
     if (this.recordingMasterOperation && !['cancel-recording-master', 'cancel-export', 'stop-recording-master-preview', 'dismiss-error', 'view', 'close-preview', ...(this.recordingMasterOperation.kind === 'preview' ? ['recording-master-setting', 'recording-master-reset', 'recording-master-name', 'set-recording-preview-start', 'select-recording', 'open-recording-mix', 'mix-mode', 'stop'] : [])].includes(action.type)) throw new Error('Finish or cancel the recording master before starting another operation.');
-    if (this.trackEditOperation && !['editor-close', 'editor-stop-preview', 'dismiss-error'].includes(action.type)) throw new Error('Wait for the audio edit to finish, or close the editor to cancel.');
+    if (this.trackEditOperation && !['editor-close', 'editor-stop-preview', 'stop', 'dismiss-error'].includes(action.type)) throw new Error('Wait for the audio edit to finish, or close the editor to cancel.');
     if (this.state.storageFailed && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview'].includes(action.type)) throw new Error('Reopen the studio to recover saved recordings before continuing.');
     if (this.projectDeletion?.committing && !['help', 'view', 'dismiss-error', 'reload-studio', 'close-preview', 'stop', 'mic-off'].includes(action.type)) throw new Error('Wait for project deletion to finish before starting another operation.');
     if (this.fileDeletion?.committing && !['help', 'view', 'dismiss-error', 'close-preview'].includes(action.type)) throw new Error('Wait for file deletion to finish before starting another operation.');
@@ -1521,8 +1622,9 @@ export class StudioController {
       case 'select-microphone': return this.selectMicrophone(action.deviceId);
       case 'mic-off': { const loopsOnly = (this.pending?.kind || this.state.capture?.kind) === 'mix'; if (!loopsOnly) ++this.generation; if (this.pending && !loopsOnly) { this.pending.interrupted = true; this.engine?.send('interrupt', { reason: 'Microphone switched off' }); } this.engine?.disableMic(); if (!this.pending && !loopsOnly) { this.state.capture = null; if (!this.projectDeletion?.committing) this.state.busy = false; } p.input.monitor = false; this.state.monitor = false; this.render(); return; }
       case 'monitor': { const token = this.generation, engine = await this.ensureAudio(); if (token !== this.generation) return; if (!this.state.micEnabled) await engine.enableMic(this.state.preferredDeviceId); if (token !== this.generation) return; p.input.monitor = action.enabled ?? !p.input.monitor; this.state.monitor = p.input.monitor; engine.configure(p); this.scheduleSave(); this.render(); return; }
-      case 'play': { if (this.state.playing) return this.handle({ type: 'stop' }); this.closePreview(); const token = this.generation, e = await this.ensureAudio(); if (token !== this.generation) return; e.play(); this.keepAwake(); return; }
-      case 'stop': { ++this.generation; this.closePreview(); this.microphoneOperation = null; this.state.micChanging = false; p.input.monitor = false; this.state.monitor = false; this.engine?.configure(p); this.engine?.stop(); this.state.audition = null; if (!this.pending) { this.state.capture = null; if (!this.projectDeletion?.committing) this.state.busy = false; } this.state.playing = false; await this.releaseWake(); this.render(); return; }
+      case 'play': return this.playPlayback();
+      case 'pause': return this.pausePlayback();
+      case 'stop': return this.stopPlayback();
       case 'set-loop-recording': { this.assertWritable(); this.assertIdle(); if (this.state.busy || this.state.exporting) throw new Error('Finish the current operation before changing recording options.'); const settings = normalizeLoopRecording({ ...normalizeLoopRecording(p.loopRecording), ...action.settings }); this.edit(project => { project.loopRecording = settings; }, 'loop-recording'); return; }
       case 'add-loop': return this.startCapture('loop', action.cycles === undefined ? undefined : Number(action.cycles === 'custom' ? action.customCycles : action.cycles));
       case 'sing': return this.startCapture('vocal');
@@ -1583,7 +1685,7 @@ export class StudioController {
       case 'layer-vocal': { const take = p.takes.find(t => t.id === action.id); if (!take) return; this.assertAudioSources([take.assetId]); if (p.tracks.length >= MAX_TRACKS) throw new Error('This project has reached its layer limit.'); this.edit(project => { const track = createTrack({ assetId: take.assetId, name: `${take.name} · layer`, role: 'lead', frames: take.frames, offsetFrames: take.startFrame % take.frames, mix: normalizeMix(take.mix || roleMix('lead')) }); project.tracks.push(track); this.state.selectedTrackId = track.id; if (!project.baseFrames) project.baseFrames = track.frames; }); this.engine?.configure(p); this.engine?.syncTracks(p.tracks); return; }
       case 'close-preview': this.closePreview(); this.render(); return;
       case 'spotlight': this.engine?.send('spotlight', { active: !!action.active }); return;
-      case 'seek-start': this.assertIdle(); this.engine?.send('seek', { frame: 0 }); return;
+      case 'seek-start': this.assertIdle(); this.state.transportFrame = 0; this.state.queuedSectionId = null; this.state.playbackOffsets = Object.fromEntries(p.tracks.map(track => [track.id, 0])); this.state.playbackBaselines = Object.fromEntries(p.tracks.map(track => [track.id, track.offsetFrames || 0])); if (this.engine?.seek) this.engine.seek(); else this.engine?.send('seek', { frame: 0 }); if (!this.engine?.node) this.resetTransportOnInit = true; this.render(); return;
       case 'demo': return this.demo();
       case 'recover-asset': return this.recoverAsset(action.id);
       case 'export-recovered': return this.downloadAsset(action.id, 'Recovered recording');
@@ -1782,7 +1884,7 @@ export class StudioController {
       const explicitDuration = action.durationSeconds !== undefined && action.durationSeconds !== null && action.durationSeconds !== '';
       const durationSeconds = explicitDuration ? Number(action.durationSeconds) : performance || selected ? undefined : this.state.project.baseFrames / this.state.sampleRate * 4;
       if (durationSeconds !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds <= 0)) throw new Error('Choose a positive export duration, or add a loop or vocal take.');
-      const result = await this.renderMix(this.state.project, { performanceId, ...(durationSeconds === undefined ? {} : { durationSeconds }), tailSeconds: 2, mode: 'current', signal,
+      const result = await this.renderMix(performanceId ? this.state.project : this.currentPlaybackProject(), { performanceId, ...(durationSeconds === undefined ? {} : { durationSeconds }), tailSeconds: 2, mode: 'current', signal,
         onProgress: progress => { this.state.exportProgress = progress; this.ui.updateExportProgress?.(progress); } });
       // The saved mix remains reachable even if preparing its download fails.
       const savedMix = await this.storage.getAsset(result.assetId);

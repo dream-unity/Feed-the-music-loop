@@ -36,6 +36,29 @@ test('unsafe audio positions, duplicated tracks and future versions are rejected
   p.tracks[0].offsetFrames=0;p.tracks.push(structuredClone(p.tracks[0]));assert.throws(()=>validateProject(p),/duplicate/);
   p.schemaVersion=99;assert.throws(()=>validateProject(p),/Unsupported/);
 });
+test('recorded restart phase and source timing survive validation without changing live track offsets', () => {
+  const p = createProject(), track = createTrack({ assetId: 'loop-audio', frames: 48000, offsetFrames: 12000 });
+  p.tracks.push(track);
+  p.performances.push({ id: 'aligned-song', name: 'Aligned song', source: 'loops', masterAssetId: 'aligned-master', frames: 48000, startFrame: 0, endFrame: 48000, status: 'complete', initialState: { tracks: [{ ...track, offsetFrames: 0, sourceOffsetFrames: 12000 }] }, events: [{ type: 'command', command: 'track', frame: 24000, track: { ...track, offsetFrames: 240, sourceOffsetFrames: 12240 } }] });
+  const restored = validateProject(JSON.parse(JSON.stringify(p)));
+  assert.deepEqual(restored, p);
+  assert.equal(restored.tracks[0].offsetFrames, 12000);
+  assert.equal(restored.performances[0].initialState.tracks[0].offsetFrames, 0);
+  assert.equal(restored.performances[0].events[0].track.sourceOffsetFrames, 12240);
+});
+test('unsafe recorded source offsets reject before a project can be loaded or imported', () => {
+  const placements = [
+    (p, track) => p.tracks.push(track),
+    (p, track) => p.performances.push({ id: 'song', name: 'Song', source: 'loops', masterAssetId: 'master', frames: 100, startFrame: 0, endFrame: 100, status: 'complete', initialState: { tracks: [track] } }),
+    (p, track) => { p.pendingCapture = { initialState: { tracks: [track] } }; },
+    (p, track) => p.events.push({ type: 'command', command: 'track', frame: 0, track }),
+    (p, track) => { p.pendingCapture = { events: [{ type: 'command', command: 'track', frame: 0, track }] }; },
+  ];
+  for (const place of placements) for (const value of [.5, Number.MAX_SAFE_INTEGER + 1, -Number.MAX_SAFE_INTEGER - 1, '100', null]) {
+    const p = createProject(); place(p, createTrack({ assetId: 'audio', frames: 100, sourceOffsetFrames: value }));
+    assert.throws(() => validateProject(p), /source track offset/);
+  }
+});
 test('asset collection includes historical takes and performance snapshots', () => {
   const p=createProject();p.tracks=[{assetId:'a'}];p.performances=[{leadAssetId:'b',masterAssetId:'c',initialState:{tracks:[{assetId:'old'}]}}];
   assert.deepEqual(referencedAssets(p).sort(),['a','b','c','old']);

@@ -223,6 +223,78 @@ test('current sound preserves the mute state at a recorded track entrance', asyn
   assert.ok(rms(pcm, (PAGE + 1000) * 2, (PAGE + 8000) * 2) > .01);
 });
 
+test('a performance captured after Stop retains aligned loop phase in both current and original renders', async () => {
+  const { storage, project } = await fixture();
+  const options = { useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+  const performance = project.performances[0], recorded = performance.initialState.tracks[0];
+  recorded.sourceOffsetFrames = recorded.offsetFrames;
+  recorded.offsetFrames = 0;
+  const untouched = structuredClone(project);
+  const reference = structuredClone(project);
+  reference.tracks[0].offsetFrames = 0;
+  delete reference.performances[0].initialState.tracks[0].sourceOffsetFrames;
+  for (const mode of ['current', 'performance']) {
+    const expected = await renderEditedMix(storage, reference, { ...options, mode });
+    const actual = await renderEditedMix(storage, project, { ...options, mode });
+    assert.deepEqual(storage.samples(actual.assetId), storage.samples(expected.assetId), `${mode} must use the heard zero phase rather than the saved capture origin`);
+  }
+  assert.deepEqual(project, untouched, 'rendering must not rewrite the authored timing or recorded snapshot');
+});
+
+test('current remix applies only the later timing delta to a restarted performance while original sound stays fixed', async () => {
+  const { storage, project } = await fixture();
+  const options = { useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+  const recorded = project.performances[0].initialState.tracks[0];
+  recorded.sourceOffsetFrames = 701; recorded.offsetFrames = 0;
+  const original = await renderEditedMix(storage, project, { ...options, mode: 'performance' });
+  project.tracks[0].offsetFrames += 38;
+  const plan = await prepareRenderPlan(storage, project, options);
+  assert.equal(plan.tracks[0].offsetFrames, 38);
+  const reference = structuredClone(project);
+  reference.tracks[0].offsetFrames = 38;
+  delete reference.performances[0].initialState.tracks[0].sourceOffsetFrames;
+  const current = await renderEditedMix(storage, project, options);
+  const expected = await renderEditedMix(storage, reference, options);
+  assert.deepEqual(storage.samples(current.assetId), storage.samples(expected.assetId));
+  const originalAgain = await renderEditedMix(storage, project, { ...options, mode: 'performance' });
+  assert.deepEqual(storage.samples(originalAgain.assetId), storage.samples(original.assetId));
+});
+
+test('track entrances replay their effective phase after Stop and preserve current timing edits', async () => {
+  const { storage, project } = await fixture();
+  const performance = project.performances[0], options = { useWorker: false, tailSeconds: 0, prerollSeconds: 0 };
+  const entered = { ...structuredClone(project.tracks[0]), offsetFrames: 23, sourceOffsetFrames: 701 };
+  performance.initialState.tracks = [];
+  performance.events = [{ frame: performance.startFrame + 173, type: 'command', command: 'track', track: entered }];
+  project.tracks[0].offsetFrames = 739;
+  const reference = structuredClone(project);
+  reference.tracks[0].offsetFrames = 61;
+  delete reference.performances[0].events[0].track.sourceOffsetFrames;
+  for (const mode of ['current', 'performance']) {
+    const actual = await renderEditedMix(storage, project, { ...options, mode });
+    const expected = await renderEditedMix(storage, reference, { ...options, mode });
+    assert.deepEqual(storage.samples(actual.assetId), storage.samples(expected.assetId), `${mode} must preserve the recorded track entrance phase`);
+  }
+});
+
+test('invalid or overflowing recorded timing rejects before creating a rendered asset', async () => {
+  for (const location of ['initial', 'event']) {
+    for (const sourceOffsetFrames of [0.5, Number.MAX_SAFE_INTEGER + 1, -Number.MAX_SAFE_INTEGER]) {
+      const { storage, project } = await fixture();
+      const performance = project.performances[0];
+      const recorded = { ...structuredClone(project.tracks[0]), offsetFrames: 1, sourceOffsetFrames };
+      if (location === 'initial') performance.initialState.tracks = [recorded];
+      else {
+        performance.initialState.tracks = [];
+        performance.events = [{ frame: performance.startFrame + 173, type: 'track', track: recorded }];
+      }
+      const originalIds = [...storage.assets.keys()];
+      await assert.rejects(renderEditedMix(storage, project, { useWorker: false, tailSeconds: 0, prerollSeconds: 0 }), /timing|offset/i);
+      assert.deepEqual([...storage.assets.keys()], originalIds);
+    }
+  }
+});
+
 test('a performance that starts with Spotlight already held retains its backing attenuation', async () => {
   const { storage, project } = await fixture(); project.takes[0].mix.volume = 0;
   const options = { useWorker: false, tailSeconds: 0, prerollSeconds: .1 };

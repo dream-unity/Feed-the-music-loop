@@ -1,6 +1,6 @@
 import { validateProject, normalizeMix, roleMix } from '../project.mjs';
 import { ExportError, validateAudioMetadata } from './wav.mjs';
-import { renderMixFrames } from './render-core.mjs';
+import { renderMixFrames, currentArrangementTrack } from './render-core.mjs';
 
 const MAX_RENDER_SECONDS = 24 * 60 * 60;
 const int = (value, label, minimum = 0) => {
@@ -37,7 +37,7 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
   const additions = new Set(rawEvents.filter(event => eventType(event) === 'track' && event.track?.id && !originalById.has(event.track.id)).map(event => event.track.id));
   const tracks = mode === 'performance' ? initialTracks : currentTracks.filter(track => !additions.has(track.id)).map(track => {
     const original = originalById.get(track.id);
-    return { ...track, muted: original ? original.muted : track.muted, solo: original ? original.solo : track.solo };
+    return currentArrangementTrack(track, original);
   });
   const sampleRate = project.sampleRate;
   const startFrame = int(performance?.startFrame ?? selectedTake?.startFrame ?? 0, 'song start');
@@ -72,8 +72,11 @@ export async function prepareRenderPlan(storage, inputProject, options = {}) {
   const requiredTracks = [...tracks];
   for (const event of events) {
     if (eventType(event) === 'track' && event.track) {
-      const track = mode === 'current' ? currentById.get(event.track.id) : checkTracks(project, [event.track])[0];
-      if (track) { requiredTracks.push(track); if (mode === 'performance') event.track = track; }
+      const recorded = checkTracks(project, [event.track])[0];
+      const current = currentById.get(recorded?.id);
+      const track = mode === 'current' ? current && currentArrangementTrack(current, recorded) : recorded;
+      if (recorded) event.track = recorded;
+      if (track) requiredTracks.push(track);
     } else if (eventType(event) === 'section' && event.section) {
       event.section = validateProject({ ...project, sections: [event.section] }, { strict: true }).sections[0];
     }

@@ -169,7 +169,7 @@ test('live loop capture follows mute changes, allows Cancel and Stop, and keeps 
   await expect(record).toBeEnabled();
   for (const width of [680, 768]) {
     await page.setViewportSize({ width, height: 800 });
-    for (const name of ['play', 'stop', 'add-loop', 'sing', 'record-all-loops']) {
+    for (const name of ['play', 'pause', 'stop', 'add-loop', 'sing', 'record-all-loops']) {
       const control = await page.getByTestId(name).boundingBox();
       expect(control.x).toBeGreaterThanOrEqual(0);
       expect(control.x + control.width).toBeLessThanOrEqual(width);

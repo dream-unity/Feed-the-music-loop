@@ -8,6 +8,7 @@ const ICONS = {
   loop: '<path d="M12 8c-3-4-8-2-8 2s5 6 8 2l3-4c3-4 7-2 7 2s-5 6-8 2l-3-4"/>',
   mic: '<rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/>',
   play: '<path d="m8 5 11 7-11 7Z"/>',
+  pause: '<path d="M8 5v14M16 5v14"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   arrow: '<path d="M5 12h14m-6-6 6 6-6 6"/>',
@@ -97,11 +98,11 @@ export class StudioUI extends EventTarget {
         </div>
         <aside class="side-column" aria-label="Input and session controls"><section class="input-card"><div class="card-heading"><span class="eyebrow">YOUR INSTRUMENT</span>${icon('mic')}</div><h2>The human voice.</h2><div class="input-meter-row"><span>Mic level</span><div class="input-meter-track"><div data-ref="input-meter"></div></div><span data-ref="input-db">−∞</span></div><div data-ref="input-controls"></div><label class="toggle-row"><span>${icon('headphones')}Hear my mic</span><input type="checkbox" data-control="monitor" role="switch" aria-label="Hear my microphone through headphones"><span class="toggle" aria-hidden="true"></span></label><p class="help-copy">Use headphones for monitoring. Add loop and Sing over loops record your voice even when monitoring is off. Record all the loops excludes your microphone.</p><div class="input-divider"></div><div class="loop-length"><label for="loop-length">New loop length</label><select id="loop-length" data-control="loop-recording-mode" aria-describedby="loop-length-help"><option value="free">Free · until I finish</option><option value="seconds">Custom duration · seconds</option><option value="cycles">Cycles</option></select><label class="loop-recording-number" data-ref="loop-recording-seconds" hidden>Duration<span><input type="number" min="0" step="any" value="8" data-control="loop-recording-seconds" aria-label="Loop duration in seconds" inputmode="decimal"><span>seconds</span></span></label><label class="loop-recording-number" data-ref="loop-recording-cycles" hidden>Number of cycles<input type="number" min="1" step="1" value="1" data-control="loop-recording-cycles" aria-label="Number of cycles" inputmode="numeric"></label><p class="help-copy loop-length-summary" id="loop-length-help" data-ref="length-help" aria-live="polite">Records until you choose Finish recording.</p><label class="loop-recording-start-label" for="loop-recording-start">Recording starts</label><select id="loop-recording-start" data-control="loop-recording-start" aria-describedby="loop-start-help"><option value="immediate">Immediately</option><option value="next-cycle">Next cycle</option></select><p class="help-copy" id="loop-start-help" data-ref="loop-start-help">Starts immediately when the audio is ready.</p></div></section><section class="master-card"><div class="card-heading"><span class="eyebrow">THE WHOLE PICTURE</span>${icon('sliders')}</div><div data-ref="master-controls"></div><button class="spotlight-button" data-action="spotlight" aria-pressed="false">${icon('spark')}<span>Spotlight<small>Hold to bring your voice forward</small></span></button></section><section class="session-card"><div class="card-heading"><span class="eyebrow">KEEP WHAT YOU CREATE</span>${icon('shield')}</div><p class="session-storage" data-ref="storage-label">Audio stays on this device.</p><div class="storage-bar"><div data-ref="storage-progress"></div></div><button class="text-button" data-action="export-project">Download project backup${icon('arrow')}</button><button class="text-button subtle" data-action="persist" data-ref="persist-button">Protect local storage${icon('arrow')}</button><button class="text-button subtle" data-action="manage-storage">Manage storage${icon('folder')}</button><details class="advanced-settings"><summary>Timing &amp; recording</summary><div class="microphone-picker" data-ref="microphone-picker"></div><p class="help-copy">If your new layers sound late, adjust recording compensation. This depends on your headphones and microphone.</p><label class="number-field">Recording compensation<span><input type="number" min="0" max="1000" step="1" value="0" data-control="compensation" aria-label="Recording compensation in milliseconds">ms</span></label><p class="help-copy">Try small changes. Wired headphones usually make timing easier. A new audio device may need a different setting.</p><div class="metronome-controls" data-ref="metronome-controls"></div><button class="button quiet full-width" data-action="mic-off">${icon('mic')}Disconnect microphone</button></details></section></aside>
       </div>
-      <div class="footnote"><span>Made of breath, rhythm &amp; possibility. <small class="studio-version">Studio 2026.10.18.2</small></span><button class="text-button subtle" data-action="help">${icon('keyboard')}Studio guide &amp; shortcuts</button></div>
+      <div class="footnote"><span>Made of breath, rhythm &amp; possibility. <small class="studio-version">Studio 2026.10.26.1</small></span><button class="text-button subtle" data-action="help">${icon('keyboard')}Studio guide &amp; shortcuts</button></div>
     </main>
-    <div class="record-dock" aria-label="Recording controls"><div class="dock-status"><span class="dock-light" data-ref="dock-light"></span><div><strong data-ref="dock-label">Start with a sound.</strong><span data-ref="dock-caption">Your first loop is the beginning.</span></div></div><div class="dock-actions"><button class="button transport-button" data-action="play" data-testid="play" aria-label="Play loops">${icon('play')}</button><button class="button stop-button" data-action="stop" data-testid="stop" aria-label="Stop all audio" title="Stop all audio">${icon('stop')}</button><span class="dock-separator"></span><button class="button primary" data-action="add-loop" data-ref="dock-loop" data-testid="add-loop">${icon('plus')}<span>Add loop</span><kbd>R</kbd></button><button class="button primary coral" data-action="sing" data-ref="dock-sing" data-testid="sing">${icon('mic')}<span>Sing over loops</span><kbd>V</kbd></button><button class="button primary loop-record-button" data-action="record-all-loops" data-ref="dock-mix" data-testid="record-all-loops" title="Record every unmuted loop together, without microphone input">${icon('layers')}<span>Record all the loops</span></button><button class="button primary coral" data-action="finish" data-ref="dock-finish" data-testid="finish" hidden>${icon('check')}<span>Finish recording</span></button><button class="button quiet" data-action="cancel" data-ref="dock-cancel" data-testid="cancel" hidden>${icon('close')}<span>Cancel</span></button></div><div class="history-actions"><button class="button icon-button" data-action="undo" aria-label="Undo" title="Undo (Ctrl or ⌘ Z)">${icon('undo')}</button><button class="button icon-button" data-action="redo" aria-label="Redo" title="Redo (Ctrl or ⌘ Shift Z)">${icon('redo')}</button></div></div>
+    <div class="record-dock" aria-label="Recording controls"><div class="dock-status"><span class="dock-light" data-ref="dock-light"></span><div><strong data-ref="dock-label">Start with a sound.</strong><span data-ref="dock-caption">Your first loop is the beginning.</span></div></div><div class="dock-actions"><button class="button transport-button" data-action="play" data-testid="play" aria-label="Play loops">${icon('play')}</button><button class="button pause-button" data-action="pause" data-testid="pause" aria-label="Pause playback" title="Pause playback · keep the current position" disabled>${icon('pause')}</button><button class="button stop-button" data-action="stop" data-testid="stop" aria-label="Stop all audio" title="Stop and return all audio to 0">${icon('stop')}</button><span class="dock-separator"></span><button class="button primary" data-action="add-loop" data-ref="dock-loop" data-testid="add-loop">${icon('plus')}<span>Add loop</span><kbd>R</kbd></button><button class="button primary coral" data-action="sing" data-ref="dock-sing" data-testid="sing">${icon('mic')}<span>Sing over loops</span><kbd>V</kbd></button><button class="button primary loop-record-button" data-action="record-all-loops" data-ref="dock-mix" data-testid="record-all-loops" title="Record every unmuted loop together, without microphone input">${icon('layers')}<span>Record all the loops</span></button><button class="button primary coral" data-action="finish" data-ref="dock-finish" data-testid="finish" hidden>${icon('check')}<span>Finish recording</span></button><button class="button quiet" data-action="cancel" data-ref="dock-cancel" data-testid="cancel" hidden>${icon('close')}<span>Cancel</span></button></div><div class="history-actions"><button class="button icon-button" data-action="undo" aria-label="Undo" title="Undo (Ctrl or ⌘ Z)">${icon('undo')}</button><button class="button icon-button" data-action="redo" aria-label="Redo" title="Redo (Ctrl or ⌘ Shift Z)">${icon('redo')}</button></div></div>
     <div class="toast-region" data-ref="toasts" aria-live="polite" aria-relevant="additions"></div>
-    <dialog class="studio-dialog" data-ref="dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-heading"><h2 id="dialog-title" data-ref="dialog-title" tabindex="-1"></h2><button type="button" class="button icon-button dialog-stop" data-action="stop" data-ref="dialog-stop" aria-label="Stop all audio" title="Stop all audio" hidden>${icon('stop')}</button><button type="button" class="button icon-button" data-dialog-close aria-label="Close dialog">${icon('close')}</button></div><div data-ref="dialog-body"></div><div class="dialog-actions" data-ref="dialog-actions"></div></form></dialog>
+    <dialog class="studio-dialog" data-ref="dialog" aria-labelledby="dialog-title"><form method="dialog"><div class="dialog-heading"><h2 id="dialog-title" data-ref="dialog-title" tabindex="-1"></h2><button type="button" class="button icon-button dialog-play" data-action="play" data-ref="dialog-play" aria-label="Resume playback" title="Resume playback" hidden>${icon('play')}</button><button type="button" class="button icon-button dialog-pause" data-action="pause" data-ref="dialog-pause" aria-label="Pause playback" title="Pause playback · keep the current position" hidden>${icon('pause')}</button><button type="button" class="button icon-button dialog-stop" data-action="stop" data-ref="dialog-stop" aria-label="Stop all audio" title="Stop and return all audio to 0" hidden>${icon('stop')}</button><button type="button" class="button icon-button" data-dialog-close aria-label="Close dialog">${icon('close')}</button></div><div data-ref="dialog-body"></div><div class="dialog-actions" data-ref="dialog-actions"></div></form></dialog>
     <input type="file" data-ref="audio-file" accept="audio/*,.wav,.mp3,.ogg,.m4a,.webm,.flac" hidden><input type="file" data-ref="project-file" accept=".fml,application/octet-stream" hidden>
   `;}
 
@@ -133,8 +134,14 @@ export class StudioUI extends EventTarget {
     },{signal});
     this.refs['audio-file'].addEventListener('change',e=>{this.importFile(e.target.files?.[0],this.audioImportAction||'import-audio');this.audioImportAction=null;e.target.value='';},{signal});
     this.refs['project-file'].addEventListener('change',e=>{this.importFile(e.target.files?.[0],'import-project');e.target.value='';},{signal});
-    for(const type of ['play','pause','ended'])this.refs['preview-audio'].addEventListener(type,()=>{this.previewPlaying=!this.refs['preview-audio'].paused&&!this.refs['preview-audio'].ended;this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.state.previewPreparing||this.previewPlaying);},{signal});
-    for(const type of ['play','pause','ended'])this.refs['recording-master-audio'].addEventListener(type,()=>{this.recordingMasterPlaying=!this.refs['recording-master-audio'].paused&&!this.refs['recording-master-audio'].ended;this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.state.previewPreparing||this.previewPlaying||this.recordingMasterPlaying);},{signal});
+    // Capture media events so dynamic editor players share the same transport.
+    for(const type of ['play','pause','ended'])this.root.addEventListener(type,e=>{
+      if(e.target.tagName!=='AUDIO')return;
+      this.previewPlaying=!this.refs['preview-audio'].paused&&!this.refs['preview-audio'].ended;
+      this.recordingMasterPlaying=!this.refs['recording-master-audio'].paused&&!this.refs['recording-master-audio'].ended;
+      if(type==='play')this.emit('media-playback',{id:e.target.id||e.target.dataset.testid||'',playing:true});
+      this.renderDock(this.state.capture,this.state.project?.tracks||[],this.state.sampleRate||48000);
+    },{signal,capture:true});
     document.addEventListener('keydown',e=>this.onKey(e),{signal});
     const spotlight = this.root.querySelector('[data-action="spotlight"]');
     const release=()=>{if(this.spotlight){this.spotlight=false;spotlight.setAttribute('aria-pressed','false');this.emit('spotlight',{active:false});}};
@@ -260,8 +267,8 @@ export class StudioUI extends EventTarget {
     if(editable||e.repeat||e.altKey)return;
     if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();const type=e.shiftKey?'redo':'undo';if(enabled(type))this.emit(type);return;}
     if(e.ctrlKey||e.metaKey)return;
-    if(e.target.closest('button,a,summary')&&(e.key===' '||e.key==='Enter'))return;
-    if(e.key===' '){e.preventDefault();const type=this.state.playing||this.state.capture||this.previewPlaying||this.recordingMasterPlaying||this.state.recordingMix?.previewBusy||this.state.previewPreparing?'stop':'play';if(enabled(type))this.emit(type);}
+    if(e.target.closest('button,a,summary')&&(e.key===' '||e.key==='Enter')&&!(e.key===' '&&e.target.closest('[data-action="play"],[data-action="pause"]')))return;
+    if(e.key===' '){e.preventDefault();if(this.state.capture)return;const type=this.state.playing||this.getPlaybackMedia().some(audio=>!audio.paused&&!audio.ended)?'pause':'play';if(enabled(type))this.emit(type);}
     if(e.key.toLowerCase()==='r'&&enabled('add-loop')&&this.validateLoopRecordingInput())this.emit('add-loop');
     if(e.key.toLowerCase()==='v'&&enabled('sing'))this.emit('sing');
     if(e.key==='Enter'&&this.state.capture?.status==='recording')this.emit('finish');
@@ -277,6 +284,7 @@ export class StudioUI extends EventTarget {
     this.refs['project-name'].textContent=p.name||'Untitled session';
     this.root.dataset.captureState=capture?.status||'idle';
     this.root.dataset.playing=String(!!state.playing);
+    this.root.dataset.paused=String(!!state.paused);
     const saveLabel=state.message||state.status||(state.busy?'Working…':'Ready');
     if(this.refs['save-state'].textContent!==saveLabel)this.refs['save-state'].textContent=saveLabel;
     this.refs['save-state'].classList.toggle('is-error',!!state.error);
@@ -330,7 +338,7 @@ export class StudioUI extends EventTarget {
     this.refs['dock-mix'].title=playableLoops.length?'Record every unmuted loop together. Solo is ignored; microphone input is excluded.':'Add or unmute a loop to record your loops together.';
     this.root.querySelectorAll('[data-action="projects"],[data-action="rename-project"],[data-action="export-menu"],[data-action="manage-storage"],[data-action="delete-project"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
     this.root.querySelectorAll('[data-action="save-section"]').forEach(el=>el.disabled=!tracks.length||!!state.readonly||!!state.busy||!!state.exporting);
-    this.root.querySelectorAll('[data-action="play"]').forEach(el=>{el.disabled=recording||!!state.playing||(!tracks.length&&!p.selectedTakeId&&!p.metronome?.enabled)||!!state.busy;});
+    this.renderTransportControls();
     this.root.querySelectorAll('[data-action="seek-start"]').forEach(el=>el.disabled=recording||!!state.busy||!tracks.length);
     this.root.querySelectorAll('[data-action="stop"]').forEach(el=>el.disabled=false);
     this.root.querySelectorAll('[data-action="delete-storage-file"],[data-action="download-storage-file"],[data-action="refresh-storage"]').forEach(el=>el.disabled=el.dataset.unavailable==='true'||recording||!!state.busy||!!state.exporting);
@@ -348,7 +356,7 @@ export class StudioUI extends EventTarget {
     this.root.querySelectorAll('[data-action="mute"],[data-action="solo"],[data-action="remove-track"],[data-action="rename-track"],[data-action="rename-take"],[data-action="delete-take"],[data-action="delete-section"],[data-action="launch-section"],[data-action="nudge"]').forEach(el=>el.disabled=!!state.readonly||!!state.busy);
     if(state.readonly)this.root.querySelector('[data-action="rename-project"]').disabled=true;
     const damaged=this.damagedIds(),damagedBacking=tracks.some(t=>damaged.has(t.assetId));
-    if(damagedBacking)this.root.querySelectorAll('[data-action="play"],[data-action="add-loop"],[data-action="sing"],[data-action="record-all-loops"]').forEach(el=>el.disabled=true);
+    if(damagedBacking)this.root.querySelectorAll('[data-action="add-loop"],[data-action="sing"],[data-action="record-all-loops"]').forEach(el=>el.disabled=true);
     if(damaged.size)this.root.querySelectorAll('[data-action="export-project"]').forEach(el=>el.disabled=true);
     this.root.querySelectorAll('[data-action="export-damaged-audio"]').forEach(el=>el.disabled=recording||!!state.busy||!!state.exporting);
     this.root.querySelectorAll('[data-action="edit-track"],[data-action="preview-track"],[data-action="export-track"],[data-action="layer-vocal"]').forEach(el=>{const track=[...tracks,...(p.takes||[])].find(t=>t.id===el.dataset.id);if(damaged.has(track?.assetId))el.disabled=true;});
@@ -363,7 +371,7 @@ export class StudioUI extends EventTarget {
       if(!this.storageFailedShown&&this.refs.dialog.open)this.refs.dialog.close('cancel');
     }
     this.storageFailedShown=!!state.storageFailed;
-    this.refs['dialog-stop'].hidden=!(state.playing||capture||state.previewPreparing||this.recordingMasterPlaying||state.recordingMix?.previewBusy||(state.preview&&!this.refs['preview-audio'].paused));
+    this.renderTransportControls();
     if(focusWasInOldView){const heading=this.root.querySelector(`[data-view-panel="${view}"] h1`);if(heading){heading.tabIndex=-1;heading.focus();}}
     else if(!this.refs.dialog.open&&focusedBefore?.isConnected&&this.root.contains(focusedBefore)&&focusedBefore.closest('[hidden]')){
       const target=capture?(capture.status==='recording'?this.refs['dock-finish']:this.refs['dock-cancel']):this.refs['dock-loop'];
@@ -626,7 +634,34 @@ export class StudioUI extends EventTarget {
     if(progress.totalFrames||progress.total)this.refs['export-progressbar'].setAttribute('aria-valuenow',String(percent));else this.refs['export-progressbar'].removeAttribute('aria-valuenow');
   }
 
+  getPlaybackMedia() {
+    return [...this.root.querySelectorAll('audio')].filter(audio=>audio.hasAttribute('src'));
+  }
+
+  renderTransportControls() {
+    const s=this.state,p=s.project||{},media=this.getPlaybackMedia(),mediaPlaying=media.some(audio=>!audio.paused&&!audio.ended);
+    const playing=!!s.playing||mediaPlaying,paused=!!s.paused&&!playing,capturing=!!s.capture;
+    const preparing=!!s.previewPreparing||!!s.recordingMix?.previewBusy||!!s.trackEditor?.previewBusy;
+    const blocked=capturing||!!s.busy||preparing||!!s.storageFailed||!!s.deletionPending||!!s.trackEditor?.busy;
+    const hasSource=!!p.tracks?.length||!!p.selectedTakeId||!!p.metronome?.enabled||media.length>0;
+    const damagedBacking=(p.tracks||[]).some(track=>this.damagedIds().has(track.assetId));
+    this.root.querySelectorAll('[data-action="play"]').forEach(button=>{
+      button.disabled=blocked||playing||!hasSource||(damagedBacking&&!media.length);
+      button.setAttribute('aria-label',paused?'Resume playback':media.length?'Play recording':'Play loops');
+      button.title=paused?'Resume playback from the paused position':media.length?'Play this recording from its current position':'Play loops from the current position';
+    });
+    this.root.querySelectorAll('[data-action="pause"]').forEach(button=>{
+      button.disabled=blocked||!playing;
+      button.title=capturing?'Finish or stop the recording before pausing':'Pause playback · keep the current position';
+    });
+    this.refs['dialog-play'].hidden=playing||(!paused&&!media.length);
+    this.refs['dialog-pause'].hidden=!playing;
+    this.refs['dialog-stop'].hidden=!(playing||paused||capturing||preparing||media.length||finite(s.transportFrame)>0);
+    this.root.dataset.paused=String(paused);
+  }
+
   renderDock(capture,tracks,rate) {
+    this.renderTransportControls();
     const active=!!capture,status=capture?.status,waitsForMic=!!capture?.waitingForMic&&!this.state.micEnabled,waitsForCycle=status==='arming'&&!capture?.preparing&&(capture?.startMode||this.state.project?.loopRecording?.start)==='next-cycle'&&finite(this.state.project?.baseFrames)>0;
     this.refs['dock-loop'].hidden=active;this.refs['dock-sing'].hidden=active;this.refs['dock-mix'].hidden=active;this.root.classList.toggle('has-loop-record-control',!active);this.refs['dock-finish'].hidden=!active||status!=='recording';this.refs['dock-cancel'].hidden=!active;
     this.refs['dock-finish'].disabled=status==='finishing';
@@ -641,6 +676,7 @@ export class StudioUI extends EventTarget {
     if(this.recordingMasterPlaying&&!capture){label=this.state.recordingMix?.previewKind==='original'?'Listening to the original.':'Listening to your master.';caption='Compare the same moment, then save a new version.';}
     if(this.state.recordingMix?.previewBusy&&!capture){label='Preparing your comparison.';caption='Measuring the recording. Stop cancels this preview.';}
     if(this.state.audition&&!capture){label=this.state.audition.status==='loading'?'Preparing your live mix.':'Hear the feeling take shape.';caption='Selected vocal + current layers. Adjust the mixer as it plays.';}
+    if(this.state.paused&&!capture&&!this.state.playing&&!this.getPlaybackMedia().some(audio=>!audio.paused&&!audio.ended)){label='Playback paused.';caption='Play resumes here. Stop returns all audio to 0.';}
     if(status==='arming'){label=waitsForCycle?'Waiting for your chosen cycle.':capture.kind==='mix'?'Getting your loops ready.':'Getting your microphone ready.';caption=waitsForCycle?'You chose Next cycle. Recording begins at the next boundary.':'Recording starts as soon as the audio is ready. Cancel anytime.';}
     if(status==='counting'){label=`Count in · ${Math.max(1,finite(capture.countInBeat,1))} of ${finite(capture.countInBeats,4)}`;caption='Get ready. Your first loop starts after the count.';}
     if(waitsForMic){label='Waiting for your microphone.';caption='Allow microphone access in your browser. Stop cancels this request.';}
@@ -723,6 +759,7 @@ export class StudioUI extends EventTarget {
   }
 
   updateTransport(data={}) {
+    const changed=data.playing!==undefined&&this.root.dataset.playing!==String(!!data.playing)||data.paused!==undefined&&this.root.dataset.paused!==String(!!this.state.paused);
     if(data.playing!==undefined)this.root.dataset.playing=String(!!data.playing);
     if(data.capture?.status)this.root.dataset.captureState=data.capture.status;
     const p=this.state.project||{},frame=finite(data.transportFrame??data.projectFrame??data.frame),rate=finite(data.sampleRate||this.state.sampleRate||p.sampleRate,48000),base=finite(data.baseFrames??p.baseFrames);
@@ -732,8 +769,10 @@ export class StudioUI extends EventTarget {
     this.refs['cycle-progress'].style.width=base?`${(frame%base)/base*100}%`:'0%';
     this.refs['cycle-position'].textContent=base?`CYCLE ${Math.floor(frame/base)+1}`:'FREE';
     const markers=new Map([...this.refs.tracks.querySelectorAll('[data-position]')].map(el=>[el.dataset.position,el]));
-    for(const t of p.tracks||[]){const marker=markers.get(t.id);if(marker)marker.style.left=`${t.frames?((frame-finite(t.offsetFrames))%t.frames+t.frames)%t.frames/t.frames*100:0}%`;}
+    const offsets=data.playbackOffsets||this.state.playbackOffsets||{};
+    for(const t of p.tracks||[]){const marker=markers.get(t.id),offset=finite(offsets[t.id]??t.offsetFrames);if(marker)marker.style.left=`${t.frames?((frame-offset)%t.frames+t.frames)%t.frames/t.frames*100:0}%`;}
     if(this.state.capture&&data.capture){this.state.capture={...this.state.capture,...data.capture};this.renderDock(this.state.capture,p.tracks||[],rate);}
+    else if(changed)this.renderDock(this.state.capture,p.tracks||[],rate);
   }
 
   patchInput(input,value) {if(input&&input!==document.activeElement)input.value=value;}
@@ -757,7 +796,7 @@ export class StudioUI extends EventTarget {
     this.settleDialog('cancel');
     if(!d.contains(document.activeElement))this.dialogOpener=document.activeElement;
     if(d.open)d.close('cancel');
-    d.returnValue='cancel';this.refs['dialog-title'].textContent=title;this.refs['dialog-body'].innerHTML=body;this.refs['dialog-actions'].innerHTML=actions;this.refs['dialog-stop'].hidden=!(this.state.playing||this.state.capture||this.state.previewPreparing||this.recordingMasterPlaying||this.state.recordingMix?.previewBusy||(this.state.preview&&!this.refs['preview-audio'].paused));d.showModal();d.scrollTop=0;this.refs['dialog-title'].focus();return d;
+    d.returnValue='cancel';this.refs['dialog-title'].textContent=title;this.refs['dialog-body'].innerHTML=body;this.refs['dialog-actions'].innerHTML=actions;this.renderTransportControls();d.showModal();d.scrollTop=0;this.refs['dialog-title'].focus();return d;
   }
 
   showTrackEditor(model) {
@@ -824,7 +863,7 @@ export class StudioUI extends EventTarget {
   }
 
   showHelp() {
-    this.showDialog('A whole song. All you.',`<div class="guide-steps"><div><span>01</span><section><h3>Make a little rhythm.</h3><p>Connect your microphone and choose Add loop. Record a beat, hum or sound. Choose Free to record until you finish, or enter a custom duration in seconds before recording your first loop.</p></section></div><div><span>02</span><section><h3>Let it grow.</h3><p>Add more layers. Choose Free, custom seconds or a number of cycles for each new loop. Recording starts immediately unless you choose Next cycle or enable a first-loop count-in. You can finish a timed loop early.</p></section></div><div><span>03</span><section><h3>Give it a voice.</h3><p>Choose Sing over loops. The backing keeps its place while you record a continuous vocal. Finishing keeps the groove going and saves a separate take and stereo performance.</p></section></div><div><span>04</span><section><h3>Find the feeling.</h3><p>Open Mix to shape each layer. Save different combinations as sections, then switch them while singing or recording all the loops to build your arrangement.</p></section></div></div><div class="guide-note">${icon('headphones')}<p>Use wired headphones for clean layers and easier timing. Keep this tab open and your device awake during recording. Download project backups for recordings you want to keep.</p></div><div class="guide-note">${icon('layers')}<p>Record all the loops makes a continuous stereo song from every unmuted loop. Solo is ignored in this mode. No microphone is needed or recorded. Change mutes, sections and mix settings as it records, then choose Finish recording.</p></div><h3 class="shortcut-heading">A few helpful shortcuts</h3><dl class="shortcut-list"><div><dt><kbd>Space</kbd></dt><dd>Play / stop everything</dd></div><div><dt><kbd>R</kbd></dt><dd>Add a loop</dd></div><div><dt><kbd>V</kbd></dt><dd>Sing over loops</dd></div><div><dt><kbd>Enter</kbd></dt><dd>Finish recording</dd></div><div><dt><kbd>Esc</kbd></dt><dd>Cancel the current recording</dd></div><div><dt><kbd>⌘ / Ctrl Z</kbd></dt><dd>Undo · add Shift to redo</dd></div></dl><p class="help-copy">Your recordings stay in your browser. Nothing is uploaded by this studio. Browser storage can be cleared or evicted, so keep an exported backup.</p>`,`<button class="button primary" value="close">Let’s make something${icon('arrow')}</button>`);
+    this.showDialog('A whole song. All you.',`<div class="guide-steps"><div><span>01</span><section><h3>Make a little rhythm.</h3><p>Connect your microphone and choose Add loop. Record a beat, hum or sound. Choose Free to record until you finish, or enter a custom duration in seconds before recording your first loop.</p></section></div><div><span>02</span><section><h3>Let it grow.</h3><p>Add more layers. Choose Free, custom seconds or a number of cycles for each new loop. Recording starts immediately unless you choose Next cycle or enable a first-loop count-in. You can finish a timed loop early.</p></section></div><div><span>03</span><section><h3>Give it a voice.</h3><p>Choose Sing over loops. The backing keeps its place while you record a continuous vocal. Finishing keeps the groove going and saves a separate take and stereo performance.</p></section></div><div><span>04</span><section><h3>Find the feeling.</h3><p>Open Mix to shape each layer. Save different combinations as sections, then switch them while singing or recording all the loops to build your arrangement.</p></section></div></div><div class="guide-note">${icon('headphones')}<p>Use wired headphones for clean layers and easier timing. Keep this tab open and your device awake during recording. Download project backups for recordings you want to keep.</p></div><div class="guide-note">${icon('layers')}<p>Record all the loops makes a continuous stereo song from every unmuted loop. Solo is ignored in this mode. No microphone is needed or recorded. Change mutes, sections and mix settings as it records, then choose Finish recording.</p></div><div class="guide-note">${icon('pause')}<p>Pause keeps the current position. Play resumes from there. Stop returns every loop and player to 0 so the next playback starts together. Pause is unavailable while recording; Finish keeps the groove playing, while Stop saves the recording and resets playback.</p></div><h3 class="shortcut-heading">A few helpful shortcuts</h3><dl class="shortcut-list"><div><dt><kbd>Space</kbd></dt><dd>Play / pause playback</dd></div><div><dt><kbd>R</kbd></dt><dd>Add a loop</dd></div><div><dt><kbd>V</kbd></dt><dd>Sing over loops</dd></div><div><dt><kbd>Enter</kbd></dt><dd>Finish recording</dd></div><div><dt><kbd>Esc</kbd></dt><dd>Cancel the current recording</dd></div><div><dt><kbd>⌘ / Ctrl Z</kbd></dt><dd>Undo · add Shift to redo</dd></div></dl><p class="help-copy">Your recordings stay in your browser. Nothing is uploaded by this studio. Browser storage can be cleared or evicted, so keep an exported backup.</p>`,`<button class="button primary" value="close">Let’s make something${icon('arrow')}</button>`);
   }
 
   destroy(){this.refs['recording-master-audio']?.pause();this.trackEditor?.destroy();this.abort.abort();this.root.replaceChildren();}

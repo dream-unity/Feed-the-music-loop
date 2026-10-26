@@ -158,3 +158,41 @@ for (const existing of [false, true]) {
     assert.equal(h.controller.pending, null);
   });
 }
+
+test('controller Stop preserves the compensated vocal window while every transport acknowledgement stays at zero', async () => {
+  const h = studio(); h.addExisting();
+  h.controller.state.project.input.compensationMs = 20;
+  await h.controller.startCapture('vocal', 0);
+  h.run(633, index => .2 * Math.sin(index * .21));
+  const pending = h.controller.pending, startFrame = pending.startFrame;
+  assert.equal(h.loop.frame - startFrame, 633);
+  await h.controller.handle({ type: 'stop' });
+  assert.equal(h.loop.frame, 0); assert.equal(h.controller.state.transportFrame, 0);
+  assert.equal(h.controller.state.capture.status, 'finishing');
+  await assert.rejects(h.controller.handle({ type: 'play' }), /Finish saving/);
+  assert.equal(energy(h.run(161, index => .2 * Math.sin(index * .21))), 0);
+  for (let attempts = 0; h.controller.pending && attempts < 20; attempts++) await turn();
+  assert.equal(h.controller.pending, null); assert.equal(h.loop.frame, 0); assert.equal(h.controller.state.transportFrame, 0);
+  const performance = h.controller.state.project.performances[0];
+  assert.equal(performance.startFrame, startFrame); assert.equal(performance.frames, 633);
+  assert.equal(h.assets.get(performance.masterAssetId).frames, 633);
+  assert.equal(h.controller.state.project.takes[0].frames, 633);
+  assert.equal(h.controller.state.playing, false);
+});
+
+test('controller Pause resumes the same audio phase while Stop aligns loop starts without altering saved timing', async () => {
+  const h = studio(), track = h.addExisting();
+  await h.controller.handle({ type: 'nudge', id: track.id, frames: 319 });
+  const authoredOffset = track.offsetFrames, atPause = h.loop.frame;
+  await h.controller.handle({ type: 'pause' });
+  assert.equal(energy(h.run(357)), 0); assert.equal(h.loop.frame, atPause);
+  await h.controller.handle({ type: 'play' });
+  assert.ok(energy(h.run(219)) > 1e-4); assert.equal(h.loop.frame, atPause + 219);
+  await h.controller.handle({ type: 'stop' });
+  assert.equal(h.loop.frame, 0); assert.equal(h.controller.state.transportFrame, 0);
+  assert.equal(h.loop.playbackOffset(h.loop.tracks.get(track.id)), 0);
+  assert.equal(track.offsetFrames, authoredOffset);
+  await h.controller.handle({ type: 'play' });
+  assert.ok(energy(h.run(219)) > 1e-4); assert.equal(h.loop.frame, 219);
+  assert.equal(h.controller.currentPlaybackProject().tracks[0].offsetFrames, 0);
+});

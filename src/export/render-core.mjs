@@ -4,6 +4,19 @@ const BLOCK_FRAMES = 128;
 const PAGE_FRAMES = 16384;
 const modulo = (value, divisor) => ((value % divisor) + divisor) % divisor;
 
+/** A transport restart can change the heard loop phase without rewriting its
+ * saved timing. Keep that performed phase while applying later timing edits. */
+export function currentArrangementTrack(current, recorded) {
+  let offsetFrames = current.offsetFrames;
+  if (recorded && Object.hasOwn(recorded, 'sourceOffsetFrames')) {
+    if (![recorded.offsetFrames, recorded.sourceOffsetFrames, offsetFrames].every(Number.isSafeInteger)) throw new Error('The recorded loop timing is invalid.');
+    const effective = BigInt(recorded.offsetFrames) + BigInt(offsetFrames) - BigInt(recorded.sourceOffsetFrames);
+    if (effective < -BigInt(Number.MAX_SAFE_INTEGER) || effective > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('The recorded loop timing exceeds the supported timeline.');
+    offsetFrames = Number(effective);
+  }
+  return { ...current, offsetFrames, muted: recorded ? !!recorded.muted : current.muted, solo: recorded ? !!recorded.solo : current.solo };
+}
+
 /** Render with the live DSP implementation, preserving its state across pages.
  * All IO is injected so this runs in a dedicated Worker and deterministic tests.
  * No complete recording, offline AudioBuffer or full output is held in memory. */
@@ -86,7 +99,7 @@ export async function renderMixFrames(plan, { readPage, writePage, onProgress, s
       // it had when it entered the recorded arrangement.
       const current = currentTracks.get(event.track.id);
       const track = plan.mode === 'current' && current
-        ? { ...current, muted: !!event.track.muted, solo: !!event.track.solo }
+        ? currentArrangementTrack(current, event.track)
         : plan.mode === 'performance' ? event.track : null;
       if (track) {
         if (!engine.tracks.has(track.id) && engine.tracks.size >= 512) throw new Error('The recorded arrangement has too many simultaneous tracks.');

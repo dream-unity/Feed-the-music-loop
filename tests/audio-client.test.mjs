@@ -472,3 +472,13 @@ test('a warmed recording reuses context, live microphone and ready tracks, and p
   assert.equal(h.contexts.length,1);assert.equal(context.resumeCount,resumeCount);assert.equal(h.requests.length,1);assert.equal(h.sources.length,1);assert.equal(h.engine.source,source);assert.equal(stream.track.stopCount,0);
   assert.equal(h.commands().length,beforeCommands+1);assert.equal(h.commands().at(-1).type,'arm');assert.equal(h.commands().at(-1).capture.quantized,false);assert.equal(h.engine.armingCapture.id,'quick');
 });
+
+
+test('transport requests are versioned and stale meters cannot restore pre-Stop playback',async t=>{
+  const h=fakeBrowser(t);await h.init();h.engine.play();h.nodes[0].emit({type:'state',transportGeneration:1,playing:true,paused:false,transportFrame:701,playbackOffsets:{one:20},playbackBaselines:{one:50}});
+  assert.equal(h.engine.frame,701);h.engine.pause();h.engine.stop();h.engine.seek();
+  assert.deepEqual(h.commands().filter(message=>['play','pause','stop','seek'].includes(message.type)).map(message=>[message.type,message.transportGeneration]),[['play',1],['pause',2],['stop',3],['seek',4]]);
+  h.nodes[0].emit({type:'state',transportGeneration:4,playing:false,paused:false,transportFrame:0,playbackOffsets:{one:0},playbackBaselines:{one:70}});
+  h.nodes[0].emit({type:'meter',transportGeneration:1,playing:true,paused:false,transportFrame:999,playbackOffsets:{one:20},playbackBaselines:{one:50}});
+  assert.equal(h.engine.frame,0);assert.equal(h.engine.playing,false);assert.equal(h.engine.paused,false);assert.deepEqual(h.engine.playbackOffsets,{one:0});assert.deepEqual(h.engine.playbackBaselines,{one:70});
+});
