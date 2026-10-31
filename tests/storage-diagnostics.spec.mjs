@@ -154,10 +154,10 @@ test('one 5.56 MiB recording remains writable with zero or over-quota estimates,
   await testInfo.attach('storage-diagnostic-zero-headroom', { path: zeroScreenshot, contentType: 'image/png' });
 
   // A manual check updates its result without replacing the user's file filter.
-  await dialog(page).getByRole('textbox', { name: 'Search files', exact: true }).fill('Bass 2');
+  await dialog(page).getByRole('searchbox', { name: 'Search files', exact: true }).fill('Bass 2');
   let previous = await page.evaluate(() => window.__storageChecks.length);
   await page.getByTestId('check-storage').click(); await awaitNewCheck(page, previous);
-  await expect(dialog(page).getByRole('textbox', { name: 'Search files', exact: true })).toHaveValue('Bass 2');
+  await expect(dialog(page).getByRole('searchbox', { name: 'Search files', exact: true })).toHaveValue('Bass 2');
   expect(await snapshot(page, fixture)).toEqual(before);
 
   // An over-quota reading is a report to inspect, not a manufactured zero-byte
