@@ -9,7 +9,7 @@ const repository = fileURLToPath(new URL('..', import.meta.url));
 // they do not request a microphone or represent physical-device verification.
 export default defineConfig({
   testDir: '.',
-  testMatch: ['cross-browser.spec.mjs', 'track-editor.spec.mjs', 'recording-master.spec.mjs', 'transport.spec.mjs'],
+  testMatch: ['cross-browser.spec.mjs', 'storage-diagnostics.spec.mjs', 'track-editor.spec.mjs', 'recording-master.spec.mjs', 'transport.spec.mjs'],
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),

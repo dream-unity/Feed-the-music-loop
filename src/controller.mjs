@@ -36,7 +36,7 @@ export class StudioController {
     this.lastCheckpointAt = 0; this.lastUnderrunAt = 0; this.urls = new Set(); this.wakeLock = null; this.exportAbort = null;
     this.pausedMedia = []; this.pausedTransport = false; this.resetTransportOnInit = false;
     this.state = { project: null, projects: [], selectedTrackId: null, view: 'build', playing: false, paused: false, playbackOffsets: {}, playbackBaselines: {}, capture: null, status: 'Opening studio…', micEnabled: false, monitor: false,
-      inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
+      inputLevel: 0, outputLevel: 0, transportFrame: 0, sampleRate: 48000, storage: {}, storageDiagnostic: null, storageChecking: false, storageWriteError: null, busy: true, undoAvailable: false, redoAvailable: false, exporting: false,
       capabilities: { audio: !!(globalThis.AudioContext || globalThis.webkitAudioContext), microphone: !!globalThis.navigator?.mediaDevices?.getUserMedia }, error: null,
       recovered: [], discarded: [], damagedAudio: [], readonly: false, readonlyReason: null, recoveryRequired: false, deletionPending: false, downloads: [], preview: null, audition: null, exportProgress: null, activeSectionId: null, queuedSectionId: null,
       micDevices: [], preferredDeviceId: '', micChanging: false, recentRecording: null, trackEditor: null, mixMode: 'layers', recordingMix: null, recordingSources: [], recordingMixOutputs: [], remixPerformanceId: null };
@@ -44,7 +44,7 @@ export class StudioController {
     this.storage.addEventListener('progress', e => this.storageProgress(e.detail));
     this.storage.addEventListener('error', e => {
       if (['STORAGE_WORKER_FAILED', 'STORAGE_MESSAGE_ERROR'].includes(e.detail.code)) this.storageFailed(e.detail.message).catch(error => this.handleError(error));
-      else { this.state.status = 'Recording interrupted'; this.handleError(new Error(e.detail.message)); }
+      else { this.state.status = 'Recording interrupted'; this.handleError(Object.assign(new Error(e.detail.message), { name: e.detail.name || 'Error', code: e.detail.code, operation: e.detail.operation, assetId: e.detail.assetId })); }
     });
   }
   render() {
@@ -65,7 +65,7 @@ export class StudioController {
     return this;
   }
   assertWritable() { if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish before changing the project.'); if (this.fileDeletion?.committing) throw new Error('Wait for file deletion to finish before editing.'); if (this.state.storageFailed) throw new Error('Reopen the studio to recover saved recordings before continuing.'); if (this.state.readonly) throw new Error(this.state.readonlyReason || 'This project is open in another tab. Close that tab before editing here, or export a backup.'); if(this.pending?.budgetReached) throw new Error('This performance is finishing at its arrangement limit. Wait for it to save before editing.'); }
-  assertIdle() { if (this.pending || this.state.capture) throw new Error('Finish or cancel the recording before changing projects or exporting.'); }
+  assertIdle() { if (this.state.storageChecking) throw new Error('Wait for the storage check to finish before starting another storage operation.'); if (this.pending || this.state.capture) throw new Error('Finish or cancel the recording before changing projects or exporting.'); }
   async openProject(projectId = null, supplied = null) {
     this.assertIdle();
     if (this.trackEditOperation) throw new Error('Wait for the audio edit to finish before opening another project.');
@@ -354,6 +354,7 @@ export class StudioController {
     }).catch(() => {});
   }
   async startCapture(kind, legacyCycles) {
+    if (this.state.storageChecking) throw new Error('Wait for the storage check to finish before recording.');
     this.assertWritable(); if (this.pending || this.state.capture) throw new Error('A recording is already active.');
     if (this.state.busy) throw new Error('Finish the current operation before recording.');
     if (this.state.exporting) throw new Error('Finish or cancel the export before recording.');
@@ -371,7 +372,7 @@ export class StudioController {
       const available = normalizedStorageCapacity(this.state.storage);
       // An origin quota estimate is advisory, and can lag behind deletions.
       // The actual journal writes decide whether recording can continue.
-      if (available.low) this.ui.notify(`The browser estimates ${available.remaining.toLocaleString('en-US')} bytes remaining for this site. Open Storage at the top right to review files and free space. Recording will continue while saving is possible.`, 'info');
+      if (available.low && this.state.storageDiagnostic?.status !== 'passed') this.ui.notify('The browser reports little or no storage headroom. This estimate does not establish how much recording space is left. Recording will continue while saving succeeds; Storage → Check storage can test a small write.', 'info');
       const project = this.state.project, captureId = id('capture-'), assetId = id('audio-'), masterAssetId = kind === 'vocal' ? id('master-') : null;
       const role = kind === 'vocal' ? 'lead' : project.tracks.length === 0 ? 'beat' : project.tracks.length === 1 ? 'bass' : 'harmony';
       const label = kind === 'mix' ? nextLoopRecordingName(project) : kind === 'vocal' ? `Vocal take ${project.takes.length + 1}` : `${role[0].toUpperCase()}${role.slice(1)} ${project.tracks.length + 1}`;
@@ -1190,6 +1191,7 @@ export class StudioController {
     }
   }
   async manageStorage() {
+    if (this.storageCheckOperation) return this.storageCheckOperation.promise;
     this.assertIdle();
     if (this.state.exporting || this.fileDeletion?.committing) throw new Error('Finish the current operation before managing storage.');
     const token = this.generation, inventory = await this.getStorageInventory();
@@ -1212,8 +1214,42 @@ export class StudioController {
     });
     if (token !== this.generation) return;
     this.state.storageProjects = rows;
+    // A failed cleanup stays visible and must not accumulate more test files.
+    const previous = this.state.storageDiagnostic;
+    if (previous?.cleanupComplete === false && previous.temporaryAssetId
+      && inventory.audioComplete !== false && !inventory.files.some(file => file.id === previous.temporaryAssetId || file.assetId === previous.temporaryAssetId)) this.state.storageDiagnostic = null;
     this.ui.showStorageManager?.(rows, this.state.storage, inventory);
     this.render();
+    if (typeof this.storage.checkStorageWrite === 'function' && this.state.storageDiagnostic?.cleanupComplete !== false) await this.checkStorageWrite();
+  }
+  async checkStorageWrite() {
+    if (this.storageCheckOperation) return this.storageCheckOperation.promise;
+    this.assertIdle();
+    if (this.state.busy || this.state.exporting || this.fileDeletion || this.projectDeletion || this.trackEditOperation || this.recordingMasterOperation || this.state.storageFailed) throw new Error('Finish the current operation before checking storage.');
+    if (this.state.storageDiagnostic?.cleanupComplete === false) throw new Error('The previous storage check left a temporary test file. Refresh Storage and remove that temporary file before checking again. Your recordings do not need to be deleted.');
+    const operation = {};
+    this.storageCheckOperation = operation; this.state.storageChecking = true;
+    this.render(); this.ui.updateStorageDiagnostics?.(this.state.storage, this.state.storageDiagnostic, true);
+    operation.promise = (async () => {
+      let result;
+      try {
+        if (typeof this.storage.checkStorageWrite !== 'function') throw new Error('This version cannot run a storage write check. Reopen the updated studio.');
+        result = await this.storage.checkStorageWrite();
+        if (!result || !['passed', 'quota-exceeded', 'failed'].includes(result.status)) throw new Error('The storage check did not return a verified result.');
+        if (result.status === 'passed' && (result.cleanupComplete !== true || result.bytesVerified !== result.testedBytes || !(result.testedBytes > 0))) result = { ...result, status: 'failed', error: { name: 'Error', code: 'STORAGE_CHECK_UNVERIFIED', message: 'The storage check did not verify both the saved bytes and cleanup.' } };
+      } catch (error) {
+        result = { checkedAt: Date.now(), backend: this.state.storage.backend, status: error.name === 'QuotaExceededError' || error.code === 'QUOTA_EXCEEDED' ? 'quota-exceeded' : 'failed', testedBytes: 0, bytesVerified: 0,
+          cleanupComplete: error.code === 'STORAGE_BUSY' ? true : null, error: { name: error.name || 'Error', code: error.code || 'STORAGE_CHECK_FAILED', message: error.message || String(error) } };
+      } finally {
+        if (this.storageCheckOperation === operation) {
+          this.storageCheckOperation = null; this.state.storageChecking = false;
+        }
+      }
+      this.state.storageDiagnostic = result;
+      this.render(); this.ui.updateStorageDiagnostics?.(this.state.storage, result, false);
+      return result;
+    })();
+    return operation.promise;
   }
   async getStorageInventory() {
     const [audio, caches] = await Promise.all([this.storage.getStorageInventory(), listStudioCacheFiles()]);
@@ -1583,6 +1619,7 @@ export class StudioController {
     }) };
   }
   async handle(action = {}) {
+    if (this.state.storageChecking && !['check-storage', 'refresh-storage', 'manage-storage', 'play', 'pause', 'stop', 'view', 'help', 'dismiss-error', 'close-preview', 'media-playback', 'cancel-export'].includes(action.type)) throw new Error('Wait for the storage check to finish before starting another storage operation.');
     if (action.type === 'media-playback') { this.pausedMedia = []; this.pausedTransport = false; this.state.paused = false; this.render(); return; }
     if (this.recordingMasterOperation && !['cancel-recording-master', 'cancel-export', 'stop-recording-master-preview', 'dismiss-error', 'view', 'close-preview', ...(this.recordingMasterOperation.kind === 'preview' ? ['recording-master-setting', 'recording-master-reset', 'recording-master-name', 'set-recording-preview-start', 'select-recording', 'open-recording-mix', 'mix-mode', 'stop'] : [])].includes(action.type)) throw new Error('Finish or cancel the recording master before starting another operation.');
     if (this.trackEditOperation && !['editor-close', 'editor-stop-preview', 'stop', 'dismiss-error'].includes(action.type)) throw new Error('Wait for the audio edit to finish, or close the editor to cancel.');
@@ -1691,7 +1728,9 @@ export class StudioController {
       case 'export-recovered': return this.downloadAsset(action.id, 'Recovered recording');
       case 'export-damaged-audio': return this.downloadDamagedAudio(action.id);
       case 'persist': { this.state.storage = { ...this.state.storage, ...await this.storage.requestPersistence() }; this.ui.notify(this.state.storage.persistent ? 'Persistent storage granted. Keep backups as well.' : 'The browser did not grant persistent storage. Project backups are still available.', 'info'); this.render(); return; }
-      case 'manage-storage': return this.manageStorage();
+      case 'manage-storage':
+      case 'refresh-storage': return this.manageStorage();
+      case 'check-storage': return this.checkStorageWrite();
       case 'download-storage-file': return this.downloadStorageFile(action.fileKey);
       case 'delete-storage-file': return this.deleteStorageFile(action.fileKey);
       case 'delete-project': return this.deleteProject(action.id);
@@ -1910,5 +1949,11 @@ export class StudioController {
     engine.send('audition', { take: { ...take, mix: take.mix || roleMix('lead') }, startFrame: take.startFrame, tailFrames: this.state.sampleRate * 2 });
     this.state.status = 'Loading live mix audition…'; this.keepAwake(); this.render();
   }
-  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return; this.state.error = error.message || String(error); if (!this.trackEditOperation && this.recordingMasterOperation?.kind !== 'render') this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
+  handleError(error) { if (isAbort(error)) return; console.error(error); if (this.state.storageFailed) return;
+    if (error.name === 'QuotaExceededError' || error.code === 'QUOTA_EXCEEDED') {
+      this.state.storageWriteError = { checkedAt: Date.now(), name: error.name, code: error.code || 'QUOTA_EXCEEDED', operation: error.operation || null, assetId: error.assetId || null, message: error.message };
+      this.state.storageDiagnostic = null;
+      this.ui.updateStorageDiagnostics?.(this.state.storage, null, this.state.storageChecking);
+    }
+    this.state.error = error.message || String(error); if (!this.trackEditOperation && this.recordingMasterOperation?.kind !== 'render') this.state.busy = false; this.ui.notify(this.state.error, 'error'); this.render(); }
 }

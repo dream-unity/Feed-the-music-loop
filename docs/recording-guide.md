@@ -114,6 +114,12 @@ When **Studio update ready** appears, finish and save your recording, close ever
 
 ### Downloading and retained recordings
 
+Open **Storage** in the top right to see measured studio files and check saving. The browser's usage and allowance are estimates for the whole website origin, which can include other apps at the same address. They do not measure free device storage. A zero or inconsistent estimate is shown as **Unknown**, rather than claiming that no recording is possible.
+
+Opening Storage or choosing **Check storage** writes one temporary 128 KiB stereo page through the same storage backend as recordings, reads it back and removes it. A pass confirms that this small write worked at the displayed time; it does not establish total remaining capacity or guarantee a long recording. The check never deletes your recordings. **Refresh** reloads the file inventory and browser estimates and runs the check again. Recording is not blocked by an estimate alone.
+
+If the browser refuses the write, the result shows the actual error. Download your remaining recording or a project backup before troubleshooting browser or device storage. Do not clear site data to fix an estimate: that would delete locally stored recordings. If cleanup of the temporary test file fails, Storage identifies that file and stops further checks until it is removed; your own recordings need not be deleted for that cleanup.
+
 Use the WAV control beside the recording you want. Saved edited mixes are in **Song → Saved mixes**, with their own WAV and delete controls. The studio does not display a running download history.
 
 Audio retained separately from your current loops and takes is available through **Storage → All studio files**. Download a recording there, or choose **Keep in project** to restore it. Removing the workspace file list does not delete any saved audio. Exceptionally long WAV exports open a dialog containing only that recording’s numbered parts.

@@ -36,7 +36,7 @@ writeFileSync(audioPath, wav);
 
 export default defineConfig({
   testDir: '.',
-  testMatch: ['browser.spec.mjs', 'studio-lifecycle.spec.mjs', 'storage-fallback.spec.mjs', 'loop-recording.spec.mjs', 'storage-manager.spec.mjs', 'track-editor.spec.mjs', 'recording-master.spec.mjs', 'transport.spec.mjs'],
+  testMatch: ['browser.spec.mjs', 'studio-lifecycle.spec.mjs', 'storage-fallback.spec.mjs', 'loop-recording.spec.mjs', 'storage-manager.spec.mjs', 'storage-diagnostics.spec.mjs', 'track-editor.spec.mjs', 'recording-master.spec.mjs', 'transport.spec.mjs'],
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),

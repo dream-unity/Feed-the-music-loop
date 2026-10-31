@@ -207,6 +207,9 @@ test('the exact deployed HTTPS studio records, loops, saves and exports real aud
     const storageDialog = page.getByRole('dialog', { name: 'Storage', exact: true });
     await expect(storageDialog).toBeVisible();
     await expect(storageDialog.locator('[data-testid=storage-remaining]')).toBeVisible();
+    await expect(storageDialog.getByTestId('storage-write-status')).toHaveAttribute('data-status', 'passed');
+    await expect(storageDialog.getByTestId('check-storage')).toBeEnabled();
+    await expect(storageDialog).not.toContainText(/About 0s|0 B available/i);
     const capturedFile = storageDialog.locator('.storage-file-row').filter({ hasText: 'Loop recording 1' });
     await expect(capturedFile).toHaveCount(1);
     expect(Number(await capturedFile.getAttribute('data-file-bytes'))).toBeGreaterThan(0);

@@ -75,3 +75,13 @@ test('storage inventory and reviewed permanent file deletion have explicit RPCs'
   assert.equal(worker.messages[1].message.method, 'deleteStoredFile'); assert.deepEqual(worker.messages[1].message.args, [file]);
   worker.respond(1, { deleted: true }); assert.deepEqual(await deletion, { deleted: true });
 });
+
+test('the bounded write-check RPC preserves verified bytes and cleanup details', async () => {
+  const { worker, client } = fixture(), requested = client.checkStorageWrite();
+  assert.equal(worker.messages[0].message.method, 'checkStorageWrite'); assert.deepEqual(worker.messages[0].message.args, []);
+  const result = { checkedAt: 123, backend: 'opfs', status: 'failed', testedBytes: 131072, bytesVerified: 131072, cleanupComplete: false, temporaryAssetId: 'storage-check-unique', cleanupError: { name: 'Error', code: 'Error', message: 'File is locked' } };
+  worker.respond(0, result); assert.deepEqual(await requested, result);
+  const busy = client.checkStorageWrite();
+  worker.respond(1, undefined, { name: 'StorageError', code: 'STORAGE_BUSY', message: 'Finish recording or saving before checking storage.' });
+  await assert.rejects(busy, { name: 'StorageError', code: 'STORAGE_BUSY' });
+});

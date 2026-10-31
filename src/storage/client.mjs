@@ -46,6 +46,7 @@ export class StorageClient extends EventTarget {
   purgeProject(id, options = {}) { return this.rpc('purgeProject', [id, options]); }
   projectUsage(id) { return this.rpc('projectUsage', [id]); }
   getStorageInventory() { return this.rpc('getStorageInventory'); }
+  checkStorageWrite() { return this.rpc('checkStorageWrite'); }
   deleteStoredFile(file) { return this.rpc('deleteStoredFile', [file]); }
   beginAsset(metadata) { return this.rpc('beginAsset', [metadata]); }
   finishAsset(id, options = {}) { return this.rpc('finishAsset', [id, options]); }

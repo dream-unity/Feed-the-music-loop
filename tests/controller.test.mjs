@@ -1676,7 +1676,7 @@ for (const capacity of [{ usage: 1, quota: 1 }, { usage: null, quota: 500 }, { u
   const f = loopMixFixture(); f.controller.state.storage = capacity; f.storage.estimate = async () => capacity;
   await f.controller.startCapture('mix', 0);
   assert.equal(f.storage.beginCalls.length, 1); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
-  assert.equal(f.ui.notifications.some(item => /browser estimates/.test(item.message)), Number.isFinite(capacity.usage) && capacity.usage >= 0 && capacity.quota > 0);
+  assert.equal(f.ui.notifications.some(item => /browser reports little or no storage headroom/.test(item.message)), Number.isFinite(capacity.usage) && capacity.usage >= 0 && capacity.quota > 0);
 });
 test('unavailable quota estimation does not block recording but an actual storage write failure does', async () => {
   const f = loopMixFixture(); f.storage.estimate = async () => { throw new Error('Estimate unavailable'); };
@@ -1694,6 +1694,72 @@ function storageFileFixture() {
   f.ui.showStorageManager = (...args) => { f.manager = args; };
   return f;
 }
+const successfulStorageCheck = () => ({ checkedAt: Date.now(), backend: 'opfs', status: 'passed', testedBytes: 131072, bytesVerified: 131072, cleanupComplete: true });
+test('Storage opening and Refresh check actual writes without replacing raw estimates or changing the project', async () => {
+  const f = storageFileFixture(), before = clone(f.controller.state.project);
+  let capacity = { usage: 100, quota: 100 }, checks = 0;
+  f.storage.estimate = async () => capacity;
+  f.storage.checkStorageWrite = async () => { checks++; return successfulStorageCheck(); };
+  await f.controller.handle({ type: 'manage-storage' });
+  assert.equal(checks, 1); assert.equal(f.controller.state.storageDiagnostic.status, 'passed');
+  assert.equal(f.controller.state.storage.usage, 100); assert.equal(f.controller.state.storage.quota, 100);
+  assert.deepEqual(f.controller.state.project, before); assert.equal(f.storage.saved.length, 0);
+  capacity = { usage: 100, quota: 1000000000 };
+  await f.controller.handle({ type: 'refresh-storage' });
+  assert.equal(checks, 2); assert.equal(f.manager[1].quota, capacity.quota);
+  assert.deepEqual(f.controller.state.project, before); assert.equal(f.storage.assets.size, 1);
+});
+test('a storage check is single-flight, blocks new writes briefly and updates a closed dialog without reopening it', async () => {
+  const f = storageFileFixture(), gate = deferred(); let checks = 0, opens = 0, open = true;
+  f.ui.showStorageManager = () => { opens++; open = true; };
+  const updates = []; f.ui.updateStorageDiagnostics = (...args) => updates.push(args);
+  f.storage.checkStorageWrite = async () => { checks++; return gate.promise; };
+  const first = f.controller.checkStorageWrite();
+  const second = f.controller.checkStorageWrite();
+  assert.equal(checks, 1); assert.equal(f.controller.state.storageChecking, true);
+  for (const action of ['add-loop', 'import-audio', 'delete-storage-file', 'export-project']) await assert.rejects(f.controller.handle({ type: action }), /storage check/);
+  await assert.rejects(f.controller.startCapture('mix', 0), /storage check/);
+  open = false;
+  const result = successfulStorageCheck(); gate.resolve(result);
+  assert.equal(await first, result); assert.equal(await second, result);
+  assert.equal(f.controller.state.storageChecking, false); assert.equal(opens, 0); assert.equal(open, false);
+  assert.equal(updates.at(-1)[1], result); assert.equal(updates.at(-1)[2], false);
+  f.controller.state.storage = { usage: 100, quota: 100 };
+  await f.controller.startCapture('mix', 0);
+  assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+  assert.equal(f.ui.notifications.some(item => /little or no storage headroom/.test(item.message)), false);
+});
+test('a refused storage check releases controls and does not turn a probe failure into a recording prohibition', async () => {
+  const f = loopMixFixture(); f.storage.checkStorageWrite = async () => { throw Object.assign(new Error('Write refused'), { name: 'QuotaExceededError' }); };
+  const result = await f.controller.checkStorageWrite();
+  assert.equal(result.status, 'quota-exceeded'); assert.equal(result.cleanupComplete, null);
+  assert.equal(result.error.name, 'QuotaExceededError'); assert.equal(f.controller.state.storageChecking, false);
+  assert.equal(f.controller.state.readonly, false); assert.equal(f.controller.state.storageFailed, undefined);
+  await f.controller.startCapture('mix', 0); assert.ok(f.engine.commands.some(command => command.type === 'arm'));
+});
+test('failed diagnostic cleanup prevents repeated probes until its own leftover is confirmed removed', async () => {
+  const f = storageFileFixture(); let checks = 0;
+  f.storage.assets.set('storage-check-leftover', { id: 'storage-check-leftover', kind: 'diagnostic', frames: 16384, channels: 2 });
+  f.storage.checkStorageWrite = async () => { checks++; return { ...successfulStorageCheck(), cleanupComplete: false, temporaryAssetId: 'storage-check-leftover' }; };
+  const result = await f.controller.checkStorageWrite();
+  assert.equal(result.status, 'failed'); assert.equal(result.error.code, 'STORAGE_CHECK_UNVERIFIED');
+  await f.controller.manageStorage(); assert.equal(checks, 1);
+  await assert.rejects(f.controller.checkStorageWrite(), /temporary test file/);
+  f.storage.assets.delete('storage-check-leftover'); f.storage.checkStorageWrite = async () => { checks++; return successfulStorageCheck(); };
+  await f.controller.handle({ type: 'refresh-storage' });
+  assert.equal(checks, 2); assert.equal(f.controller.state.storageDiagnostic.status, 'passed');
+  assert.ok(f.storage.assets.has('backing'));
+});
+test('a recording write error retains its cause and invalidates an earlier successful storage check', () => {
+  const f = fixture(); f.controller.state.storageDiagnostic = successfulStorageCheck();
+  const event = new Event('error'); event.detail = { name: 'QuotaExceededError', code: 'QUOTA_EXCEEDED', operation: 'page', assetId: 'raw-1', message: 'Write refused' };
+  f.storage.dispatchEvent(event);
+  assert.equal(f.controller.state.storageDiagnostic, null);
+  assert.equal(f.controller.state.storageWriteError.name, 'QuotaExceededError');
+  assert.equal(f.controller.state.storageWriteError.code, 'QUOTA_EXCEEDED');
+  assert.equal(f.controller.state.storageWriteError.operation, 'page');
+  assert.equal(f.controller.state.storageWriteError.assetId, 'raw-1');
+});
 test('Storage lists files across projects and keeps unknown capacity unknown', async () => {
   const f = storageFileFixture(), other = createProject('Other song'); f.storage.projects.set(other.id, other);
   f.storage.assets.set('elsewhere', { id: 'elsewhere', projectId: other.id, name: 'Other vocal', frames: 10, channels: 1, status: 'complete' });

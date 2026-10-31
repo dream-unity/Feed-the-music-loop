@@ -1,6 +1,7 @@
 import { PAGE_FRAMES, MAX_FALLBACK_FILE_BYTES, MAX_ASSET_RANGE_BYTES, crc32, storageError, validId } from './core.mjs';
 import { removeAssetReferences } from '../storage-management.mjs';
 import { referencedAssets, touch } from '../project.mjs';
+import { runStorageWriteCheck } from './diagnostic.mjs';
 
 const DB_NAME = 'feed-the-music-loop-v1';
 const DIRECTORY_NAME = 'feed-the-music-loop-v1';
@@ -43,17 +44,23 @@ export class BrowserBackend {
   async init() {
     this.db = await openDatabase();
     this.db.onversionchange = () => this.db.close();
+    await this.probeFileBackend();
+    return { backend: this.backend, ...(await this.estimate()), persistenceSupported: Boolean(navigator.storage?.persist), locking: Boolean(navigator.locks) };
+  }
+  async probeFileBackend() {
     // Probe the actual worker-only sync handle, rather than assuming API support.
+    let probe = null, probeHandle = null, usable = false;
     try {
       const root = await navigator.storage.getDirectory();
       this.directory = await root.getDirectoryHandle(DIRECTORY_NAME, { create: true });
-      const probe = await this.directory.getFileHandle(`probe-${crypto.randomUUID()}`, { create: true });
-      const handle = await probe.createSyncAccessHandle();
-      handle.flush(); handle.close();
-      await this.directory.removeEntry(probe.name);
-      this.backend = 'opfs';
-    } catch { this.backend = 'indexeddb'; }
-    return { backend: this.backend, ...(await this.estimate()), persistenceSupported: Boolean(navigator.storage?.persist), locking: Boolean(navigator.locks) };
+      probe = await this.directory.getFileHandle(`probe-${crypto.randomUUID()}`, { create: true });
+      probeHandle = await probe.createSyncAccessHandle();
+      probeHandle.flush(); usable = true;
+    } catch {} finally {
+      try { probeHandle?.close(); } catch { usable = false; }
+      if (probe) try { await this.directory.removeEntry(probe.name); } catch {}
+    }
+    this.backend = usable ? 'opfs' : 'indexeddb';
   }
   async estimate() {
     // Estimates are optional and may be rounded or temporarily unavailable.
@@ -64,6 +71,7 @@ export class BrowserBackend {
     const bytes = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? value : null;
     return { usage: bytes(estimate.usage), quota: bytes(estimate.quota), persistent };
   }
+  checkStorageWrite() { return runStorageWriteCheck(this); }
   async withMaintenance(operation, { required = false } = {}) {
     if (!navigator.locks) {
       if (required) throw storageError('LOCKING_UNAVAILABLE', 'This browser cannot safely coordinate permanent file deletion across tabs. Open the studio in a browser with Web Locks support.');
@@ -142,18 +150,21 @@ export class BrowserBackend {
   }
   async createAsset(asset) {
     await this.lockProject(asset.projectId);
-    return this.withMaintenance(async () => {
-      // Keep the new physical file and its index together relative to orphan
-      // cleanup in other tabs. Recheck IDs after entering that same lock.
-      if (await this.getAsset(asset.id)) throw storageError('ASSET_EXISTS', 'An audio recording with this identifier already exists.');
-      if (asset.backend === 'opfs') {
-        const handle = await this.openHandle(asset);
-        handle.truncate(0); handle.flush();
-      }
-      const tx = transaction(this.db, 'assets', 'readwrite'), done = completion(tx);
-      try { await request(tx.objectStore('assets').add(asset)); await done; }
-      catch (error) { this.closeHandle(asset.id); throw error; }
-    });
+    return this.withMaintenance(() => this.createAssetRecord(asset));
+  }
+  // Caller must hold the storage-maintenance lease. The diagnostic uses this
+  // without inventing a project or recursively acquiring the same lease.
+  async createAssetRecord(asset) {
+    // Keep the new physical file and its index together relative to orphan
+    // cleanup in other tabs. Recheck IDs after entering that same lock.
+    if (await this.getAsset(asset.id)) throw storageError('ASSET_EXISTS', 'An audio recording with this identifier already exists.');
+    if (asset.backend === 'opfs') {
+      const handle = await this.openHandle(asset);
+      handle.truncate(0); handle.flush();
+    }
+    const tx = transaction(this.db, 'assets', 'readwrite'), done = completion(tx);
+    try { await request(tx.objectStore('assets').add(asset)); await done; }
+    catch (error) { this.closeHandle(asset.id); throw error; }
   }
   async openHandle(asset) {
     if (this.handles.has(asset.id)) return this.handles.get(asset.id);

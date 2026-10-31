@@ -73,6 +73,8 @@ Long-loop performance measurements and their limits are recorded separately in [
 
 ## A short check on your recording setup
 
+Storage diagnostics have fault tests for committed metadata, actual audio writes, read-back mismatches, quota errors, partial writes and cleanup failures. Browser regressions use one 5,834,752-byte recording with a zero or over-quota estimate: they check the original audio hash and project manifest before and after the diagnostic, record a new loops-only performance, reload it and verify its WAV. A separate native-backend quota refusal preserves the original WAV and full project backup. These tests distinguish the browser estimate from working storage; they cannot determine a user's remaining device capacity. Refresh is covered explicitly so it cannot silently leave stale values on screen.
+
 Before an important session:
 
 1. Use your intended browser, microphone and headphones. Connect the microphone and confirm that the input meter responds. Record and download a short test before investing time in a song.

@@ -15,6 +15,8 @@ async function openStorage(page) {
   }
   await expect(dialog(page)).toHaveAccessibleName('Storage');
   await expect(dialog(page).locator('[data-storage-summary]')).toBeVisible();
+  await expect(page.getByTestId('storage-write-status')).toHaveAttribute('data-status', 'passed');
+  await expect(page.getByTestId('check-storage')).toBeEnabled();
 }
 async function closeStorage(page) {
   await dialog(page).getByRole('button', { name: 'Done', exact: true }).click();
@@ -26,6 +28,8 @@ async function deleteFile(page, key) {
   await dialog(page).getByRole('button', { name: 'Delete permanently', exact: true }).click();
   await expect(dialog(page)).toHaveAccessibleName('Storage');
   await expect(fileRow(page, key)).toHaveCount(0);
+  await expect(page.getByTestId('storage-write-status')).toHaveAttribute('data-status', 'passed');
+  await expect(page.getByTestId('check-storage')).toBeEnabled();
 }
 async function screenshot(page, testInfo, name) {
   const path = testInfo.outputPath(`review-${name}.png`);

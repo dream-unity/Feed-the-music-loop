@@ -23,6 +23,7 @@ async function fixture() {
     async getAssetRange(asset, range) { this.rangeRequest = { id: asset.id, ...range }; return new Blob([new Uint8Array([1, 2, 3, 4])]); }
     async deleteAsset(id) { if (this.failDelete) throw new Error('Deletion failed'); this.assets.delete(id); for (const key of this.pages.keys()) if (key.startsWith(`${id}:`)) this.pages.delete(key); return { id, deleted: true }; }
     async getStorageInventory() { return { files: [...this.assets.values()].map(asset => ({ kind: 'asset', id: asset.id, bytes: asset.byteLength })) }; }
+    async checkStorageWrite() { this.writeChecks = (this.writeChecks || 0) + 1; return this.writeCheckResult || { checkedAt: 123, backend: this.backend, status: 'passed', testedBytes: 131072, bytesVerified: 131072, cleanupComplete: true }; }
     async deleteStoredFile(file, { onDetached } = {}) {
       this.deleteFileRequest = file;
       await this.lockProject();
@@ -85,9 +86,50 @@ test('metadata quota failure reports the durable prefix without hanging finaliza
   const sealed = port.messages.find((message) => message.type === 'sealed');
   assert.equal(sealed.frames, 91); assert.equal(sealed.finalized, false); assert.equal(sealed.status, 'interrupted');
   assert.equal(port.messages.find((message) => message.type === 'storage-error').code, 'QUOTA_EXCEEDED');
+  assert.equal(port.messages.find((message) => message.type === 'storage-error').name, 'QuotaExceededError');
+  assert.match(port.messages.find((message) => message.type === 'storage-error').message, /refused a storage write/);
+  assert.doesNotMatch(port.messages.find((message) => message.type === 'storage-error').message, /storage is full|checkpoint was saved/);
   const progress = messages.filter((message) => message.event === 'progress').at(-1).detail;
   assert.equal(progress.saved, false); assert.equal(progress.checkpointFrames, 91);
   assert.equal(backend.assets.get('asset-1').status, 'recording', 'no invented final commit');
+});
+
+test('storage write diagnostic refuses active recording and runs after its final seal', async () => {
+  const { rpc, backend } = await fixture();
+  await assert.rejects(rpc('checkStorageWrite'), { code: 'STORAGE_BUSY' });
+  assert.equal(backend.writeChecks, undefined);
+  await rpc('putPage', ['asset-1', 0, new Float32Array([.25, -.25]).buffer, 2, 1]);
+  await rpc('finishAsset', ['asset-1', { frames: 2 }]);
+  const before = structuredClone([...backend.assets]);
+  const result = await rpc('checkStorageWrite');
+  assert.equal(result.status, 'passed'); assert.equal(result.bytesVerified, 131072); assert.equal(backend.writeChecks, 1);
+  assert.deepEqual([...backend.assets], before);
+});
+
+test('old unfinished metadata does not masquerade as an active writer during diagnosis', async () => {
+  const { rpc, backend } = await fixture();
+  await rpc('finishAsset', ['asset-1', { frames: 0 }]);
+  const old = { ...backend.assets.get('asset-1'), id: 'old-unfinished', status: 'recording' };
+  backend.assets.set(old.id, old);
+  assert.equal((await rpc('getAsset', [old.id])).status, 'recording');
+  assert.equal((await rpc('checkStorageWrite')).status, 'passed');
+  assert.equal(backend.assets.get(old.id).status, 'recording', 'the health check does not recover or edit old audio');
+});
+
+test('failed sealing ends the active-writer guard while keeping durable recovery metadata', async () => {
+  const { rpc, backend } = await fixture();
+  backend.failSeal = true;
+  await assert.rejects(rpc('finishAsset', ['asset-1', { frames: 0 }]), { name: 'QuotaExceededError', code: 'QUOTA_EXCEEDED' });
+  assert.equal(backend.assets.get('asset-1').status, 'recording');
+  assert.equal((await rpc('checkStorageWrite')).status, 'passed');
+});
+
+test('diagnostic quota results remain scoped to the check and do not emit recording failure events', async () => {
+  const { rpc, backend, messages } = await fixture();
+  await rpc('finishAsset', ['asset-1', { frames: 0 }]);
+  backend.writeCheckResult = { checkedAt: 456, backend: 'opfs', status: 'quota-exceeded', testedBytes: 131072, bytesVerified: 0, cleanupComplete: true, error: { name: 'QuotaExceededError', code: 'QUOTA_EXCEEDED', message: 'Write refused' } };
+  assert.deepEqual(await rpc('checkStorageWrite'), backend.writeCheckResult);
+  assert.equal(messages.some(message => message.event === 'error'), false);
 });
 test('a future page is a retryable miss, not a fatal recording error', async () => {
   const { send, port } = await fixture();
