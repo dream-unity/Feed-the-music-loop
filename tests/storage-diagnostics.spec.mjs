@@ -17,6 +17,9 @@ async function environment(page, context, { estimate, failDiagnosticWrite = fals
     const pending = [];
     const hold = event => { pending.push(event.data); event.stopImmediatePropagation(); };
     self.addEventListener('message', hold);
+    // WebKit does not expose StorageManager on WorkerNavigator. Substitute
+    // only estimate(); absent OPFS APIs still choose the real IDB backend.
+    if (!navigator.storage) Object.defineProperty(navigator, 'storage', { configurable: true, value: {} });
     Object.defineProperty(navigator.storage, 'estimate', { configurable: true, value: async () => {
       const capacityPath = './__ci-storage-capacity.json';
       const response = await fetch(new URL(capacityPath, self.location.href), { cache: 'no-store' });
@@ -67,26 +70,40 @@ async function seed(page, context) {
   await context.route('**/__ci-storage-recording.html', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>One saved recording</title>' }));
   await page.goto('./__ci-storage-recording.html');
   return page.evaluate(async ({ frames, rate }) => {
+    const stage = async (label, operation) => {
+      window.__storageSeedStage = label;
+      let timer;
+      try {
+        return await Promise.race([operation(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Storage fixture timed out at: ${label}`)), 15_000);
+        })]);
+      } finally { clearTimeout(timer); }
+    };
     const storagePath = './src/storage/client.mjs', projectPath = './src/project.mjs';
-    const { StorageClient } = await import(storagePath);
-    const { createProject, createTrack, validateProject, PAGE_FRAMES } = await import(projectPath);
+    const { StorageClient } = await stage('load storage client', () => import(storagePath));
+    const { createProject, createTrack, validateProject, PAGE_FRAMES } = await stage('load project module', () => import(projectPath));
     const storage = new StorageClient(), project = createProject('Single recording storage check', rate);
     const id = `retained_bass_${crypto.randomUUID()}`;
+    let initialized = false;
     try {
-      await storage.init(); await storage.saveProject(project);
-      await storage.beginAsset({ id, projectId: project.id, sampleRate: rate, channels: 1, kind: 'loop', name: 'Bass 2' });
+      await stage('initialize native storage', () => storage.init()); initialized = true;
+      await stage('save fixture project', () => storage.saveProject(project));
+      await stage('begin fixture recording', () => storage.beginAsset({ id, projectId: project.id, sampleRate: rate, channels: 1, kind: 'loop', name: 'Bass 2' }));
       for (let start = 0, index = 0; start < frames; start += PAGE_FRAMES, index++) {
         const count = Math.min(PAGE_FRAMES, frames - start);
         const samples = Float32Array.from({ length: count }, (_, offset) => .15 * Math.sin(2 * Math.PI * 196 * (start + offset) / rate));
-        await storage.putPage(id, index, samples.buffer, count, 1);
+        await stage(`write fixture audio page ${index}`, () => storage.putPage(id, index, samples.buffer, count, 1));
       }
-      await storage.finishAsset(id, { frames });
+      await stage('seal fixture recording', () => storage.finishAsset(id, { frames }));
       project.tracks.push(createTrack({ assetId: id, name: 'Bass 2', role: 'bass', frames, peaks: Array(64).fill(.15) }));
       project.baseFrames = frames;
-      await storage.saveProject(validateProject(project));
+      await stage('save fixture track', () => storage.saveProject(validateProject(project)));
       localStorage.setItem('fml:last-project', project.id);
       return { id, projectId: project.id };
-    } finally { await storage.dispose(); }
+    } finally {
+      try { if (initialized) await stage('close fixture storage', () => storage.dispose()); }
+      finally { storage.worker?.terminate(); }
+    }
   }, { frames: ORIGINAL_FRAMES, rate: RATE });
 }
 
