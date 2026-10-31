@@ -9,6 +9,9 @@ const portFences = new WeakMap();
 const releasedProjects = new Set();
 const deletedAssets = new Set();
 const pendingReads = new Map();
+// Only assets newly begun in this worker are active writers. Old unfinished
+// recordings loaded for recovery must not prevent diagnosing storage.
+const activeWrites = new Set();
 function trackRead(id) {
   const ticket = { deleted: false };
   if (!pendingReads.has(id)) pendingReads.set(id, new Set());
@@ -20,6 +23,7 @@ function finishRead(id, ticket) {
   if (!tickets?.size) pendingReads.delete(id);
 }
 function markDeleted(id) {
+  activeWrites.delete(id);
   for (const ticket of pendingReads.get(id) || []) ticket.deleted = true;
   deletedAssets.delete(id); deletedAssets.add(id);
   if (deletedAssets.size > 2048) deletedAssets.delete(deletedAssets.values().next().value);
@@ -28,7 +32,7 @@ let initializing;
 let disposed = false;
 const initialize = () => initializing ||= backend.init();
 const serializeError = (error) => error?.name === 'QuotaExceededError'
-  ? { name: error.name, code: 'QUOTA_EXCEEDED', message: 'Browser storage is full. The checkpointed part of your recording is preserved. Export a backup and free space before recording again.' }
+  ? { name: error.name, code: 'QUOTA_EXCEEDED', message: 'The browser refused a storage write because of its storage allowance. Open Storage to check saving and review files. This does not measure free space on your device.' }
   : { name: error?.name || 'Error', code: error?.code || error?.name || 'STORAGE_ERROR', message: error?.message || String(error) };
 const notify = (event, detail) => self.postMessage({ type: 'event', event, detail });
 const progress = (asset, extra = {}) => notify('progress', { assetId: asset.id, projectId: asset.projectId, frames: asset.frames, checkpointFrames: asset.checkpointFrames, pageCount: asset.pageCount, status: asset.status, saved: asset.status !== 'recording', ...queue.stats, ...extra });
@@ -40,9 +44,11 @@ async function assertReadable(id, ticket) {
 
 async function seal(id, options) {
   await assertReadable(id);
-  const asset = await journal.finish(id, options);
-  progress(asset, { sealed: true, finalized: true, error: asset.error });
-  return asset;
+  try {
+    const asset = await journal.finish(id, options);
+    progress(asset, { sealed: true, finalized: true, error: asset.error });
+    return asset;
+  } finally { activeWrites.delete(id); }
 }
 
 const methods = {
@@ -57,6 +63,10 @@ const methods = {
   deleteProject: ([id]) => { validId(id, 'Project'); return backend.deleteProject(id); },
   projectUsage: ([id]) => { validId(id, 'Project'); return backend.projectUsage(id); },
   getStorageInventory: () => backend.getStorageInventory(),
+  checkStorageWrite: () => {
+    if (activeWrites.size || queue.stats.pendingWrites) throw storageError('STORAGE_BUSY', 'Finish recording or saving before checking storage.');
+    return backend.checkStorageWrite();
+  },
   deleteStoredFile: async ([file]) => {
     return backend.deleteStoredFile(file, { onDetached(id) {
       if (!id) return;
@@ -89,7 +99,7 @@ const methods = {
       if (deleting) for (const [assetId, asset] of journal.assets) if (asset.projectId === id) { journal.assets.delete(assetId); journal.failures.delete(assetId); }
     }
   },
-  beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); releasedProjects.delete(asset.projectId); deletedAssets.delete(asset.id); return asset; },
+  beginAsset: async ([metadata]) => { const asset = await journal.begin(metadata); activeWrites.add(asset.id); releasedProjects.delete(asset.projectId); deletedAssets.delete(asset.id); return asset; },
   finishAsset: ([id, options]) => seal(id, options),
   getAsset: async ([id]) => ({ ...await journal.get(id) }),
   listAssets: ([projectId]) => backend.listAssets(projectId),
